@@ -1,0 +1,9 @@
+# Force LF on shell scripts so they execute correctly on Linux when checked
+# out on Windows. Go source files conventionally use LF too.
+*.sh   text eol=lf
+*.go   text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
+
+# PowerShell scripts work better with CRLF on Windows.
+*.ps1  text eol=crlf
