@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/jay-day/rmgk-lobby/internal/geo"
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
 	"github.com/jay-day/rmgk-lobby/internal/state"
 )
@@ -135,13 +136,18 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		return errInvalidUsername
 	}
 
+	// Resolve a coarse region bucket from the client's public IP. This is
+	// the only place IPs touch geo data; the result that ships to other
+	// clients in PRESENCE is just the bucket name, never a country or city.
+	region := geo.RegionFromIP(c.ip)
+
 	user := &state.User{
 		ID:       h.state.NextUserID(),
 		Username: req.Username,
 		State:    state.UserStateIdle,
 		PublicIP: c.ip,
 		LocalIP:  req.LocalIP,
-		Region:   "us-east", // TODO geoIP from c.ip
+		Region:   region,
 		JoinedAt: time.Now(),
 		LastSeen: time.Now(),
 		Send:     c.send,
