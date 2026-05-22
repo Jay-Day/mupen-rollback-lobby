@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -200,7 +201,7 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 	case protocol.TypeRoomStart:
 		h.handleRoomStart(c, env)
 	case protocol.TypePingProbeRequest:
-		// TODO
+		h.handlePingProbeRequest(c, env)
 	case protocol.TypeMatchConnected:
 		h.handleMatchConnected(c, env)
 	case protocol.TypeMatchPunchFailed:
@@ -214,6 +215,27 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 	default:
 		slog.Debug("unknown message", "type", env.Type, "user", c.user.ID)
 	}
+}
+
+// handlePingProbeRequest looks up the target user's last-known public UDP
+// endpoint (registered via the anchor service) and ships it back so the
+// requester can fire UDP probes directly. Returns an empty endpoint when
+// the target either isn't registered or hasn't yet sent an anchor packet;
+// the client treats that as "ping unavailable".
+func (h *Hub) handlePingProbeRequest(c *Client, env protocol.Envelope) {
+	var req protocol.PingProbeRequestPayload
+	if err := json.Unmarshal(env.Data, &req); err != nil {
+		return
+	}
+
+	resp := protocol.PingProbeReplyPayload{TargetUserID: req.TargetUserID}
+	if target := h.state.GetUser(req.TargetUserID); target != nil {
+		ip, port := target.GetUDPEndpoint()
+		if ip != "" && port != 0 {
+			resp.TargetEndpoint = fmt.Sprintf("%s:%d", ip, port)
+		}
+	}
+	c.sendEnvelope(protocol.TypePingProbeReply, env.ID, resp)
 }
 
 func (h *Hub) handleHeartbeat(c *Client, env protocol.Envelope) {
