@@ -148,6 +148,20 @@ func (h *Hub) quickMatchAttempt(searcher *state.User) {
 	h.matchmaker.remove(searcher.ID)
 	h.matchmaker.remove(opponentID)
 
+	// Tell both clients they've stopped searching. Without this the client's
+	// Quick Match button stays in its "Cancel" toggle state for the rest of the
+	// session (it only clears on QUICK_MATCH_STATUS{searching:false} or
+	// disconnect), so after the game ends and they leave the room, clicking
+	// Quick Match sends a cancel instead of a new join and they can't requeue.
+	for _, uid := range []uint64{searcher.ID, opponentID} {
+		if cl := h.getClient(uid); cl != nil {
+			cl.sendEnvelope(protocol.TypeQuickMatchStatus, "", protocol.QuickMatchStatusPayload{
+				Searching: false,
+				QueueSize: h.matchmaker.size(),
+			})
+		}
+	}
+
 	// Build the room with the earlier-enqueued player as host.
 	hostUser, joinerUser := opponent, searcher
 
