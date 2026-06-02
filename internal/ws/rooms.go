@@ -108,7 +108,7 @@ func (h *Hub) handleRoomLeave(c *Client, env protocol.Envelope) {
 		// the UI un-sticks.
 		slog.Info("ROOM_LEAVE with no current room — sending fallback ROOM_LEFT",
 			"user", c.user.Username)
-		sendRoomLeft(c.user)
+		sendRoomLeft(c.user, "left")
 		return
 	}
 	h.removeUserFromRoom(c.user, room, "left")
@@ -194,6 +194,35 @@ func (h *Hub) handleRoomStart(c *Client, env protocol.Envelope) {
 	}
 
 	h.startMatchInRoom(room, c.user.Username)
+}
+
+// handleRoomKick lets the host remove another player from the room (and the
+// in-progress match, if any). Reuses removeUserFromRoom, so the target gets a
+// ROOM_LEFT{reason:"kicked"} and remaining players get MATCH_PEER_LEFT.
+func (h *Hub) handleRoomKick(c *Client, env protocol.Envelope) {
+	var req protocol.RoomKickRequest
+	if err := json.Unmarshal(env.Data, &req); err != nil {
+		return
+	}
+	room := c.user.CurrentRoom
+	if room == nil {
+		return
+	}
+	if room.Host == nil || room.Host.ID != c.user.ID {
+		slog.Debug("ROOM_KICK rejected: not host", "user", c.user.Username, "room", room.ID)
+		return
+	}
+	if req.UserID == c.user.ID {
+		return // host can't kick themselves
+	}
+	target := h.state.GetUser(req.UserID)
+	if target == nil || target.CurrentRoom == nil || target.CurrentRoom.ID != room.ID {
+		slog.Debug("ROOM_KICK rejected: target not in this room",
+			"host", c.user.Username, "target", req.UserID, "room", room.ID)
+		return
+	}
+	slog.Info("room kick", "host", c.user.Username, "target", target.Username, "room", room.ID)
+	h.removeUserFromRoom(target, room, "kicked")
 }
 
 // startMatchInRoom is the shared match-creation path used by both the
@@ -286,7 +315,7 @@ func (h *Hub) removeUserFromRoom(u *state.User, room *state.Room, reason string)
 			seat.User.CurrentMatch = nil
 			seat.User.SetState(state.UserStateIdle)
 			h.broadcastPresenceUpdated(seat.User)
-			sendRoomLeft(seat.User)
+			sendRoomLeft(seat.User, "host_left")
 		}
 		h.state.RemoveRoom(room.ID)
 	} else {
@@ -302,11 +331,12 @@ func (h *Hub) removeUserFromRoom(u *state.User, room *state.Room, reason string)
 	// branch nobody sent to u. Either way, u needs the ROOM_LEFT envelope.
 	// For host-disconnect cleanup, u.Send may be on a dying queue — the
 	// non-blocking select inside sendRoomLeft makes that harmless.
-	sendRoomLeft(u)
+	sendRoomLeft(u, reason)
 }
 
-// sendRoomLeft pushes a ROOM_LEFT envelope to one user.
-func sendRoomLeft(u *state.User) {
+// sendRoomLeft pushes a ROOM_LEFT envelope to one user. reason lets the client
+// distinguish a self-leave from being kicked or the host dissolving the room.
+func sendRoomLeft(u *state.User, reason string) {
 	if u == nil {
 		return
 	}
@@ -314,7 +344,10 @@ func sendRoomLeft(u *state.User) {
 		slog.Warn("sendRoomLeft: user has no send channel", "user", u.Username, "id", u.ID)
 		return
 	}
-	env, err := json.Marshal(protocol.Envelope{Type: protocol.TypeRoomLeft})
+	env, err := json.Marshal(protocol.Envelope{
+		Type: protocol.TypeRoomLeft,
+		Data: mustMarshal(protocol.RoomLeftPayload{Reason: reason}),
+	})
 	if err != nil {
 		return
 	}

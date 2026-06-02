@@ -226,6 +226,12 @@ type RoomJoinFailPayload struct {
 	Reason string `json:"reason"`
 }
 
+// RoomLeftPayload tells the client why it left a room: "left" (self),
+// "kicked" (removed by host), or "host_left" (host dissolved the room).
+type RoomLeftPayload struct {
+	Reason string `json:"reason,omitempty"`
+}
+
 type PingProbeReplyPayload struct {
 	TargetUserID   uint64 `json:"targetUserId"`
 	TargetEndpoint string `json:"targetEndpoint"`

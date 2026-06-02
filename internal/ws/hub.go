@@ -197,7 +197,7 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 	case protocol.TypeRoomLeave:
 		h.handleRoomLeave(c, env)
 	case protocol.TypeRoomKick:
-		// TODO
+		h.handleRoomKick(c, env)
 	case protocol.TypeRoomStart:
 		h.handleRoomStart(c, env)
 	case protocol.TypePingProbeRequest:
