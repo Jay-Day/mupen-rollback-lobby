@@ -555,6 +555,6 @@ func (c *Client) sendRoomCreateFail(id, reason string) {
 // broadcastPresenceUpdated emits a PRESENCE_DELTA with the user in "updated".
 func (h *Hub) broadcastPresenceUpdated(u *state.User) {
 	h.broadcastToAll(protocol.TypePresenceDelta, protocol.PresenceDeltaPayload{
-		Updated: []protocol.PresenceUser{presenceUserFromState(u)},
+		Updated: []protocol.PresenceUser{h.presenceUserFromState(u)},
 	}, 0)
 }
