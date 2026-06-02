@@ -46,6 +46,8 @@ type Room struct {
 	State     RoomState
 	CreatedAt time.Time
 	StartedAt time.Time // set when the match goes in-game; zero until then
+
+	kickedAt map[uint64]time.Time // userID -> last kick time, for a rejoin cooldown
 }
 
 type RoomSeat struct {
@@ -108,6 +110,24 @@ func (r *Room) SetState(s RoomState) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.State = s
+}
+
+// MarkKicked records that a user was just kicked, starting their rejoin cooldown.
+func (r *Room) MarkKicked(userID uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.kickedAt == nil {
+		r.kickedAt = make(map[uint64]time.Time)
+	}
+	r.kickedAt[userID] = time.Now()
+}
+
+// KickCoolingDown reports whether the user was kicked within the last `within`.
+func (r *Room) KickCoolingDown(userID uint64, within time.Duration) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	t, ok := r.kickedAt[userID]
+	return ok && time.Since(t) < within
 }
 
 // MarkStarted stamps the match start time (used for the Ongoing Matches duration).
