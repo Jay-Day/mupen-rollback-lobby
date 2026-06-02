@@ -45,6 +45,7 @@ type Room struct {
 
 	State     RoomState
 	CreatedAt time.Time
+	StartedAt time.Time // set when the match goes in-game; zero until then
 }
 
 type RoomSeat struct {
@@ -107,4 +108,35 @@ func (r *Room) SetState(s RoomState) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.State = s
+}
+
+// MarkStarted stamps the match start time (used for the Ongoing Matches duration).
+func (r *Room) MarkStarted() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.StartedAt = time.Now()
+}
+
+// StartedAtUnixMs returns the match start time in unix milliseconds, or 0 if the
+// match hasn't started.
+func (r *Room) StartedAtUnixMs() int64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.StartedAt.IsZero() {
+		return 0
+	}
+	return r.StartedAt.UnixMilli()
+}
+
+// PlayerUsernames returns the seated players' usernames in slot order.
+func (r *Room) PlayerUsernames() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	names := make([]string, 0, len(r.Players))
+	for _, seat := range r.Players {
+		if seat.User != nil {
+			names = append(names, seat.User.Username)
+		}
+	}
+	return names
 }
