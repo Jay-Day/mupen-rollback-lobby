@@ -169,6 +169,7 @@ type PresenceUser struct {
 	PingToServer    uint16 `json:"pingToServer"`
 	CurrentRoomID   uint64 `json:"currentRoomId,omitempty"`
 	CurrentRoomName string `json:"currentRoomName,omitempty"`
+	SearchingRom    string `json:"searchingRom,omitempty"` // ROM name while state == searching
 }
 
 type PresenceFullPayload struct {

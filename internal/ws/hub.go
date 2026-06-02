@@ -258,14 +258,14 @@ func (h *Hub) sendPresenceFull(c *Client) {
 		Users: make([]protocol.PresenceUser, 0, len(users)),
 	}
 	for _, u := range users {
-		payload.Users = append(payload.Users, presenceUserFromState(u))
+		payload.Users = append(payload.Users, h.presenceUserFromState(u))
 	}
 	c.sendEnvelope(protocol.TypePresenceFull, "", payload)
 }
 
 func (h *Hub) broadcastPresenceAdded(u *state.User) {
 	h.broadcastToAll(protocol.TypePresenceDelta, protocol.PresenceDeltaPayload{
-		Added: []protocol.PresenceUser{presenceUserFromState(u)},
+		Added: []protocol.PresenceUser{h.presenceUserFromState(u)},
 	}, u.ID)
 }
 
@@ -350,7 +350,7 @@ func (h *Hub) handleChatHistory(c *Client, env protocol.Envelope) {
 	c.sendEnvelope(protocol.TypeChatHistoryReply, env.ID, reply)
 }
 
-func presenceUserFromState(u *state.User) protocol.PresenceUser {
+func (h *Hub) presenceUserFromState(u *state.User) protocol.PresenceUser {
 	pu := protocol.PresenceUser{
 		ID:           u.ID,
 		Username:     u.Username,
@@ -361,6 +361,12 @@ func presenceUserFromState(u *state.User) protocol.PresenceUser {
 	if u.CurrentRoom != nil {
 		pu.CurrentRoomID = u.CurrentRoom.ID
 		pu.CurrentRoomName = u.CurrentRoom.Name
+	}
+	// Surface the ROM a searching user is queued for, so peers can show it.
+	if u.GetState() == state.UserStateSearching {
+		if rom, ok := h.matchmaker.romOf(u.ID); ok {
+			pu.SearchingRom = rom.Name
+		}
 	}
 	return pu
 }
