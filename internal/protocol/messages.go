@@ -186,15 +186,17 @@ type RoomCreatedResponse struct {
 }
 
 type RoomSummary struct {
-	ID         uint64  `json:"id"`
-	Name       string  `json:"name"`
-	HostID     uint64  `json:"hostId"`
-	HostName   string  `json:"hostName"`
-	Rom        RomInfo `json:"rom"`
-	Players    int     `json:"players"`
-	MaxPlayers int     `json:"maxPlayers"`
-	State      string  `json:"state"`
-	HasPasswd  bool    `json:"hasPassword"`
+	ID          uint64   `json:"id"`
+	Name        string   `json:"name"`
+	HostID      uint64   `json:"hostId"`
+	HostName    string   `json:"hostName"`
+	Rom         RomInfo  `json:"rom"`
+	Players     int      `json:"players"`
+	MaxPlayers  int      `json:"maxPlayers"`
+	State       string   `json:"state"`
+	HasPasswd   bool     `json:"hasPassword"`
+	PlayerNames []string `json:"playerNames,omitempty"` // seated players, for the Ongoing Matches list
+	StartedAt   int64    `json:"startedAt,omitempty"`   // match start, unix ms (0 until in-game)
 }
 
 type RoomListPayload struct {

@@ -228,6 +228,7 @@ func (h *Hub) startMatchInRoom(room *state.Room, initiator string) {
 	}
 
 	h.state.AddMatch(match)
+	room.MarkStarted()
 	room.SetState(state.RoomStateInGame)
 
 	// Push the new room state first so clients know we've left "waiting".
@@ -464,10 +465,12 @@ func (h *Hub) buildRoomListPayload() protocol.RoomListPayload {
 				MD5:    r.RomMD5,
 				Region: r.RomRegion,
 			},
-			Players:    players,
-			MaxPlayers: max,
-			State:      string(st),
-			HasPasswd:  r.Password != "",
+			Players:     players,
+			MaxPlayers:  max,
+			State:       string(st),
+			HasPasswd:   r.Password != "",
+			PlayerNames: r.PlayerUsernames(),
+			StartedAt:   r.StartedAtUnixMs(),
 		})
 	}
 	return payload
