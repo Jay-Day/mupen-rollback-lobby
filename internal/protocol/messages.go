@@ -124,6 +124,13 @@ type MatchPeerEventRequest struct {
 	Reason     string `json:"reason,omitempty"`
 }
 
+// QuickMatchJoinRequest scopes a quick-match search to a specific ROM. The
+// matchmaker pairs only searchers whose Rom.MD5 agree; Rom.Name is carried so
+// the auto-created room can be resolved by name on both clients.
+type QuickMatchJoinRequest struct {
+	Rom RomInfo `json:"rom"`
+}
+
 // -- Response payloads --
 
 type HelloOKResponse struct {
