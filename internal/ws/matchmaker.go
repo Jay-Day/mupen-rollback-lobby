@@ -17,6 +17,11 @@ const (
 	qmDefaultDelay      = 2
 	qmDefaultPrediction = 7
 	qmDefaultMaxPlayers = 2
+
+	// Warmup window between pairing and auto-start. Long enough for both clients
+	// to render the in-room view, probe each other's ping, and for the host's
+	// Auto delay to resolve from that ping and push ROOM_UPDATE_SETTINGS.
+	qmWarmup = 5 * time.Second
 )
 
 // qmEntry is a queued searcher: when they enqueued and the ROM they want.
@@ -220,9 +225,13 @@ func (h *Hub) quickMatchAttempt(searcher *state.User) {
 		MaxPlayers: qmDefaultMaxPlayers,
 		Delay:      qmDefaultDelay,
 		Prediction: qmDefaultPrediction,
-		Visibility: state.VisibilityInviteOnly,
-		State:      state.RoomStateWaiting,
-		CreatedAt:  time.Now(),
+		// Quick Match is auto-tuned: the host resolves delay from ping during
+		// the warmup, so open on Auto for everyone (label matches the host).
+		DelayAuto:      true,
+		PredictionAuto: true,
+		Visibility:     state.VisibilityInviteOnly,
+		State:          state.RoomStateWaiting,
+		CreatedAt:      time.Now(),
 	}
 
 	slog.Info("quick match paired", "rom", hostRom.Name, "md5", hostRom.MD5,
@@ -246,9 +255,52 @@ func (h *Hub) quickMatchAttempt(searcher *state.User) {
 		joinerClient.sendEnvelope(protocol.TypeRoomJoinOK, "", payload)
 	}
 
-	// Auto-start: matchmaker already enforced both seats are filled, and
-	// host-only validation doesn't apply to a system-created room.
-	h.startMatchInRoom(room, "quick-match")
+	// Don't start instantly. Give both clients a short warmup in the in-room
+	// view: seats + live peer ping render, and the host's Auto delay resolves
+	// from that ping and pushes ROOM_UPDATE_SETTINGS before the match locks in.
+	// The match then auto-starts with the tuned delay.
+	for _, u := range []*state.User{hostUser, joinerUser} {
+		h.broadcastPresenceUpdated(u)
+	}
+	h.broadcastRoomState(room)
+	h.broadcastRoomList()
+	h.sendRoomSystemChat(room,
+		fmt.Sprintf("Match found! Measuring connection — game starts in %d seconds.",
+			int(qmWarmup/time.Second)))
+	h.scheduleQuickMatchStart(room)
+}
+
+// scheduleQuickMatchStart auto-starts the paired match after the warmup window,
+// but only if the room is still valid — a player may have left during warmup,
+// dissolving the room or emptying a seat.
+func (h *Hub) scheduleQuickMatchStart(room *state.Room) {
+	roomID := room.ID
+	time.AfterFunc(qmWarmup, func() {
+		r := h.state.GetRoom(roomID)
+		if r == nil {
+			return
+		}
+		_, _, _, players, _, st := r.Snapshot()
+		if st != state.RoomStateWaiting || players < minRoomPlayers {
+			slog.Info("quick match warmup aborted", "room", roomID, "state", st, "players", players)
+			return
+		}
+		// host-only validation doesn't apply to a system-created room.
+		h.startMatchInRoom(r, "quick-match")
+	})
+}
+
+// sendRoomSystemChat pushes an informational chat line to a room's members,
+// attributed to a synthetic sender (userID 0) so it renders like a normal room
+// message on every client without needing a dedicated system-message type.
+func (h *Hub) sendRoomSystemChat(room *state.Room, message string) {
+	h.broadcastToRoom(room, protocol.TypeChatMsg, protocol.ChatMsgPayload{
+		Channel:      channelRoom,
+		FromUserID:   0,
+		FromUsername: "Quick Match",
+		Message:      message,
+		ServerTime:   nowMs(),
+	})
 }
 
 // getClient returns the WS client for a given user id, or nil if not connected.

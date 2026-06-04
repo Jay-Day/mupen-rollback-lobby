@@ -12,21 +12,22 @@ type Envelope struct {
 
 // Client → Server message types
 const (
-	TypeHello            = "HELLO"
-	TypeHeartbeat        = "HEARTBEAT"
-	TypeChatSend         = "CHAT_SEND"
-	TypeChatHistory      = "CHAT_HISTORY"
-	TypeRoomCreate       = "ROOM_CREATE"
-	TypeRoomJoin         = "ROOM_JOIN"
-	TypeRoomLeave        = "ROOM_LEAVE"
-	TypeRoomKick         = "ROOM_KICK"
-	TypeRoomStart        = "ROOM_START"
-	TypePingProbeRequest = "PING_PROBE_REQUEST"
-	TypeMatchConnected   = "MATCH_CONNECTED"
-	TypeMatchPunchFailed = "MATCH_PUNCH_FAILED"
-	TypeMatchFinished    = "MATCH_FINISHED"
-	TypeQuickMatchJoin   = "QUICK_MATCH_JOIN"
-	TypeQuickMatchCancel = "QUICK_MATCH_CANCEL"
+	TypeHello              = "HELLO"
+	TypeHeartbeat          = "HEARTBEAT"
+	TypeChatSend           = "CHAT_SEND"
+	TypeChatHistory        = "CHAT_HISTORY"
+	TypeRoomCreate         = "ROOM_CREATE"
+	TypeRoomJoin           = "ROOM_JOIN"
+	TypeRoomLeave          = "ROOM_LEAVE"
+	TypeRoomKick           = "ROOM_KICK"
+	TypeRoomStart          = "ROOM_START"
+	TypeRoomUpdateSettings = "ROOM_UPDATE_SETTINGS"
+	TypePingProbeRequest   = "PING_PROBE_REQUEST"
+	TypeMatchConnected     = "MATCH_CONNECTED"
+	TypeMatchPunchFailed   = "MATCH_PUNCH_FAILED"
+	TypeMatchFinished      = "MATCH_FINISHED"
+	TypeQuickMatchJoin     = "QUICK_MATCH_JOIN"
+	TypeQuickMatchCancel   = "QUICK_MATCH_CANCEL"
 
 	// Spectating: one player streams the match's .krec up via BROADCAST_*; other
 	// users pull it back down via SPECTATE_*. krec bytes ride as base64 strings
@@ -131,6 +132,18 @@ type RoomKickRequest struct {
 	UserID uint64 `json:"userId"`
 }
 
+// RoomUpdateSettingsRequest changes a waiting room's rollback parameters.
+// Host-only; the server clamps to [0,9] and rebroadcasts ROOM_STATE so every
+// seated client (and the match itself) picks the new values up. The *Auto flags
+// carry whether the host left each setting on "Auto" so non-hosts can render the
+// same "Auto (N f)" label the host sees instead of a bare number.
+type RoomUpdateSettingsRequest struct {
+	Delay          int  `json:"delay"`
+	Prediction     int  `json:"prediction"`
+	DelayAuto      bool `json:"delayAuto"`
+	PredictionAuto bool `json:"predictionAuto"`
+}
+
 type PingProbeRequestPayload struct {
 	TargetUserID uint64 `json:"targetUserId"`
 }
@@ -230,15 +243,19 @@ type RoomSeatPayload struct {
 }
 
 type RoomStatePayload struct {
-	ID         uint64            `json:"id"`
-	Name       string            `json:"name"`
-	HostID     uint64            `json:"hostId"`
-	Rom        RomInfo           `json:"rom"`
-	MaxPlayers int               `json:"maxPlayers"`
-	Delay      int               `json:"delay"`
-	Prediction int               `json:"prediction"`
-	Players    []RoomSeatPayload `json:"players"`
-	State      string            `json:"state"`
+	ID         uint64  `json:"id"`
+	Name       string  `json:"name"`
+	HostID     uint64  `json:"hostId"`
+	Rom        RomInfo `json:"rom"`
+	MaxPlayers int     `json:"maxPlayers"`
+	Delay      int     `json:"delay"`
+	Prediction int     `json:"prediction"`
+	// Whether each value is host-Auto-driven, so non-hosts can mirror the
+	// host's "Auto (N f)" / "Default" labels rather than showing a bare number.
+	DelayAuto      bool              `json:"delayAuto"`
+	PredictionAuto bool              `json:"predictionAuto"`
+	Players        []RoomSeatPayload `json:"players"`
+	State          string            `json:"state"`
 }
 
 type RoomJoinFailPayload struct {

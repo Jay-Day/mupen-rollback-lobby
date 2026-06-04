@@ -37,8 +37,12 @@ type Room struct {
 	MaxPlayers int
 	Delay      int
 	Prediction int
-	Visibility Visibility
-	Password   string
+	// DelayAuto/PredictionAuto record whether the host left each value on "Auto"
+	// so the state we broadcast lets non-hosts mirror the host's label.
+	DelayAuto      bool
+	PredictionAuto bool
+	Visibility     Visibility
+	Password       string
 
 	Players    []*RoomSeat
 	Spectators []*User
@@ -110,6 +114,18 @@ func (r *Room) SetState(s RoomState) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.State = s
+}
+
+// SetRollbackSettings updates the room's delay/prediction parameters and whether
+// each is host-Auto-driven. Callers should validate range/host/state first; this
+// only mutates under the lock.
+func (r *Room) SetRollbackSettings(delay, prediction int, delayAuto, predictionAuto bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.Delay = delay
+	r.Prediction = prediction
+	r.DelayAuto = delayAuto
+	r.PredictionAuto = predictionAuto
 }
 
 // MarkKicked records that a user was just kicked, starting their rejoin cooldown.
