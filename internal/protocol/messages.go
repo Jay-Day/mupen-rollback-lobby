@@ -27,6 +27,16 @@ const (
 	TypeMatchFinished    = "MATCH_FINISHED"
 	TypeQuickMatchJoin   = "QUICK_MATCH_JOIN"
 	TypeQuickMatchCancel = "QUICK_MATCH_CANCEL"
+
+	// Spectating: one player streams the match's .krec up via BROADCAST_*; other
+	// users pull it back down via SPECTATE_*. krec bytes ride as base64 strings
+	// inside the normal JSON envelopes (the stream is ~1 KB/s, so the encoding
+	// overhead is negligible).
+	TypeBroadcastBegin = "BROADCAST_BEGIN" // broadcaster: start streaming this match
+	TypeBroadcastData  = "BROADCAST_DATA"  // broadcaster: a chunk of krec bytes (base64)
+	TypeBroadcastEnd   = "BROADCAST_END"   // broadcaster: stream finished
+	TypeSpectateStart  = "SPECTATE_START"  // spectator: begin watching a match
+	TypeSpectateStop   = "SPECTATE_STOP"   // spectator: stop watching
 )
 
 // Server → Client message types
@@ -49,23 +59,29 @@ const (
 	TypeMatchBegin       = "MATCH_BEGIN"
 	TypeMatchPeerLeft    = "MATCH_PEER_LEFT"
 	TypeQuickMatchStatus = "QUICK_MATCH_STATUS"
+
+	// Spectating (server → spectator).
+	TypeSpectateBegin = "SPECTATE_BEGIN" // ack: stream is starting; history follows
+	TypeSpectateData  = "SPECTATE_DATA"  // a chunk of krec bytes (base64)
+	TypeSpectateEnd   = "SPECTATE_END"   // stream ended (match over / broadcaster left)
+	TypeSpectateFail  = "SPECTATE_FAIL"  // request rejected (not broadcasting, ended)
 )
 
 // Failure reason codes
 const (
-	ReasonUsernameTaken    = "username_taken"
-	ReasonVersionMismatch  = "version_mismatch"
-	ReasonServerFull       = "server_full"
-	ReasonInvalidPayload   = "invalid_payload"
-	ReasonInvalidHello     = "invalid_hello"
-	ReasonRoomFull         = "full"
-	ReasonWrongPassword    = "wrong_password"
-	ReasonRomMismatch      = "rom_mismatch"
-	ReasonAlreadyStarted   = "already_started"
-	ReasonNotAuthorized    = "not_authorized"
-	ReasonRoomNotFound     = "room_not_found"
-	ReasonAlreadyInRoom    = "already_in_room"
-	ReasonKickedRecently   = "kicked_recently"
+	ReasonUsernameTaken   = "username_taken"
+	ReasonVersionMismatch = "version_mismatch"
+	ReasonServerFull      = "server_full"
+	ReasonInvalidPayload  = "invalid_payload"
+	ReasonInvalidHello    = "invalid_hello"
+	ReasonRoomFull        = "full"
+	ReasonWrongPassword   = "wrong_password"
+	ReasonRomMismatch     = "rom_mismatch"
+	ReasonAlreadyStarted  = "already_started"
+	ReasonNotAuthorized   = "not_authorized"
+	ReasonRoomNotFound    = "room_not_found"
+	ReasonAlreadyInRoom   = "already_in_room"
+	ReasonKickedRecently  = "kicked_recently"
 )
 
 // -- Request payloads --
@@ -188,17 +204,19 @@ type RoomCreatedResponse struct {
 }
 
 type RoomSummary struct {
-	ID          uint64   `json:"id"`
-	Name        string   `json:"name"`
-	HostID      uint64   `json:"hostId"`
-	HostName    string   `json:"hostName"`
-	Rom         RomInfo  `json:"rom"`
-	Players     int      `json:"players"`
-	MaxPlayers  int      `json:"maxPlayers"`
-	State       string   `json:"state"`
-	HasPasswd   bool     `json:"hasPassword"`
-	PlayerNames []string `json:"playerNames,omitempty"` // seated players, for the Ongoing Matches list
-	StartedAt   int64    `json:"startedAt,omitempty"`   // match start, unix ms (0 until in-game)
+	ID           uint64   `json:"id"`
+	Name         string   `json:"name"`
+	HostID       uint64   `json:"hostId"`
+	HostName     string   `json:"hostName"`
+	Rom          RomInfo  `json:"rom"`
+	Players      int      `json:"players"`
+	MaxPlayers   int      `json:"maxPlayers"`
+	State        string   `json:"state"`
+	HasPasswd    bool     `json:"hasPassword"`
+	PlayerNames  []string `json:"playerNames,omitempty"`  // seated players, for the Ongoing Matches list
+	StartedAt    int64    `json:"startedAt,omitempty"`    // match start, unix ms (0 until in-game)
+	Broadcasting bool     `json:"broadcasting,omitempty"` // a player is streaming this match for spectators
+	MatchID      uint64   `json:"matchId,omitempty"`      // current match id (set while in-game), for SPECTATE_START
 }
 
 type RoomListPayload struct {
@@ -266,4 +284,49 @@ type MatchPeerLeftPayload struct {
 type QuickMatchStatusPayload struct {
 	Searching bool `json:"searching"`
 	QueueSize int  `json:"queueSize"`
+}
+
+// -- Broadcast / spectate payloads --
+// krec bytes travel as base64 in the Data field. The same shape is reused for
+// the broadcaster's uplink (BROADCAST_DATA) and the spectator's downlink
+// (SPECTATE_DATA) so the server can forward a chunk verbatim.
+
+type BroadcastBeginRequest struct {
+	MatchID uint64 `json:"matchId"`
+}
+
+type BroadcastDataRequest struct {
+	MatchID uint64 `json:"matchId"`
+	Data    string `json:"data"` // base64 krec chunk
+}
+
+type BroadcastEndRequest struct {
+	MatchID uint64 `json:"matchId"`
+}
+
+type SpectateStartRequest struct {
+	MatchID uint64 `json:"matchId"`
+}
+
+type SpectateStopRequest struct {
+	MatchID uint64 `json:"matchId"`
+}
+
+type SpectateBeginPayload struct {
+	MatchID uint64 `json:"matchId"`
+}
+
+type SpectateDataPayload struct {
+	MatchID uint64 `json:"matchId"`
+	Data    string `json:"data"` // base64 krec chunk
+}
+
+type SpectateEndPayload struct {
+	MatchID uint64 `json:"matchId"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+type SpectateFailPayload struct {
+	MatchID uint64 `json:"matchId"`
+	Reason  string `json:"reason"`
 }

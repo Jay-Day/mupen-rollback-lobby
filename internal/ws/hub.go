@@ -37,10 +37,11 @@ type Hub struct {
 
 	lobbyChat  *chatHistory
 	matchmaker *matchmaker
+	broadcasts *broadcastManager
 }
 
 func NewHub(s *state.State, udpPublicAddr string) *Hub {
-	return &Hub{
+	h := &Hub{
 		state:         s,
 		udpPublicAddr: udpPublicAddr,
 		clients:       make(map[uint64]*Client),
@@ -49,6 +50,8 @@ func NewHub(s *state.State, udpPublicAddr string) *Hub {
 		lobbyChat:     newChatHistory(),
 		matchmaker:    newMatchmaker(),
 	}
+	h.broadcasts = newBroadcastManager(h)
+	return h
 }
 
 // Run owns the registration/unregistration channels.
@@ -85,6 +88,9 @@ func (h *Hub) cleanupClient(c *Client) {
 	// Drop from matchmaker queue if present.
 	h.matchmaker.remove(uid)
 
+	// End any broadcast this user was running and drop them from spectator sets.
+	h.broadcasts.onUserGone(uid)
+
 	// If the user was in a room, leave it (which dissolves the room if host).
 	if c.user.CurrentRoom != nil {
 		h.removeUserFromRoom(c.user, c.user.CurrentRoom, "disconnect")
@@ -107,6 +113,11 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request, ip string) {
 		slog.Debug("ws accept failed", "err", err, "ip", ip)
 		return
 	}
+
+	// Default coder/websocket read limit is 32 KiB. Broadcaster BROADCAST_DATA
+	// chunks are small, but raise the ceiling so a batched base64 chunk never
+	// trips it and tears down the connection.
+	conn.SetReadLimit(1 << 20) // 1 MiB
 
 	c := &Client{
 		hub:  h,
@@ -212,6 +223,16 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleQuickMatchJoin(c, env)
 	case protocol.TypeQuickMatchCancel:
 		h.handleQuickMatchCancel(c, env)
+	case protocol.TypeBroadcastBegin:
+		h.handleBroadcastBegin(c, env)
+	case protocol.TypeBroadcastData:
+		h.handleBroadcastData(c, env)
+	case protocol.TypeBroadcastEnd:
+		h.handleBroadcastEnd(c, env)
+	case protocol.TypeSpectateStart:
+		h.handleSpectateStart(c, env)
+	case protocol.TypeSpectateStop:
+		h.handleSpectateStop(c, env)
 	default:
 		slog.Debug("unknown message", "type", env.Type, "user", c.user.ID)
 	}
