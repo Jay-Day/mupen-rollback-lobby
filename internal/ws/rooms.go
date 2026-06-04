@@ -73,11 +73,15 @@ func (h *Hub) handleRoomCreate(c *Client, env protocol.Envelope) {
 		MaxPlayers: req.MaxPlayers,
 		Delay:      req.Delay,
 		Prediction: req.Prediction,
-		Visibility: visibility,
-		Password:   req.Password,
-		Players:    nil,
-		State:      state.RoomStateWaiting,
-		CreatedAt:  time.Now(),
+		// New rooms open on Auto — the in-room combos default to it and Create
+		// Room no longer surfaces these, so this matches what the host sees.
+		DelayAuto:      true,
+		PredictionAuto: true,
+		Visibility:     visibility,
+		Password:       req.Password,
+		Players:        nil,
+		State:          state.RoomStateWaiting,
+		CreatedAt:      time.Now(),
 	}
 	_ = room.AddPlayer(c.user)
 
@@ -201,6 +205,52 @@ func (h *Hub) handleRoomStart(c *Client, env protocol.Envelope) {
 	}
 
 	h.startMatchInRoom(room, c.user.Username)
+}
+
+// handleRoomUpdateSettings lets the host tune the room's rollback delay /
+// prediction while it's still waiting. Quick Match relies on this: the host's
+// client resolves Auto delay from the measured peer ping during the warmup and
+// pushes the concrete value here, so every seated client (and the match itself)
+// uses it. Validates: caller is host, room is waiting.
+func (h *Hub) handleRoomUpdateSettings(c *Client, env protocol.Envelope) {
+	var req protocol.RoomUpdateSettingsRequest
+	if err := json.Unmarshal(env.Data, &req); err != nil {
+		return
+	}
+	room := c.user.CurrentRoom
+	if room == nil {
+		return
+	}
+	if room.Host == nil || room.Host.ID != c.user.ID {
+		slog.Debug("ROOM_UPDATE_SETTINGS rejected: not host", "user", c.user.Username, "room", room.ID)
+		return
+	}
+	if room.State != state.RoomStateWaiting {
+		slog.Debug("ROOM_UPDATE_SETTINGS rejected: not waiting", "room", room.ID, "state", room.State)
+		return
+	}
+
+	if req.Delay < minDelay {
+		req.Delay = minDelay
+	} else if req.Delay > maxDelay {
+		req.Delay = maxDelay
+	}
+	if req.Prediction < minPrediction {
+		req.Prediction = minPrediction
+	} else if req.Prediction > maxPrediction {
+		req.Prediction = maxPrediction
+	}
+
+	if room.Delay == req.Delay && room.Prediction == req.Prediction &&
+		room.DelayAuto == req.DelayAuto && room.PredictionAuto == req.PredictionAuto {
+		return // no change — skip the rebroadcast
+	}
+	room.SetRollbackSettings(req.Delay, req.Prediction, req.DelayAuto, req.PredictionAuto)
+	slog.Info("room settings updated", "room", room.ID,
+		"delay", req.Delay, "pred", req.Prediction,
+		"delayAuto", req.DelayAuto, "predAuto", req.PredictionAuto, "by", c.user.Username)
+
+	h.broadcastRoomState(room)
 }
 
 // handleRoomKick lets the host remove another player from the room (and the
@@ -415,6 +465,28 @@ func (h *Hub) broadcastMatchPeerLeft(room *state.Room, departing *state.User, ma
 		default:
 		}
 	}
+
+	// Also announce the drop as a chat line attributed to the departing player so
+	// the whole room (and the in-game overlay) sees who left, in their own voice.
+	// Skip kicks — those carry their own host-removal notice, and a kicked player
+	// didn't choose to drop. This is the single chokepoint every drop funnels
+	// through (Drop Game, Leave mid-match, window-close, disconnect), so it fires
+	// once per drop regardless of how the player left.
+	if reason != "kicked" {
+		h.sendRoomChatAs(room, departing, "I dropped from the game.")
+	}
+}
+
+// sendRoomChatAs pushes a chat line to a room attributed to a specific user, so
+// it renders exactly like a message that user typed.
+func (h *Hub) sendRoomChatAs(room *state.Room, u *state.User, message string) {
+	h.broadcastToRoom(room, protocol.TypeChatMsg, protocol.ChatMsgPayload{
+		Channel:      channelRoom,
+		FromUserID:   u.ID,
+		FromUsername: u.Username,
+		Message:      message,
+		ServerTime:   nowMs(),
+	})
 }
 
 // handleMatchFinished is the client's "drop" report — user stops playing but
@@ -575,11 +647,13 @@ func (h *Hub) broadcastToRoom(room *state.Room, msgType string, data any) {
 
 func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 	out := protocol.RoomStatePayload{
-		ID:         r.ID,
-		Name:       r.Name,
-		MaxPlayers: r.MaxPlayers,
-		Delay:      r.Delay,
-		Prediction: r.Prediction,
+		ID:             r.ID,
+		Name:           r.Name,
+		MaxPlayers:     r.MaxPlayers,
+		Delay:          r.Delay,
+		Prediction:     r.Prediction,
+		DelayAuto:      r.DelayAuto,
+		PredictionAuto: r.PredictionAuto,
 		Rom: protocol.RomInfo{
 			Name:   r.RomName,
 			MD5:    r.RomMD5,

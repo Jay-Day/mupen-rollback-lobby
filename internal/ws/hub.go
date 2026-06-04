@@ -211,6 +211,8 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleRoomKick(c, env)
 	case protocol.TypeRoomStart:
 		h.handleRoomStart(c, env)
+	case protocol.TypeRoomUpdateSettings:
+		h.handleRoomUpdateSettings(c, env)
 	case protocol.TypePingProbeRequest:
 		h.handlePingProbeRequest(c, env)
 	case protocol.TypeMatchConnected:
