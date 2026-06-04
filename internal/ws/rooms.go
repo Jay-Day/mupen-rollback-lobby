@@ -296,8 +296,10 @@ func (h *Hub) startMatchInRoom(room *state.Room, initiator string) {
 func (h *Hub) removeUserFromRoom(u *state.User, room *state.Room, reason string) {
 	// If the room is mid-match, also notify peers via MATCH_PEER_LEFT so they
 	// can drop emulation. Do this BEFORE we remove the player from the seat list.
+	var matchID uint64
 	if room.State == state.RoomStateInGame && u.CurrentMatch != nil {
-		h.broadcastMatchPeerLeft(room, u, u.CurrentMatch.ID, reason)
+		matchID = u.CurrentMatch.ID
+		h.broadcastMatchPeerLeft(room, u, matchID, reason)
 	}
 
 	room.RemovePlayer(u.ID)
@@ -329,6 +331,17 @@ func (h *Hub) removeUserFromRoom(u *state.User, room *state.Room, reason string)
 	} else {
 		// Otherwise the room still exists; push updated state to remaining members.
 		h.broadcastRoomState(room)
+	}
+
+	// End any broadcast tied to the match this user just left. A host-dissolve
+	// ends it for everyone; otherwise it only ends if this user was the one
+	// broadcasting (the stream dies with them).
+	if matchID != 0 {
+		if dissolve {
+			h.broadcasts.endByMatch(matchID)
+		} else {
+			h.broadcasts.endIfBroadcaster(matchID, u.ID)
+		}
 	}
 
 	h.broadcastRoomList()
@@ -407,9 +420,9 @@ func (h *Hub) broadcastMatchPeerLeft(room *state.Room, departing *state.User, ma
 // handleMatchFinished is the client's "drop" report — user stops playing but
 // stays seated in the room. Behavior depends on who dropped:
 //
-//   • Non-host drop: just clear their match association and tell the other
+//   - Non-host drop: just clear their match association and tell the other
 //     seats via MATCH_PEER_LEFT. The match continues for everyone else.
-//   • Host drop: end the match for everyone. Room reverts to waiting, every
+//   - Host drop: end the match for everyone. Room reverts to waiting, every
 //     seat's CurrentMatch is cleared. Surviving clients see the ROOM_STATE
 //     flip and tear down their own emulation locally. Nobody leaves the room.
 //
@@ -436,6 +449,11 @@ func (h *Hub) handleMatchFinished(c *Client, env protocol.Envelope) {
 	c.user.SetState(state.UserStateInRoom)
 	h.broadcastPresenceUpdated(c.user)
 
+	// If the dropper was the one broadcasting, the stream dies with them.
+	if h.broadcasts.endIfBroadcaster(match.ID, c.user.ID) {
+		h.broadcastRoomList()
+	}
+
 	if !isHost {
 		// Non-host drop: match keeps running for the rest of the seats.
 		return
@@ -446,6 +464,7 @@ func (h *Hub) handleMatchFinished(c *Client, env protocol.Envelope) {
 	// in_game → waiting transition and tears down their own emulation.
 	match.SetState(state.MatchStateFinished)
 	h.state.RemoveMatch(match.ID)
+	h.broadcasts.endByMatch(match.ID) // host ended the match → stop any broadcast
 	room.SetState(state.RoomStateWaiting)
 	for _, seat := range room.Players {
 		if seat.User == nil || seat.User.ID == c.user.ID {
@@ -496,6 +515,7 @@ func (h *Hub) buildRoomListPayload() protocol.RoomListPayload {
 		if r.Host != nil {
 			hostName = r.Host.Username
 		}
+		matchID, broadcasting := h.broadcasts.roomBroadcast(id)
 		payload.Rooms = append(payload.Rooms, protocol.RoomSummary{
 			ID:       id,
 			Name:     r.Name,
@@ -506,12 +526,14 @@ func (h *Hub) buildRoomListPayload() protocol.RoomListPayload {
 				MD5:    r.RomMD5,
 				Region: r.RomRegion,
 			},
-			Players:     players,
-			MaxPlayers:  max,
-			State:       string(st),
-			HasPasswd:   r.Password != "",
-			PlayerNames: r.PlayerUsernames(),
-			StartedAt:   r.StartedAtUnixMs(),
+			Players:      players,
+			MaxPlayers:   max,
+			State:        string(st),
+			HasPasswd:    r.Password != "",
+			PlayerNames:  r.PlayerUsernames(),
+			StartedAt:    r.StartedAtUnixMs(),
+			Broadcasting: broadcasting,
+			MatchID:      matchID,
 		})
 	}
 	return payload
