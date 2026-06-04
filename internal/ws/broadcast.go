@@ -27,6 +27,7 @@ type broadcast struct {
 	file       *os.File
 	spectators map[uint64]*Client
 	closed     bool
+	liveFrame  int // broadcaster's latest stamped live krec frame
 }
 
 // broadcastManager owns all live broadcasts, keyed by match id.
@@ -92,7 +93,7 @@ func (m *broadcastManager) begin(matchID, roomID, broadcasterID uint64) bool {
 
 // data appends a krec chunk to the spool file and forwards it to spectators.
 // Only the registered broadcaster may write.
-func (m *broadcastManager) data(senderID, matchID uint64, b64 string) {
+func (m *broadcastManager) data(senderID, matchID uint64, b64 string, frame int) {
 	m.mu.Lock()
 	b := m.byMatch[matchID]
 	m.mu.Unlock()
@@ -109,6 +110,9 @@ func (m *broadcastManager) data(senderID, matchID uint64, b64 string) {
 	if b.closed || b.broadcasterID != senderID {
 		return
 	}
+	if frame > b.liveFrame {
+		b.liveFrame = frame // track the live edge for spectate fast-forward
+	}
 	if _, err := b.file.Write(raw); err != nil {
 		slog.Warn("broadcast: spool write failed", "match", matchID, "err", err)
 	}
@@ -118,7 +122,7 @@ func (m *broadcastManager) data(senderID, matchID uint64, b64 string) {
 	}
 	env, err := json.Marshal(protocol.Envelope{
 		Type: protocol.TypeSpectateData,
-		Data: mustMarshal(protocol.SpectateDataPayload{MatchID: matchID, Data: b64}),
+		Data: mustMarshal(protocol.SpectateDataPayload{MatchID: matchID, Data: b64, Frame: b.liveFrame}),
 	})
 	if err != nil {
 		return
@@ -169,6 +173,7 @@ func (m *broadcastManager) spectateStart(c *Client, matchID uint64) {
 		c.sendEnvelope(protocol.TypeSpectateData, "", protocol.SpectateDataPayload{
 			MatchID: matchID,
 			Data:    base64.StdEncoding.EncodeToString(data),
+			Frame:   b.liveFrame, // live edge so the joiner can fast-forward to it
 		})
 	}
 	b.spectators[c.user.ID] = c
@@ -284,6 +289,13 @@ func (h *Hub) handleBroadcastBegin(c *Client, env protocol.Envelope) {
 			"user", c.user.ID, "match", req.MatchID)
 		return
 	}
+	// Only the room host may broadcast — keeps it to one authoritative stream and
+	// matches the host-only checkbox in the client.
+	room := c.user.CurrentRoom
+	if room == nil || room.Host == nil || room.Host.ID != c.user.ID {
+		slog.Debug("BROADCAST_BEGIN rejected: not host", "user", c.user.ID, "match", req.MatchID)
+		return
+	}
 	if h.broadcasts.begin(match.ID, match.RoomID, c.user.ID) {
 		slog.Info("broadcast begin", "match", match.ID, "by", c.user.Username)
 		h.broadcastRoomList() // flag the room as broadcasting
@@ -295,7 +307,7 @@ func (h *Hub) handleBroadcastData(c *Client, env protocol.Envelope) {
 	if err := json.Unmarshal(env.Data, &req); err != nil {
 		return
 	}
-	h.broadcasts.data(c.user.ID, req.MatchID, req.Data)
+	h.broadcasts.data(c.user.ID, req.MatchID, req.Data, req.Frame)
 }
 
 func (h *Hub) handleBroadcastEnd(c *Client, env protocol.Envelope) {

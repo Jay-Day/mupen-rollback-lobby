@@ -297,7 +297,8 @@ type BroadcastBeginRequest struct {
 
 type BroadcastDataRequest struct {
 	MatchID uint64 `json:"matchId"`
-	Data    string `json:"data"` // base64 krec chunk
+	Data    string `json:"data"`  // base64 krec chunk
+	Frame   int    `json:"frame"` // broadcaster's live krec frame after this chunk
 }
 
 type BroadcastEndRequest struct {
@@ -318,7 +319,8 @@ type SpectateBeginPayload struct {
 
 type SpectateDataPayload struct {
 	MatchID uint64 `json:"matchId"`
-	Data    string `json:"data"` // base64 krec chunk
+	Data    string `json:"data"`  // base64 krec chunk
+	Frame   int    `json:"frame"` // broadcaster's live krec frame (fast-forward target)
 }
 
 type SpectateEndPayload struct {
