@@ -16,6 +16,8 @@ const (
 	maxDelay       = 9
 	minPrediction  = 0
 	maxPrediction  = 9
+	minPacing      = 0 // 0 = aggressive/symmetric (engine default)
+	maxPacing      = 1 // 1 = smooth/asymmetric
 	minRoomPlayers = 2
 	maxRoomPlayers = 4
 )
@@ -51,6 +53,11 @@ func (h *Hub) handleRoomCreate(c *Client, env protocol.Envelope) {
 	} else if req.Prediction > maxPrediction {
 		req.Prediction = maxPrediction
 	}
+	if req.Pacing < minPacing {
+		req.Pacing = minPacing
+	} else if req.Pacing > maxPacing {
+		req.Pacing = maxPacing
+	}
 
 	// User cannot create a second room while already in one.
 	if c.user.CurrentRoom != nil {
@@ -73,6 +80,7 @@ func (h *Hub) handleRoomCreate(c *Client, env protocol.Envelope) {
 		MaxPlayers: req.MaxPlayers,
 		Delay:      req.Delay,
 		Prediction: req.Prediction,
+		Pacing:     req.Pacing,
 		// New rooms open on Auto — the in-room combos default to it and Create
 		// Room no longer surfaces these, so this matches what the host sees.
 		DelayAuto:      true,
@@ -240,14 +248,20 @@ func (h *Hub) handleRoomUpdateSettings(c *Client, env protocol.Envelope) {
 	} else if req.Prediction > maxPrediction {
 		req.Prediction = maxPrediction
 	}
+	if req.Pacing < minPacing {
+		req.Pacing = minPacing
+	} else if req.Pacing > maxPacing {
+		req.Pacing = maxPacing
+	}
 
 	if room.Delay == req.Delay && room.Prediction == req.Prediction &&
+		room.Pacing == req.Pacing &&
 		room.DelayAuto == req.DelayAuto && room.PredictionAuto == req.PredictionAuto {
 		return // no change — skip the rebroadcast
 	}
-	room.SetRollbackSettings(req.Delay, req.Prediction, req.DelayAuto, req.PredictionAuto)
+	room.SetRollbackSettings(req.Delay, req.Prediction, req.Pacing, req.DelayAuto, req.PredictionAuto)
 	slog.Info("room settings updated", "room", room.ID,
-		"delay", req.Delay, "pred", req.Prediction,
+		"delay", req.Delay, "pred", req.Prediction, "pacing", req.Pacing,
 		"delayAuto", req.DelayAuto, "predAuto", req.PredictionAuto, "by", c.user.Username)
 
 	h.broadcastRoomState(room)
@@ -652,6 +666,7 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 		MaxPlayers:     r.MaxPlayers,
 		Delay:          r.Delay,
 		Prediction:     r.Prediction,
+		Pacing:         r.Pacing,
 		DelayAuto:      r.DelayAuto,
 		PredictionAuto: r.PredictionAuto,
 		Rom: protocol.RomInfo{

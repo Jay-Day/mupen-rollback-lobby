@@ -113,6 +113,7 @@ type RoomCreateRequest struct {
 	MaxPlayers int     `json:"maxPlayers"`
 	Delay      int     `json:"delay"`
 	Prediction int     `json:"prediction"`
+	Pacing     int     `json:"pacing,omitempty"`
 	Visibility string  `json:"visibility,omitempty"`
 	Password   string  `json:"password,omitempty"`
 }
@@ -140,6 +141,7 @@ type RoomKickRequest struct {
 type RoomUpdateSettingsRequest struct {
 	Delay          int  `json:"delay"`
 	Prediction     int  `json:"prediction"`
+	Pacing         int  `json:"pacing,omitempty"`
 	DelayAuto      bool `json:"delayAuto"`
 	PredictionAuto bool `json:"predictionAuto"`
 }
@@ -250,6 +252,9 @@ type RoomStatePayload struct {
 	MaxPlayers int     `json:"maxPlayers"`
 	Delay      int     `json:"delay"`
 	Prediction int     `json:"prediction"`
+	// Pacing time-sync model (0 = aggressive, 1 = smooth); host-set, applies to
+	// every seat. Discrete choice, so no Auto flag.
+	Pacing int `json:"pacing"`
 	// Whether each value is host-Auto-driven, so non-hosts can mirror the
 	// host's "Auto (N f)" / "Default" labels rather than showing a bare number.
 	DelayAuto      bool              `json:"delayAuto"`

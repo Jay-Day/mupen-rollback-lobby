@@ -37,6 +37,10 @@ type Room struct {
 	MaxPlayers int
 	Delay      int
 	Prediction int
+	// Pacing is the time-sync model (0 = aggressive/symmetric default,
+	// 1 = smooth/asymmetric). Host-set; broadcast so every seat runs the same
+	// model. No Auto concept — it's a discrete choice, not ping-derived.
+	Pacing int
 	// DelayAuto/PredictionAuto record whether the host left each value on "Auto"
 	// so the state we broadcast lets non-hosts mirror the host's label.
 	DelayAuto      bool
@@ -116,14 +120,15 @@ func (r *Room) SetState(s RoomState) {
 	r.State = s
 }
 
-// SetRollbackSettings updates the room's delay/prediction parameters and whether
-// each is host-Auto-driven. Callers should validate range/host/state first; this
-// only mutates under the lock.
-func (r *Room) SetRollbackSettings(delay, prediction int, delayAuto, predictionAuto bool) {
+// SetRollbackSettings updates the room's delay/prediction/pacing parameters and
+// whether delay/prediction are host-Auto-driven. Callers should validate
+// range/host/state first; this only mutates under the lock.
+func (r *Room) SetRollbackSettings(delay, prediction, pacing int, delayAuto, predictionAuto bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.Delay = delay
 	r.Prediction = prediction
+	r.Pacing = pacing
 	r.DelayAuto = delayAuto
 	r.PredictionAuto = predictionAuto
 }
