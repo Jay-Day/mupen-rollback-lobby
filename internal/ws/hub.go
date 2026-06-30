@@ -213,6 +213,8 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleRoomStart(c, env)
 	case protocol.TypeRoomUpdateSettings:
 		h.handleRoomUpdateSettings(c, env)
+	case protocol.TypeRoomSwapSlots:
+		h.handleRoomSwapSlots(c, env)
 	case protocol.TypePingProbeRequest:
 		h.handlePingProbeRequest(c, env)
 	case protocol.TypeMatchConnected:
@@ -229,6 +231,8 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleBroadcastBegin(c, env)
 	case protocol.TypeBroadcastData:
 		h.handleBroadcastData(c, env)
+	case protocol.TypeBroadcastKeyframe:
+		h.handleBroadcastKeyframe(c, env)
 	case protocol.TypeBroadcastEnd:
 		h.handleBroadcastEnd(c, env)
 	case protocol.TypeSpectateStart:

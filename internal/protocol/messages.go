@@ -22,6 +22,7 @@ const (
 	TypeRoomKick           = "ROOM_KICK"
 	TypeRoomStart          = "ROOM_START"
 	TypeRoomUpdateSettings = "ROOM_UPDATE_SETTINGS"
+	TypeRoomSwapSlots      = "ROOM_SWAP_SLOTS"
 	TypePingProbeRequest   = "PING_PROBE_REQUEST"
 	TypeMatchConnected     = "MATCH_CONNECTED"
 	TypeMatchPunchFailed   = "MATCH_PUNCH_FAILED"
@@ -36,8 +37,13 @@ const (
 	TypeBroadcastBegin = "BROADCAST_BEGIN" // broadcaster: start streaming this match
 	TypeBroadcastData  = "BROADCAST_DATA"  // broadcaster: a chunk of krec bytes (base64)
 	TypeBroadcastEnd   = "BROADCAST_END"   // broadcaster: stream finished
-	TypeSpectateStart  = "SPECTATE_START"  // spectator: begin watching a match
-	TypeSpectateStop   = "SPECTATE_STOP"   // spectator: stop watching
+	// Periodic savestate "keyframe": the broadcaster uploads a compressed savestate
+	// every ~60s so a late-joining spectator can restore near the live edge and
+	// fast-forward only the short tail (bounded catch-up, independent of match length).
+	// Sent in chunks to stay under the server's per-message read limit.
+	TypeBroadcastKeyframe = "BROADCAST_KEYFRAME"
+	TypeSpectateStart     = "SPECTATE_START" // spectator: begin watching a match
+	TypeSpectateStop      = "SPECTATE_STOP"  // spectator: stop watching
 )
 
 // Server → Client message types
@@ -64,8 +70,11 @@ const (
 	// Spectating (server → spectator).
 	TypeSpectateBegin = "SPECTATE_BEGIN" // ack: stream is starting; history follows
 	TypeSpectateData  = "SPECTATE_DATA"  // a chunk of krec bytes (base64)
-	TypeSpectateEnd   = "SPECTATE_END"   // stream ended (match over / broadcaster left)
-	TypeSpectateFail  = "SPECTATE_FAIL"  // request rejected (not broadcasting, ended)
+	// Savestate keyframe sent to a joining spectator (chunked) before the krec
+	// tail, so it can restore to the keyframe's frame and fast-forward only the tail.
+	TypeSpectateKeyframe = "SPECTATE_KEYFRAME"
+	TypeSpectateEnd      = "SPECTATE_END"  // stream ended (match over / broadcaster left)
+	TypeSpectateFail     = "SPECTATE_FAIL" // request rejected (not broadcasting, ended)
 )
 
 // Failure reason codes
@@ -131,6 +140,14 @@ type RoomJoinRequest struct {
 
 type RoomKickRequest struct {
 	UserID uint64 `json:"userId"`
+}
+
+// RoomSwapSlotsRequest exchanges the seats (P1-P4) of two slots. Host-only and
+// only while the room is waiting. Either slot may be empty (the occupied player
+// just moves to the other slot). The server rebroadcasts ROOM_STATE after.
+type RoomSwapSlotsRequest struct {
+	SlotA int `json:"slotA"`
+	SlotB int `json:"slotB"`
 }
 
 // RoomUpdateSettingsRequest changes a waiting room's rollback parameters.
@@ -353,4 +370,29 @@ type SpectateEndPayload struct {
 type SpectateFailPayload struct {
 	MatchID uint64 `json:"matchId"`
 	Reason  string `json:"reason"`
+}
+
+// BroadcastKeyframeRequest carries one chunk of a periodic savestate keyframe.
+// Frame is the krec input-frame index the savestate corresponds to (its state is
+// "about to apply frame Frame's input"). The savestate (compressed) is split into
+// ChunkCount chunks to stay under the server's per-message read limit; the server
+// reassembles them and keeps only the latest complete keyframe.
+type BroadcastKeyframeRequest struct {
+	MatchID    uint64 `json:"matchId"`
+	Frame      int    `json:"frame"`
+	ChunkIndex int    `json:"chunkIndex"`
+	ChunkCount int    `json:"chunkCount"`
+	Data       string `json:"data"` // base64 savestate slice
+}
+
+// SpectateKeyframePayload delivers the latest keyframe (chunked) to a joining
+// spectator. After reassembling it, the spectator restores the savestate at Frame;
+// the SPECTATE_DATA that follows is the krec from Frame onward (header + tail), so
+// the spectator's first replayed input is Frame.
+type SpectateKeyframePayload struct {
+	MatchID    uint64 `json:"matchId"`
+	Frame      int    `json:"frame"`
+	ChunkIndex int    `json:"chunkIndex"`
+	ChunkCount int    `json:"chunkCount"`
+	Data       string `json:"data"` // base64 savestate slice
 }

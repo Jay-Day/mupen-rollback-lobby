@@ -133,6 +133,37 @@ func (r *Room) SetRollbackSettings(delay, prediction, pacing int, delayAuto, pre
 	r.PredictionAuto = predictionAuto
 }
 
+// SwapSlots exchanges the slot numbers of whoever occupies slotA and slotB. If
+// only one slot is occupied, that player simply moves to the other slot.
+// Callers should validate host/state/range first; this only mutates under the
+// lock. Returns true if a seat actually changed.
+func (r *Room) SwapSlots(slotA, slotB int) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if slotA == slotB {
+		return false
+	}
+	var seatA, seatB *RoomSeat
+	for _, seat := range r.Players {
+		switch seat.Slot {
+		case slotA:
+			seatA = seat
+		case slotB:
+			seatB = seat
+		}
+	}
+	if seatA == nil && seatB == nil {
+		return false
+	}
+	if seatA != nil {
+		seatA.Slot = slotB
+	}
+	if seatB != nil {
+		seatB.Slot = slotA
+	}
+	return true
+}
+
 // MarkKicked records that a user was just kicked, starting their rejoin cooldown.
 func (r *Room) MarkKicked(userID uint64) {
 	r.mu.Lock()

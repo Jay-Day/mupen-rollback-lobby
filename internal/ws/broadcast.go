@@ -28,7 +28,22 @@ type broadcast struct {
 	spectators map[uint64]*Client
 	closed     bool
 	liveFrame  int // broadcaster's latest stamped live krec frame
+
+	// Latest complete savestate keyframe (compressed bytes) + the krec input-frame
+	// index it corresponds to, so a late spectator can restore here and fast-forward
+	// only the tail. 0 frame = none yet (spectators fall back to full-spool replay).
+	keyframeFrame int
+	keyframeData  []byte
+	// In-progress reassembly of a chunked BROADCAST_KEYFRAME upload.
+	kfAsmFrame  int
+	kfAsmCount  int
+	kfAsmGot    int
+	kfAsmChunks [][]byte
 }
+
+// keyframeChunkBytes is the raw savestate slice size per keyframe message. base64
+// (~+33%) plus the JSON envelope must stay under the server read limit (1 MiB).
+const keyframeChunkBytes = 512 * 1024
 
 // broadcastManager owns all live broadcasts, keyed by match id.
 type broadcastManager struct {
@@ -138,6 +153,165 @@ func (m *broadcastManager) data(senderID, matchID uint64, b64 string, frame int)
 	}
 }
 
+// keyframe reassembles a chunked savestate keyframe uploaded by the broadcaster
+// and, once complete, commits it as the latest keyframe (frame + bytes). Only the
+// registered broadcaster may write.
+func (m *broadcastManager) keyframe(senderID, matchID uint64, frame, chunkIndex, chunkCount int, b64 string) {
+	m.mu.Lock()
+	b := m.byMatch[matchID]
+	m.mu.Unlock()
+	if b == nil {
+		return
+	}
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed || b.broadcasterID != senderID {
+		return
+	}
+	if chunkCount <= 0 || chunkIndex < 0 || chunkIndex >= chunkCount {
+		return
+	}
+
+	// (Re)start reassembly when a new keyframe begins (frame or shape changed).
+	if b.kfAsmChunks == nil || b.kfAsmFrame != frame || b.kfAsmCount != chunkCount {
+		b.kfAsmFrame = frame
+		b.kfAsmCount = chunkCount
+		b.kfAsmChunks = make([][]byte, chunkCount)
+		b.kfAsmGot = 0
+	}
+	if b.kfAsmChunks[chunkIndex] == nil {
+		b.kfAsmChunks[chunkIndex] = raw
+		b.kfAsmGot++
+	}
+	if b.kfAsmGot < b.kfAsmCount {
+		return
+	}
+
+	// Complete — assemble and commit, then drop the in-progress buffers.
+	total := 0
+	for _, c := range b.kfAsmChunks {
+		total += len(c)
+	}
+	buf := make([]byte, 0, total)
+	for _, c := range b.kfAsmChunks {
+		buf = append(buf, c...)
+	}
+	b.keyframeFrame = frame
+	b.keyframeData = buf
+	b.kfAsmChunks = nil
+	b.kfAsmGot = 0
+	slog.Info("broadcast keyframe stored", "match", matchID, "frame", frame, "bytes", len(buf))
+}
+
+// krecFrameOffset returns the byte offset of the (frame)-th input (0x12) record in
+// a krec buffer, or -1 if not present yet. Mirrors the client's record grammar:
+// KRC1=400 / KRC0=272 header, then 0x12 <u16 len> data | 0x14 nick\0 +4 | 0x08 nick\0 msg\0.
+func krecFrameOffset(data []byte, frame int) int64 {
+	n := len(data)
+	if frame < 0 || n < 272 {
+		return -1
+	}
+	hs := 272
+	if n >= 4 && string(data[0:4]) == "KRC1" {
+		hs = 400
+	}
+	if n < hs {
+		return -1
+	}
+	count := 0
+	p := hs
+	for p < n {
+		switch data[p] {
+		case 0x12:
+			if p+3 > n {
+				return -1
+			}
+			if count == frame {
+				return int64(p)
+			}
+			rlen := int(data[p+1]) | int(data[p+2])<<8
+			p += 3 + rlen
+			count++
+		case 0x14:
+			z := p + 1
+			for z < n && data[z] != 0 {
+				z++
+			}
+			if z >= n || z+1+4 > n {
+				return -1
+			}
+			p = z + 1 + 4
+		case 0x08:
+			z := p + 1
+			for z < n && data[z] != 0 {
+				z++
+			}
+			if z >= n {
+				return -1
+			}
+			z2 := z + 1
+			for z2 < n && data[z2] != 0 {
+				z2++
+			}
+			if z2 >= n {
+				return -1
+			}
+			p = z2 + 1
+		default:
+			return -1
+		}
+	}
+	return -1
+}
+
+// sendKeyframeChunks streams a stored savestate to one spectator as chunked
+// SPECTATE_KEYFRAME messages it can reassemble (same chunk size as the uplink).
+func sendKeyframeChunks(c *Client, matchID uint64, frame int, data []byte) {
+	total := (len(data) + keyframeChunkBytes - 1) / keyframeChunkBytes
+	if total < 1 {
+		total = 1
+	}
+	for i := 0; i < total; i++ {
+		start := i * keyframeChunkBytes
+		end := start + keyframeChunkBytes
+		if end > len(data) {
+			end = len(data)
+		}
+		c.sendEnvelope(protocol.TypeSpectateKeyframe, "", protocol.SpectateKeyframePayload{
+			MatchID:    matchID,
+			Frame:      frame,
+			ChunkIndex: i,
+			ChunkCount: total,
+			Data:       base64.StdEncoding.EncodeToString(data[start:end]),
+		})
+	}
+}
+
+// sendSpectateDataChunked streams a krec byte slice to one spectator as one or more
+// SPECTATE_DATA messages, each small enough to stay under the WS read limit. The
+// spectator appends chunks in order, so splitting at arbitrary byte boundaries is
+// fine — a record straddling two chunks completes when the second arrives. Sending
+// the whole spool as a single message blows past the 1 MiB limit on a long match and
+// gets silently dropped, leaving the spectator with no krec at all.
+func sendSpectateDataChunked(c *Client, matchID uint64, data []byte, liveFrame int) {
+	for off := 0; off < len(data); off += keyframeChunkBytes {
+		end := off + keyframeChunkBytes
+		if end > len(data) {
+			end = len(data)
+		}
+		c.sendEnvelope(protocol.TypeSpectateData, "", protocol.SpectateDataPayload{
+			MatchID: matchID,
+			Data:    base64.StdEncoding.EncodeToString(data[off:end]),
+			Frame:   liveFrame,
+		})
+	}
+}
+
 // spectateStart serves the krec history-so-far to a new spectator, then
 // registers them for the live tail. The snapshot read and the registration
 // happen under the broadcast lock, so the history plus all subsequent live
@@ -169,15 +343,40 @@ func (m *broadcastManager) spectateStart(c *Client, matchID uint64) {
 	}
 
 	c.sendEnvelope(protocol.TypeSpectateBegin, "", protocol.SpectateBeginPayload{MatchID: matchID})
+
+	// Prefer the keyframe path: if we hold a complete keyframe whose frame is
+	// present in the spool, send the savestate + only the krec [header + tail from
+	// that frame]. The spectator restores the savestate and its first replayed
+	// input is that frame, so catch-up is bounded to the tail regardless of how
+	// long the match has run. Fall back to the full spool (frame 0) otherwise —
+	// e.g. in the first ~60s before any keyframe exists.
+	if b.keyframeFrame > 0 && len(b.keyframeData) > 0 && len(data) > 0 {
+		if off := krecFrameOffset(data, b.keyframeFrame); off > 0 {
+			hs := 272
+			if len(data) >= 4 && string(data[0:4]) == "KRC1" {
+				hs = 400
+			}
+			tail := make([]byte, 0, hs+(len(data)-int(off)))
+			tail = append(tail, data[:hs]...)   // header so the spectator can parse it
+			tail = append(tail, data[off:]...)  // krec from the keyframe frame onward
+
+			sendKeyframeChunks(c, matchID, b.keyframeFrame, b.keyframeData)
+			sendSpectateDataChunked(c, matchID, tail, b.liveFrame)
+			b.spectators[c.user.ID] = c
+			slog.Info("spectate start (keyframe)", "match", matchID, "user", c.user.Username,
+				"frame", b.keyframeFrame, "savestate_bytes", len(b.keyframeData), "tail_bytes", len(tail))
+			return
+		}
+	}
+
 	if len(data) > 0 {
-		c.sendEnvelope(protocol.TypeSpectateData, "", protocol.SpectateDataPayload{
-			MatchID: matchID,
-			Data:    base64.StdEncoding.EncodeToString(data),
-			Frame:   b.liveFrame, // live edge so the joiner can fast-forward to it
-		})
+		// Chunked so a long match's full history (well over the 1 MiB WS limit) is
+		// actually delivered instead of dropped. Frame = live edge so the joiner can
+		// fast-forward to it.
+		sendSpectateDataChunked(c, matchID, data, b.liveFrame)
 	}
 	b.spectators[c.user.ID] = c
-	slog.Info("spectate start", "match", matchID, "user", c.user.Username, "history_bytes", len(data))
+	slog.Info("spectate start (full)", "match", matchID, "user", c.user.Username, "history_bytes", len(data))
 }
 
 func (m *broadcastManager) spectateStop(userID, matchID uint64) {
@@ -308,6 +507,14 @@ func (h *Hub) handleBroadcastData(c *Client, env protocol.Envelope) {
 		return
 	}
 	h.broadcasts.data(c.user.ID, req.MatchID, req.Data, req.Frame)
+}
+
+func (h *Hub) handleBroadcastKeyframe(c *Client, env protocol.Envelope) {
+	var req protocol.BroadcastKeyframeRequest
+	if err := json.Unmarshal(env.Data, &req); err != nil {
+		return
+	}
+	h.broadcasts.keyframe(c.user.ID, req.MatchID, req.Frame, req.ChunkIndex, req.ChunkCount, req.Data)
 }
 
 func (h *Hub) handleBroadcastEnd(c *Client, env protocol.Envelope) {
