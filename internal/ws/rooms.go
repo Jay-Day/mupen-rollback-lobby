@@ -267,6 +267,38 @@ func (h *Hub) handleRoomUpdateSettings(c *Client, env protocol.Envelope) {
 	h.broadcastRoomState(room)
 }
 
+// handleRoomSwapSlots lets the host re-order players by exchanging two seats
+// (P1-P4). Host-only and only while the room is waiting. Either slot may be
+// empty (the occupied player just moves to it). Rebroadcasts ROOM_STATE.
+func (h *Hub) handleRoomSwapSlots(c *Client, env protocol.Envelope) {
+	var req protocol.RoomSwapSlotsRequest
+	if err := json.Unmarshal(env.Data, &req); err != nil {
+		return
+	}
+	room := c.user.CurrentRoom
+	if room == nil {
+		return
+	}
+	if room.Host == nil || room.Host.ID != c.user.ID {
+		slog.Debug("ROOM_SWAP_SLOTS rejected: not host", "user", c.user.Username, "room", room.ID)
+		return
+	}
+	if room.State != state.RoomStateWaiting {
+		slog.Debug("ROOM_SWAP_SLOTS rejected: not waiting", "room", room.ID, "state", room.State)
+		return
+	}
+	if req.SlotA < 1 || req.SlotA > room.MaxPlayers ||
+		req.SlotB < 1 || req.SlotB > room.MaxPlayers || req.SlotA == req.SlotB {
+		slog.Debug("ROOM_SWAP_SLOTS rejected: invalid slots", "room", room.ID, "a", req.SlotA, "b", req.SlotB)
+		return
+	}
+	if !room.SwapSlots(req.SlotA, req.SlotB) {
+		return // both slots empty — nothing changed, skip the rebroadcast
+	}
+	slog.Info("room slots swapped", "room", room.ID, "a", req.SlotA, "b", req.SlotB, "by", c.user.Username)
+	h.broadcastRoomState(room)
+}
+
 // handleRoomKick lets the host remove another player from the room (and the
 // in-progress match, if any). Reuses removeUserFromRoom, so the target gets a
 // ROOM_LEFT{reason:"kicked"} and remaining players get MATCH_PEER_LEFT.
