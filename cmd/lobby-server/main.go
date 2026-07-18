@@ -91,6 +91,9 @@ func main() {
 			slog.Debug("rate limited", "ip", ip, "retry_after", retryAfter)
 			return
 		}
+		// ServeWS blocks for the connection's lifetime; balance the
+		// active-connection count when it ends, however it ends.
+		defer gate.Release(ip)
 		hub.ServeWS(w, r, ip)
 	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {

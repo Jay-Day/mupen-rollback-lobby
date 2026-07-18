@@ -2,6 +2,7 @@ package ratelimit
 
 import (
 	"context"
+	"net"
 	"sync"
 	"time"
 )
@@ -18,7 +19,8 @@ const (
 	BanDuration = 5 * time.Minute
 
 	// MaxConcurrentPerIP caps how many active WS connections one IP may hold.
-	MaxConcurrentPerIP = 3
+	// 4 so a full 4-player group behind one home NAT can all connect.
+	MaxConcurrentPerIP = 4
 )
 
 // ConnectGate enforces per-IP connect rate limits and concurrent connection caps.
@@ -42,15 +44,32 @@ func NewConnectGate() *ConnectGate {
 
 // Allow records an attempt from ip and reports whether it may proceed.
 // If denied, the returned duration is the time remaining until the IP may try again.
-//
-// NOTE: rate limiting and per-IP concurrency caps are disabled for the
-// duration of 4-player localhost testing — every Allow returns true. To
-// re-enable, restore the prior body that checks bannedUntil / active /
-// timestamps. The active counter is still bumped so Release stays balanced.
+// Loopback is exempt so local multi-instance testing is never throttled.
 func (g *ConnectGate) Allow(ip string) (bool, time.Duration) {
+	if isLoopback(ip) {
+		return true, 0
+	}
+	now := time.Now()
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	a := g.getOrCreate(ip)
+
+	if now.Before(a.bannedUntil) {
+		return false, a.bannedUntil.Sub(now)
+	}
+	if a.active >= MaxConcurrentPerIP {
+		return false, RateLimitWindow
+	}
+
+	// Slide the attempt window, then check the rate.
+	a.timestamps = pruneWindow(a.timestamps, now)
+	if len(a.timestamps) >= RateLimit {
+		a.bannedUntil = now.Add(BanDuration)
+		a.timestamps = a.timestamps[:0]
+		return false, BanDuration
+	}
+
+	a.timestamps = append(a.timestamps, now)
 	a.active++
 	return true, 0
 }
@@ -58,6 +77,9 @@ func (g *ConnectGate) Allow(ip string) (bool, time.Duration) {
 // Release decrements the active-connection count for ip.
 // Call this when a connection closes (regardless of reason).
 func (g *ConnectGate) Release(ip string) {
+	if isLoopback(ip) {
+		return
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	a, ok := g.attempts[ip]
@@ -87,10 +109,30 @@ func (g *ConnectGate) prune(now time.Time) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	for ip, a := range g.attempts {
+		a.timestamps = pruneWindow(a.timestamps, now)
 		if a.active == 0 && now.After(a.bannedUntil) && len(a.timestamps) == 0 {
 			delete(g.attempts, ip)
 		}
 	}
+}
+
+// pruneWindow drops timestamps older than RateLimitWindow, in place.
+func pruneWindow(ts []time.Time, now time.Time) []time.Time {
+	cutoff := now.Add(-RateLimitWindow)
+	kept := ts[:0]
+	for _, t := range ts {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	return kept
+}
+
+func isLoopback(ip string) bool {
+	if parsed := net.ParseIP(ip); parsed != nil {
+		return parsed.IsLoopback()
+	}
+	return false
 }
 
 func (g *ConnectGate) getOrCreate(ip string) *ipAttempts {
