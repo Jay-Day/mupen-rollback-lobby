@@ -38,6 +38,14 @@ func (h *Hub) handleRoomCreate(c *Client, env protocol.Envelope) {
 	if len(name) > roomNameMaxLen {
 		name = name[:roomNameMaxLen]
 	}
+	// Room names show up in every client's room list — filter them like chat.
+	if h.mod != nil {
+		if term, hit := h.mod.FilterMessage(name); hit {
+			c.sendRoomCreateFail(env.ID, protocol.ReasonInvalidPayload)
+			slog.Info("room name blocked by filter", "user", c.user.Username, "ip", c.ip, "term", term)
+			return
+		}
+	}
 	if req.MaxPlayers < minRoomPlayers {
 		req.MaxPlayers = minRoomPlayers
 	} else if req.MaxPlayers > maxRoomPlayers {
