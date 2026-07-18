@@ -27,7 +27,8 @@ type broadcast struct {
 	file       *os.File
 	spectators map[uint64]*Client
 	closed     bool
-	liveFrame  int // broadcaster's latest stamped live krec frame
+	liveFrame  int   // broadcaster's latest stamped live krec frame
+	written    int64 // spool bytes written, enforced against maxSpoolBytes
 
 	// Latest complete savestate keyframe (compressed bytes) + the krec input-frame
 	// index it corresponds to, so a late spectator can restore here and fast-forward
@@ -44,6 +45,16 @@ type broadcast struct {
 // keyframeChunkBytes is the raw savestate slice size per keyframe message. base64
 // (~+33%) plus the JSON envelope must stay under the server read limit (1 MiB).
 const keyframeChunkBytes = 512 * 1024
+
+// maxKeyframeChunks bounds the chunk count a broadcaster may declare. A real
+// savestate (~17 MB uncompressed) is ~33 chunks; anything beyond this is a
+// hostile client trying to make the server allocate a huge reassembly buffer.
+const maxKeyframeChunks = 64
+
+// maxSpoolBytes caps one broadcast's spool file. A krec is input records — even
+// an hours-long 4-player match is a few MB — so hitting this means a hostile or
+// runaway broadcaster, and the broadcast is ended rather than filling the disk.
+const maxSpoolBytes = 64 << 20
 
 // broadcastManager owns all live broadcasts, keyed by match id.
 type broadcastManager struct {
@@ -121,10 +132,22 @@ func (m *broadcastManager) data(senderID, matchID uint64, b64 string, frame int)
 	}
 
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if b.closed || b.broadcasterID != senderID {
+		b.mu.Unlock()
 		return
 	}
+	b.written += int64(len(raw))
+	if b.written > maxSpoolBytes {
+		// Can't finish while holding b.mu (finish re-locks it); end outside.
+		b.mu.Unlock()
+		slog.Warn("broadcast: spool size limit hit, ending broadcast",
+			"match", matchID, "bytes", b.written)
+		if m.endByMatch(matchID) {
+			m.hub.broadcastRoomList()
+		}
+		return
+	}
+	defer b.mu.Unlock()
 	if frame > b.liveFrame {
 		b.liveFrame = frame // track the live edge for spectate fast-forward
 	}
@@ -173,7 +196,7 @@ func (m *broadcastManager) keyframe(senderID, matchID uint64, frame, chunkIndex,
 	if b.closed || b.broadcasterID != senderID {
 		return
 	}
-	if chunkCount <= 0 || chunkIndex < 0 || chunkIndex >= chunkCount {
+	if chunkCount <= 0 || chunkCount > maxKeyframeChunks || chunkIndex < 0 || chunkIndex >= chunkCount {
 		return
 	}
 

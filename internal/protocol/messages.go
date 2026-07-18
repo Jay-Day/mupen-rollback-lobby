@@ -44,6 +44,10 @@ const (
 	TypeBroadcastKeyframe = "BROADCAST_KEYFRAME"
 	TypeSpectateStart     = "SPECTATE_START" // spectator: begin watching a match
 	TypeSpectateStop      = "SPECTATE_STOP"  // spectator: stop watching
+
+	// Moderation (client → server).
+	TypeAdminAuth = "ADMIN_AUTH" // claim moderator role with a password
+	TypeModAction = "MOD_ACTION" // moderator: kick/mute/timeout/ban/unban/unmute/list
 )
 
 // Server → Client message types
@@ -75,6 +79,12 @@ const (
 	TypeSpectateKeyframe = "SPECTATE_KEYFRAME"
 	TypeSpectateEnd      = "SPECTATE_END"  // stream ended (match over / broadcaster left)
 	TypeSpectateFail     = "SPECTATE_FAIL" // request rejected (not broadcasting, ended)
+
+	// Moderation (server → client).
+	TypeAdminAuthOK   = "ADMIN_AUTH_OK"   // moderator role granted
+	TypeAdminAuthFail = "ADMIN_AUTH_FAIL" // wrong password / no admins configured
+	TypeModNotice     = "MOD_NOTICE"      // system notice to a user (blocked/muted/kicked/info)
+	TypeModList       = "MOD_LIST"        // reply to a moderator's "list" action
 )
 
 // Failure reason codes
@@ -395,4 +405,49 @@ type SpectateKeyframePayload struct {
 	ChunkIndex int    `json:"chunkIndex"`
 	ChunkCount int    `json:"chunkCount"`
 	Data       string `json:"data"` // base64 savestate slice
+}
+
+// -- Moderation payloads --
+
+// AdminAuthRequest claims the moderator role with a shared/admin password.
+type AdminAuthRequest struct {
+	Password string `json:"password"`
+}
+
+// AdminAuthOKResponse confirms moderator role and echoes the admin's name.
+type AdminAuthOKResponse struct {
+	Name string `json:"name"`
+}
+
+// ModActionRequest is a moderator command. Action is one of:
+// "kick", "mute", "timeout", "ban", "unban", "unmute", "list".
+// Target is a username for kick/mute/timeout/ban, or an IP for unban/unmute.
+// Duration is a Go duration string ("10m", "1h", "30s"); empty/"0" = permanent.
+type ModActionRequest struct {
+	Action   string `json:"action"`
+	Target   string `json:"target"`
+	Duration string `json:"duration,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+// ModNoticePayload is a system message shown to a user (e.g. "message blocked",
+// "you were muted", or a moderator's command result). Severity is "info",
+// "warn", or "error" for client-side styling.
+type ModNoticePayload struct {
+	Text     string `json:"text"`
+	Severity string `json:"severity"`
+}
+
+// ModSanction is one ban/mute entry surfaced to a moderator via MOD_LIST.
+type ModSanction struct {
+	IP     string `json:"ip"`
+	Reason string `json:"reason"`
+	By     string `json:"by"`
+	Until  int64  `json:"until"` // unix ms; 0 = permanent
+}
+
+// ModListReply returns the current bans and mutes to a moderator.
+type ModListReply struct {
+	Bans  []ModSanction `json:"bans"`
+	Mutes []ModSanction `json:"mutes"`
 }
