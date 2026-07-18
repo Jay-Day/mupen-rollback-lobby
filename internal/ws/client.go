@@ -25,6 +25,27 @@ type Client struct {
 
 	user *state.User
 	send chan []byte
+
+	// Moderation: set once a connection authenticates via ADMIN_AUTH.
+	isModerator bool
+	adminName   string
+}
+
+// notice sends a MOD_NOTICE to this client. severity is "info"/"warn"/"error".
+func (c *Client) notice(severity, text string) {
+	c.sendEnvelope(protocol.TypeModNotice, "", protocol.ModNoticePayload{
+		Text:     text,
+		Severity: severity,
+	})
+}
+
+// disconnect best-effort delivers a final notice, then closes the connection,
+// which unblocks readLoop and triggers the normal unregister/cleanup path.
+func (c *Client) disconnect(reason string) {
+	if reason != "" {
+		c.notice("error", reason)
+	}
+	_ = c.conn.Close(websocket.StatusNormalClosure, "")
 }
 
 // readLoop drives the lifetime of one client.

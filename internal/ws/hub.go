@@ -12,6 +12,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/jay-day/rmgk-lobby/internal/geo"
+	"github.com/jay-day/rmgk-lobby/internal/moderation"
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
 	"github.com/jay-day/rmgk-lobby/internal/state"
 )
@@ -38,9 +39,10 @@ type Hub struct {
 	lobbyChat  *chatHistory
 	matchmaker *matchmaker
 	broadcasts *broadcastManager
+	mod        *moderation.Manager
 }
 
-func NewHub(s *state.State, udpPublicAddr string) *Hub {
+func NewHub(s *state.State, udpPublicAddr string, mod *moderation.Manager) *Hub {
 	h := &Hub{
 		state:         s,
 		udpPublicAddr: udpPublicAddr,
@@ -49,9 +51,18 @@ func NewHub(s *state.State, udpPublicAddr string) *Hub {
 		unregister:    make(chan *Client, 32),
 		lobbyChat:     newChatHistory(),
 		matchmaker:    newMatchmaker(),
+		mod:           mod,
 	}
 	h.broadcasts = newBroadcastManager(h)
 	return h
+}
+
+// IsBanned reports whether an IP is currently banned (used at connect time).
+func (h *Hub) IsBanned(ip string) (moderation.Sanction, bool) {
+	if h.mod == nil {
+		return moderation.Sanction{}, false
+	}
+	return h.mod.IsBanned(ip)
 }
 
 // Run owns the registration/unregistration channels.
@@ -105,6 +116,13 @@ func (h *Hub) cleanupClient(c *Client) {
 // ServeWS upgrades an HTTP request to WebSocket and runs the client until disconnect.
 // The caller (main.go) has already passed the rate limiter gate.
 func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request, ip string) {
+	// Reject banned IPs before the WebSocket upgrade so they never connect.
+	if s, banned := h.IsBanned(ip); banned {
+		http.Error(w, "banned", http.StatusForbidden)
+		slog.Info("rejected banned ip", "ip", ip, "until", s.Until, "reason", s.Reason)
+		return
+	}
+
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		// TODO: tighten OriginPatterns before production.
 		InsecureSkipVerify: true,
@@ -239,6 +257,10 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleSpectateStart(c, env)
 	case protocol.TypeSpectateStop:
 		h.handleSpectateStop(c, env)
+	case protocol.TypeAdminAuth:
+		h.handleAdminAuth(c, env)
+	case protocol.TypeModAction:
+		h.handleModAction(c, env)
 	default:
 		slog.Debug("unknown message", "type", env.Type, "user", c.user.ID)
 	}
@@ -338,6 +360,23 @@ func (h *Hub) handleChatSend(c *Client, env protocol.Envelope) {
 	msg := strings.TrimSpace(req.Message)
 	if msg == "" {
 		return
+	}
+
+	if h.mod != nil {
+		// Muted users can't send chat (moderators are exempt).
+		if !c.isModerator {
+			if s, muted := h.mod.IsMuted(c.ip); muted {
+				c.notice("warn", "You are muted"+untilSuffix(s.Until)+".")
+				return
+			}
+		}
+		// Hate-speech filter: drop the message, notify only the sender. Never
+		// echo the matched term back; log it server-side for review.
+		if term, hit := h.mod.FilterMessage(msg); hit {
+			c.notice("warn", "Your message was blocked by the chat filter.")
+			slog.Info("chat blocked", "user", c.user.Username, "id", c.user.ID, "ip", c.ip, "term", term)
+			return
+		}
 	}
 
 	payload := protocol.ChatMsgPayload{

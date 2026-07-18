@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jay-day/rmgk-lobby/internal/moderation"
 	"github.com/jay-day/rmgk-lobby/internal/ratelimit"
 	"github.com/jay-day/rmgk-lobby/internal/state"
 	"github.com/jay-day/rmgk-lobby/internal/udp"
@@ -37,7 +38,27 @@ func main() {
 
 	gameState := state.New()
 	gate := ratelimit.NewConnectGate()
-	hub := ws.NewHub(gameState, *udpPublicAddr)
+
+	// Moderation: hate-speech filter (embedded blocklist, optional file override),
+	// admin credentials, and the persisted IP ban list.
+	terms := moderation.DefaultTerms()
+	if p := os.Getenv("RMGK_BLOCKLIST_PATH"); p != "" {
+		if t, err := moderation.LoadBlocklistFile(p); err != nil {
+			slog.Warn("blocklist override load failed; using embedded default", "path", p, "err", err)
+		} else {
+			terms = t
+		}
+	}
+	admins, err := moderation.LoadAdmins(envOr("RMGK_ADMINS_PATH", "admins.json"))
+	if err != nil {
+		slog.Error("admins.json load failed", "err", err)
+		os.Exit(1)
+	}
+	banPath := envOr("RMGK_BANLIST_PATH", "bans.json")
+	mod := moderation.NewManager(moderation.NewFilter(terms), admins, banPath)
+	slog.Info("moderation ready", "blocklist_terms", mod.FilterSize(), "admins", mod.AdminCount(), "banlist", banPath)
+
+	hub := ws.NewHub(gameState, *udpPublicAddr, mod)
 
 	udpListenAddr, err := net.ResolveUDPAddr("udp", *udpAddr)
 	if err != nil {
@@ -100,6 +121,13 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("http shutdown error", "err", err)
 	}
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 
 func extractIP(r *http.Request) string {

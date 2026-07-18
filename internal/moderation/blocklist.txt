@@ -1,0 +1,80 @@
+# RMG-K lobby chat blocklist
+# ---------------------------------------------------------------------------
+# Curated HATE-SPEECH list: racial / ethnic / religious slurs and anti-LGBTQ /
+# anti-trans slurs. This is intentionally NOT a general profanity filter --
+# "shit", "fuck", "ass", etc. are allowed.
+#
+# Format: one base term per line. Blank lines and lines starting with '#' are
+# ignored. You do NOT need leetspeak/spacing/repeat variants -- the filter
+# normalizes those (n1gger, niiigger, "n i g g e r" all match "nigger").
+#
+# Override this file at runtime with RMGK_BLOCKLIST_PATH=/path/to/list.txt.
+# Edit freely and restart the server to apply.
+# ---------------------------------------------------------------------------
+
+# --- anti-Black ---
+nigger
+nigga
+niglet
+coon
+jigaboo
+porchmonkey
+spearchucker
+
+# --- anti-Asian (East/South/Southeast) ---
+chink
+chinaman
+gook
+slanteye
+zipperhead
+dink
+jap
+nip
+paki
+
+# --- anti-Hispanic / Latino ---
+spic
+wetback
+beaner
+sudaca
+
+# --- anti-Arab / Muslim / South Asian ---
+raghead
+towelhead
+sandnigger
+camatador
+durka
+muzzie
+
+# --- anti-Indigenous ---
+injun
+prairienigger
+timbernigger
+
+# --- anti-Semitic ---
+kike
+hymie
+heeb
+sheeny
+yid
+
+# --- anti-Roma ---
+gyppo
+
+# --- anti-LGBTQ / homophobic ---
+faggot
+faggit
+poofter
+batty boy
+ladyboy
+
+# --- anti-trans / transphobic ---
+tranny
+shemale
+heshe
+troon
+transtrender
+# "trap" is intentionally omitted by default: it collides with the extremely
+# common gaming phrase "it's a trap" (and trap music / Yu-Gi-Oh trap cards).
+# Uncomment if you want it blocked anyway.
+#trap
