@@ -12,6 +12,10 @@ import (
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
 )
 
+// maxAuthFails is how many bad ADMIN_AUTH passwords one connection gets
+// before it is disconnected.
+const maxAuthFails = 5
+
 // handleAdminAuth validates a password against the configured admins and, on
 // success, elevates this connection to moderator for its lifetime.
 func (h *Hub) handleAdminAuth(c *Client, env protocol.Envelope) {
@@ -27,7 +31,13 @@ func (h *Hub) handleAdminAuth(c *Client, env protocol.Envelope) {
 	}
 	name, ok := h.mod.AuthenticateAdmin(req.Password)
 	if !ok {
-		slog.Info("admin auth failed", "user", c.user.Username, "ip", c.ip)
+		c.authFails++
+		slog.Info("admin auth failed", "user", c.user.Username, "ip", c.ip, "fails", c.authFails)
+		if c.authFails >= maxAuthFails {
+			// Cut off brute-forcing; reconnecting costs them the connect gate.
+			c.disconnect("Too many failed login attempts.")
+			return
+		}
 		c.sendEnvelope(protocol.TypeAdminAuthFail, env.ID, protocol.ModNoticePayload{
 			Text: "Incorrect password.", Severity: "error",
 		})

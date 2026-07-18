@@ -371,6 +371,13 @@ func (h *Hub) handleChatSend(c *Client, env protocol.Envelope) {
 		return
 	}
 
+	// Per-client flood limit: chat fans out to every connected client, so a
+	// spammer amplifies through the whole lobby. Moderators are exempt.
+	if !c.isModerator && !c.allowChat(time.Now()) {
+		c.notice("warn", "You're sending messages too fast — slow down.")
+		return
+	}
+
 	if h.mod != nil {
 		// Muted users can't send chat (moderators are exempt).
 		if !c.isModerator {

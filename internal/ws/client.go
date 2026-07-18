@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"regexp"
+	"time"
 
 	"github.com/coder/websocket"
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
@@ -29,6 +30,33 @@ type Client struct {
 	// Moderation: set once a connection authenticates via ADMIN_AUTH.
 	isModerator bool
 	adminName   string
+	authFails   int // failed ADMIN_AUTH attempts; disconnect at maxAuthFails
+
+	// Chat flood window. Only touched from this client's read loop, so no lock.
+	chatTimes []time.Time
+}
+
+const (
+	chatBurst  = 5 // max chat messages per chatWindow
+	chatWindow = 5 * time.Second
+)
+
+// allowChat records a chat attempt and reports whether it's within the flood
+// limit. Called only from this client's read loop.
+func (c *Client) allowChat(now time.Time) bool {
+	cutoff := now.Add(-chatWindow)
+	kept := c.chatTimes[:0]
+	for _, t := range c.chatTimes {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	c.chatTimes = kept
+	if len(c.chatTimes) >= chatBurst {
+		return false
+	}
+	c.chatTimes = append(c.chatTimes, now)
+	return true
 }
 
 // notice sends a MOD_NOTICE to this client. severity is "info"/"warn"/"error".
