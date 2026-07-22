@@ -16,6 +16,7 @@ import (
 const (
 	qmDefaultDelay      = 2
 	qmDefaultPrediction = 7
+	qmDefaultPacing     = 1 // smooth/asymmetric — the only model current clients run
 	qmDefaultMaxPlayers = 2
 
 	// Warmup window between pairing and auto-start. Long enough for both clients
@@ -225,6 +226,7 @@ func (h *Hub) quickMatchAttempt(searcher *state.User) {
 		MaxPlayers: qmDefaultMaxPlayers,
 		Delay:      qmDefaultDelay,
 		Prediction: qmDefaultPrediction,
+		Pacing:     qmDefaultPacing,
 		// Quick Match is auto-tuned: the host resolves delay from ping during
 		// the warmup, so open on Auto for everyone (label matches the host).
 		DelayAuto:      true,
