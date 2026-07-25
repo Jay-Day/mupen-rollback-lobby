@@ -48,6 +48,18 @@ func NewAnchor(conn *net.UDPConn, s *state.State) *Anchor {
 	}
 }
 
+func endpointFromAddr(addr *net.UDPAddr) (string, uint16) {
+	// Prefer the IPv4 form when this is a v4-mapped v6 address so the
+	// string we hand to clients (which they then feed to GekkoNet) is
+	// a clean dotted-quad — IPv6 strings have colons that confuse the
+	// pipe-delimited address format downstream.
+    ip := addr.IP.String()
+    if ip4 := addr.IP.To4(); ip4 != nil {
+        ip = ip4.String()
+    }
+    return ip, uint16(addr.Port)
+}
+
 // Run consumes UDP packets until ctx is cancelled or the conn is closed.
 func (a *Anchor) Run(ctx context.Context) {
 	buf := make([]byte, readBufSize)
@@ -89,19 +101,19 @@ func (a *Anchor) Run(ctx context.Context) {
 
 		switch op {
 		case opRegister:
-			// Prefer the IPv4 form when this is a v4-mapped v6 address so the
-			// string we hand to clients (which they then feed to GekkoNet) is
-			// a clean dotted-quad — IPv6 strings have colons that confuse the
-			// pipe-delimited address format downstream.
-			ip := addr.IP.String()
-			if ip4 := addr.IP.To4(); ip4 != nil {
-				ip = ip4.String()
-			}
-			user.SetUDPEndpoint(ip, uint16(addr.Port))
+			// Set up our UDP Endpoint for the given user
+			ip, port := endpointFromAddr(addr)
+			user.SetUDPEndpoint(ip, port)
+			
 			reply := buildRegisterReply(addr)
 			_, _ = a.conn.WriteToUDP(reply, addr)
 		case opKeepalive:
-			// Refresh-only; echo a tiny ack so the client knows the mapping is live.
+			// Refresh our connection AND update UDPEndpoint in case it changed
+			// Seems to resolve a bug where certain users could not ping each
+			//     other sometimes due to ports changing unexpectedly
+			ip, port := endpointFromAddr(addr)			
+			user.SetUDPEndpoint(ip, port)
+	
 			ack := []byte{magic0, magic1, magic2, magic3, opKeepalive}
 			_, _ = a.conn.WriteToUDP(ack, addr)
 		default:
