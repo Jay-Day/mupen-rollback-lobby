@@ -21,14 +21,22 @@ const (
 	opKeepalive byte = 0x02
 
 	// Header: 4 magic + 1 op + 8 user id = 13 bytes minimum.
-	minPacketLen = 13
+	// Updated clients may append their LAN-side UDP socket port as a u16-be:
+	//
+	//     [RMGK][op][user id:u64-be][local port:u16-be]
+	//
+	// Keeping the original 13-byte packet valid preserves compatibility with
+	// older clients while allowing the server to advertise a usable LAN
+	// endpoint to peers behind the same router.
+	minPacketLen      = 13
+	extendedPacketLen = minPacketLen + 2
 
 	readBufSize = 64
 )
 
 // Anchor is a small UDP service used for two things:
-//   1. STUN-like reflection so a client can learn its own NAT-mapped UDP endpoint.
-//   2. Keepalive packets to hold the NAT mapping open while a user sits in the lobby.
+//  1. STUN-like reflection so a client can learn its own NAT-mapped UDP endpoint.
+//  2. Keepalive packets to hold the NAT mapping open while a user sits in the lobby.
 //
 // The same observed endpoint is used as the publicIp:publicPort that the server
 // shares with peers in MATCH_BEGIN.
@@ -53,11 +61,11 @@ func endpointFromAddr(addr *net.UDPAddr) (string, uint16) {
 	// string we hand to clients (which they then feed to GekkoNet) is
 	// a clean dotted-quad — IPv6 strings have colons that confuse the
 	// pipe-delimited address format downstream.
-    ip := addr.IP.String()
-    if ip4 := addr.IP.To4(); ip4 != nil {
-        ip = ip4.String()
-    }
-    return ip, uint16(addr.Port)
+	ip := addr.IP.String()
+	if ip4 := addr.IP.To4(); ip4 != nil {
+		ip = ip4.String()
+	}
+	return ip, uint16(addr.Port)
 }
 
 // Run consumes UDP packets until ctx is cancelled or the conn is closed.
@@ -94,6 +102,9 @@ func (a *Anchor) Run(ctx context.Context) {
 		if user == nil {
 			continue
 		}
+		if localPort, ok := localPortFromPacket(buf[:n]); ok {
+			user.SetLocalPort(localPort)
+		}
 
 		a.mu.Lock()
 		a.lastSeen[userID] = time.Now()
@@ -104,22 +115,33 @@ func (a *Anchor) Run(ctx context.Context) {
 			// Set up our UDP Endpoint for the given user
 			ip, port := endpointFromAddr(addr)
 			user.SetUDPEndpoint(ip, port)
-			
+
 			reply := buildRegisterReply(addr)
 			_, _ = a.conn.WriteToUDP(reply, addr)
 		case opKeepalive:
 			// Refresh our connection AND update UDPEndpoint in case it changed
 			// Seems to resolve a bug where certain users could not ping each
 			//     other sometimes due to ports changing unexpectedly
-			ip, port := endpointFromAddr(addr)			
+			ip, port := endpointFromAddr(addr)
 			user.SetUDPEndpoint(ip, port)
-	
+
 			ack := []byte{magic0, magic1, magic2, magic3, opKeepalive}
 			_, _ = a.conn.WriteToUDP(ack, addr)
 		default:
 			slog.Debug("unknown udp op", "op", op, "user", userID)
 		}
 	}
+}
+
+// localPortFromPacket reads the optional backward-compatible LAN-port suffix
+// used by updated REGISTER and KEEPALIVE packets. Port zero is treated as not
+// supplied, so it cannot erase a previously reported endpoint.
+func localPortFromPacket(packet []byte) (uint16, bool) {
+	if len(packet) < extendedPacketLen {
+		return 0, false
+	}
+	port := binary.BigEndian.Uint16(packet[minPacketLen:extendedPacketLen])
+	return port, port != 0
 }
 
 // LastSeen returns the most recent time the user sent a UDP packet to the anchor.

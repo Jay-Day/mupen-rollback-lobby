@@ -358,12 +358,14 @@ func (h *Hub) startMatchInRoom(room *state.Room, initiator string) {
 		seat.User.SetState(state.UserStatePlaying)
 
 		ip, port := seat.User.GetUDPEndpoint()
+		localIP, localPort := seat.User.GetLocalEndpoint()
 		peers = append(peers, protocol.MatchPeer{
 			UserID:     seat.User.ID,
 			Username:   seat.User.Username,
 			PublicIP:   ip,
 			PublicPort: port,
-			LocalIP:    seat.User.LocalIP,
+			LocalIP:    localIP,
+			LocalPort:  localPort,
 			Slot:       seat.Slot,
 		})
 	}
