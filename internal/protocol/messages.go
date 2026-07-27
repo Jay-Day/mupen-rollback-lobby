@@ -112,6 +112,10 @@ type HelloRequest struct {
 	RomHashes     []string `json:"romHashes"`
 	LocalIP       string   `json:"localIp,omitempty"`
 	LocalPort     uint16   `json:"localPort,omitempty"`
+	// Self-reported transport medium ("wifi", "lan", "cellular", ...) so peers
+	// can gauge connection-quality risk Slippi-style. Optional; older clients
+	// simply omit it.
+	Connection string `json:"connection,omitempty"`
 }
 
 type HeartbeatRequest struct {
@@ -230,6 +234,8 @@ type PresenceUser struct {
 	State           string `json:"state"`
 	Region          string `json:"region"`
 	Country         string `json:"country,omitempty"`
+	ClientVersion   string `json:"clientVersion,omitempty"`
+	Connection      string `json:"connection,omitempty"`
 	PingToServer    uint16 `json:"pingToServer"`
 	CurrentRoomID   uint64 `json:"currentRoomId,omitempty"`
 	CurrentRoomName string `json:"currentRoomName,omitempty"`
