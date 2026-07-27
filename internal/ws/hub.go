@@ -401,6 +401,7 @@ func (h *Hub) handleChatSend(c *Client, env protocol.Envelope) {
 		FromUsername: c.user.Username,
 		Message:      truncateMessage(msg),
 		ServerTime:   nowMs(),
+		Admin:        c.isModerator,
 	}
 
 	switch req.Channel {

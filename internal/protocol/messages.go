@@ -213,6 +213,9 @@ type ChatMsgPayload struct {
 	FromUsername string `json:"fromUsername"`
 	Message      string `json:"message"`
 	ServerTime   int64  `json:"serverTime"`
+	// Sender was authenticated as a moderator (ADMIN_AUTH) when sending.
+	// Clients use this to trust admin-only chat directives like "@notify".
+	Admin bool `json:"admin,omitempty"`
 }
 
 type ChatHistoryReply struct {
