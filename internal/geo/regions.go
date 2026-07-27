@@ -1,11 +1,11 @@
 // Package geo maps a public IP address to a coarse region code that the
-// lobby exposes to other clients for ping estimation.
+// lobby exposes to other clients for ping estimation, plus the ISO country
+// code that drives the client's flag display (Fightcade-style).
 //
 // Privacy: the underlying lookup uses an embedded country-level database
 // (phuslu/iploc). We deliberately do NOT use a city-level database — the
-// region buckets here aggregate ~250 ISO country codes into 9 continental
-// regions, so what other clients see is no more precise than "Europe
-// (West)" or "Asia (East)". The raw country code never leaves this package.
+// most precise thing other clients ever see is the country flag; nothing
+// below country level is looked up or stored.
 package geo
 
 import (
@@ -122,6 +122,24 @@ func RegionFromIP(ipStr string) string {
 		return region
 	}
 	return DefaultRegion
+}
+
+// CountryFromIP resolves a string IP to its ISO 3166-1 alpha-2 country code
+// (upper-case), or "" when the IP is empty, invalid, private, or unknown.
+// Clients render this as a flag next to the player's name.
+func CountryFromIP(ipStr string) string {
+	if ipStr == "" {
+		return ""
+	}
+	ip := net.ParseIP(ipStr)
+	if ip == nil || !isPublicUnicast(ip) {
+		return ""
+	}
+	raw := iploc.Country(ip)
+	if len(raw) != 2 {
+		return ""
+	}
+	return strings.ToUpper(string(raw))
 }
 
 // isPublicUnicast filters out loopback, link-local, multicast, and RFC1918

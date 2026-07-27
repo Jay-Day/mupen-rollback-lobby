@@ -255,6 +255,7 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		LocalIP:   req.LocalIP,
 		LocalPort: req.LocalPort,
 		Region:    region,
+		Country:   geo.CountryFromIP(c.ip),
 		JoinedAt:  time.Now(),
 		LastSeen:  time.Now(),
 		Send:      c.send,
@@ -516,6 +517,7 @@ func (h *Hub) presenceUserFromState(u *state.User) protocol.PresenceUser {
 		Username:     u.Username,
 		State:        string(u.GetState()),
 		Region:       u.Region,
+		Country:      u.Country,
 		PingToServer: u.PingToServer,
 	}
 	if u.CurrentRoom != nil {

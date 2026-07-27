@@ -33,6 +33,7 @@ type User struct {
 	LocalIP       string
 	LocalPort     uint16
 	Region        string
+	Country       string // ISO 3166-1 alpha-2, "" when unknown; drives client flags
 
 	PingToServer uint16
 

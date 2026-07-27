@@ -229,6 +229,7 @@ type PresenceUser struct {
 	Username        string `json:"username"`
 	State           string `json:"state"`
 	Region          string `json:"region"`
+	Country         string `json:"country,omitempty"`
 	PingToServer    uint16 `json:"pingToServer"`
 	CurrentRoomID   uint64 `json:"currentRoomId,omitempty"`
 	CurrentRoomName string `json:"currentRoomName,omitempty"`
