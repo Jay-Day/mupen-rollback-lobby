@@ -79,3 +79,29 @@ func readPingProbeReply(t *testing.T, replies <-chan []byte) protocol.PingProbeR
 	}
 	return payload
 }
+
+func TestPingProbeStartsReciprocalProbe(t *testing.T) {
+	h, requester, target, requesterReplies := newPingProbeTest(t)
+	requester.PublicIP = "198.51.100.10"
+	requester.LocalIP = "10.0.0.11"
+	requester.LocalPort = 44000
+	requester.SetUDPEndpoint("198.51.100.10", 51000)
+	target.PublicIP = "203.0.113.9"
+
+	targetReplies := make(chan []byte, 1)
+	h.clients[target.ID] = &Client{hub: h, user: target, send: targetReplies}
+
+	h.handlePingProbeRequest(&Client{hub: h, user: requester, send: requesterReplies}, pingProbeEnvelope(target.ID))
+	_ = readPingProbeReply(t, requesterReplies)
+	reciprocal := readPingProbeReply(t, targetReplies)
+
+	if reciprocal.TargetUserID != requester.ID {
+		t.Fatalf("reciprocal target user = %d, want %d", reciprocal.TargetUserID, requester.ID)
+	}
+	if reciprocal.TargetEndpoint != "198.51.100.10:51000" {
+		t.Fatalf("reciprocal preferred endpoint = %q", reciprocal.TargetEndpoint)
+	}
+	if reciprocal.PublicEndpoint != "198.51.100.10:51000" {
+		t.Fatalf("reciprocal public endpoint = %q", reciprocal.PublicEndpoint)
+	}
+}
