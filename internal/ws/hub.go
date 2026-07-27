@@ -343,34 +343,60 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 	}
 }
 
-// handlePingProbeRequest returns every known endpoint candidate for the target.
-// TargetEndpoint remains the backward-compatible preferred address: it uses
-// the LAN endpoint when both users have the same observed public IP, otherwise
-// it uses the public endpoint. Updated clients can race PublicEndpoint and
-// LocalEndpoint instead of relying on that heuristic alone.
+// pingProbePayload returns every known endpoint candidate for target as seen
+// by viewer. TargetEndpoint remains the backward-compatible preferred address:
+// LAN when both users share an observed public IP, otherwise public.
+func pingProbePayload(viewer, target *state.User) protocol.PingProbeReplyPayload {
+	resp := protocol.PingProbeReplyPayload{}
+	if target == nil {
+		return resp
+	}
+
+	resp.TargetUserID = target.ID
+	ip, port := target.GetUDPEndpoint()
+	if ip != "" && port != 0 {
+		resp.PublicEndpoint = fmt.Sprintf("%s:%d", ip, port)
+		resp.TargetEndpoint = resp.PublicEndpoint
+	}
+
+	localIP, localPort := target.GetLocalEndpoint()
+	if localIP != "" && localPort != 0 {
+		resp.LocalEndpoint = fmt.Sprintf("%s:%d", localIP, localPort)
+		if viewer != nil && viewer.PublicIP == target.PublicIP {
+			resp.TargetEndpoint = resp.LocalEndpoint
+		}
+	}
+	return resp
+}
+
+// handlePingProbeRequest coordinates both directions of the UDP probe. The
+// requester receives the target's candidates as before, and the target receives
+// a reciprocal PING_PROBE_REPLY containing the requester's candidates. Reusing
+// the existing message keeps old clients compatible while causing both sides to
+// punch at approximately the same time.
 func (h *Hub) handlePingProbeRequest(c *Client, env protocol.Envelope) {
 	var req protocol.PingProbeRequestPayload
-	if err := json.Unmarshal(env.Data, &req); err != nil {
+	if err := json.Unmarshal(env.Data, &req); err != nil || c.user == nil || req.TargetUserID == 0 || req.TargetUserID == c.user.ID {
 		return
 	}
 
-	resp := protocol.PingProbeReplyPayload{TargetUserID: req.TargetUserID}
-	if target := h.state.GetUser(req.TargetUserID); target != nil {
-		ip, port := target.GetUDPEndpoint()
-		if ip != "" && port != 0 {
-			resp.PublicEndpoint = fmt.Sprintf("%s:%d", ip, port)
-			resp.TargetEndpoint = resp.PublicEndpoint
-		}
-
-		localIP, localPort := target.GetLocalEndpoint()
-		if localIP != "" && localPort != 0 {
-			resp.LocalEndpoint = fmt.Sprintf("%s:%d", localIP, localPort)
-			if c.user != nil && c.user.PublicIP == target.PublicIP {
-				resp.TargetEndpoint = resp.LocalEndpoint
-			}
-		}
+	target := h.state.GetUser(req.TargetUserID)
+	if target == nil {
+		c.sendEnvelope(protocol.TypePingProbeReply, env.ID, protocol.PingProbeReplyPayload{TargetUserID: req.TargetUserID})
+		return
 	}
-	c.sendEnvelope(protocol.TypePingProbeReply, env.ID, resp)
+
+	c.sendEnvelope(protocol.TypePingProbeReply, env.ID, pingProbePayload(c.user, target))
+
+	// Best-effort reciprocal start. Copy the client pointer while holding the
+	// map lock, then enqueue outside the lock. If the target disconnects between
+	// these operations, sendEnvelope simply drops into its closing queue.
+	h.mu.Lock()
+	targetClient := h.clients[target.ID]
+	h.mu.Unlock()
+	if targetClient != nil {
+		targetClient.sendEnvelope(protocol.TypePingProbeReply, "", pingProbePayload(target, c.user))
+	}
 }
 
 func (h *Hub) handleHeartbeat(c *Client, env protocol.Envelope) {
