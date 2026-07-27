@@ -26,12 +26,17 @@ type envelope struct {
 
 func main() {
 	var (
-		url      = flag.String("url", "ws://127.0.0.1:8080/ws", "WebSocket URL")
-		username = flag.String("user", "smoke", "Username")
-		say      = flag.String("say", "", "Optional chat line to send after HELLO")
-		listenMs = flag.Int("listen-ms", 2000, "How long to listen after sending before exiting")
+		url       = flag.String("url", "ws://127.0.0.1:8080/ws", "WebSocket URL")
+		username  = flag.String("user", "smoke", "Username")
+		say       = flag.String("say", "", "Optional chat line to send after HELLO")
+		localIP   = flag.String("local-ip", "", "Optional LAN IP advertised in HELLO")
+		localPort = flag.Uint("local-port", 0, "Optional LAN UDP port advertised in HELLO")
+		listenMs  = flag.Int("listen-ms", 2000, "How long to listen after sending before exiting")
 	)
 	flag.Parse()
+	if *localPort > 65535 {
+		log.Fatalf("local-port must be between 0 and 65535")
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -43,14 +48,21 @@ func main() {
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
 	// Send HELLO
+	helloData := map[string]any{
+		"username":      *username,
+		"clientVersion": "smoke-test",
+		"romHashes":     []string{},
+	}
+	if *localIP != "" {
+		helloData["localIp"] = *localIP
+	}
+	if *localPort != 0 {
+		helloData["localPort"] = uint16(*localPort)
+	}
 	hello := envelope{
 		Type: "HELLO",
 		ID:   "h1",
-		Data: jsonRaw(map[string]any{
-			"username":      *username,
-			"clientVersion": "smoke-test",
-			"romHashes":     []string{},
-		}),
+		Data: jsonRaw(helloData),
 	}
 	if err := writeJSON(ctx, conn, hello); err != nil {
 		log.Fatalf("write hello: %v", err)

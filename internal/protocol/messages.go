@@ -111,6 +111,7 @@ type HelloRequest struct {
 	ClientVersion string   `json:"clientVersion"`
 	RomHashes     []string `json:"romHashes"`
 	LocalIP       string   `json:"localIp,omitempty"`
+	LocalPort     uint16   `json:"localPort,omitempty"`
 }
 
 type HeartbeatRequest struct {
@@ -306,6 +307,8 @@ type RoomLeftPayload struct {
 type PingProbeReplyPayload struct {
 	TargetUserID   uint64 `json:"targetUserId"`
 	TargetEndpoint string `json:"targetEndpoint"`
+	PublicEndpoint string `json:"publicEndpoint,omitempty"`
+	LocalEndpoint  string `json:"localEndpoint,omitempty"`
 }
 
 type MatchPeer struct {
@@ -314,6 +317,7 @@ type MatchPeer struct {
 	PublicIP   string `json:"publicIp"`
 	PublicPort uint16 `json:"publicPort"`
 	LocalIP    string `json:"localIp,omitempty"`
+	LocalPort  uint16 `json:"localPort,omitempty"`
 	Slot       int    `json:"slot"`
 }
 

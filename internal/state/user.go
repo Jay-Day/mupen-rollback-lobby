@@ -31,6 +31,7 @@ type User struct {
 	UDPPublicIP   string
 	UDPPublicPort uint16
 	LocalIP       string
+	LocalPort     uint16
 	Region        string
 
 	PingToServer uint16
@@ -69,6 +70,24 @@ func (u *User) SetUDPEndpoint(ip string, port uint16) {
 	defer u.mu.Unlock()
 	u.UDPPublicIP = ip
 	u.UDPPublicPort = port
+}
+
+func (u *User) GetLocalEndpoint() (string, uint16) {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	return u.LocalIP, u.LocalPort
+}
+
+// SetLocalPort updates the LAN-side port of the UDP socket used for peer
+// traffic. A client may first report it in HELLO and then refresh it through
+// the optional UDP register/keepalive packet suffix if the socket is rebound.
+func (u *User) SetLocalPort(port uint16) {
+	if port == 0 {
+		return
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.LocalPort = port
 }
 
 func (u *User) Touch() {

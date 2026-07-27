@@ -181,15 +181,16 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 	region := geo.RegionFromIP(c.ip)
 
 	user := &state.User{
-		ID:       h.state.NextUserID(),
-		Username: req.Username,
-		State:    state.UserStateIdle,
-		PublicIP: c.ip,
-		LocalIP:  req.LocalIP,
-		Region:   region,
-		JoinedAt: time.Now(),
-		LastSeen: time.Now(),
-		Send:     c.send,
+		ID:        h.state.NextUserID(),
+		Username:  req.Username,
+		State:     state.UserStateIdle,
+		PublicIP:  c.ip,
+		LocalIP:   req.LocalIP,
+		LocalPort: req.LocalPort,
+		Region:    region,
+		JoinedAt:  time.Now(),
+		LastSeen:  time.Now(),
+		Send:      c.send,
 	}
 
 	if err := h.state.AddUser(user); err != nil {
@@ -275,11 +276,11 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 	}
 }
 
-// handlePingProbeRequest looks up the target user's last-known public UDP
-// endpoint (registered via the anchor service) and ships it back so the
-// requester can fire UDP probes directly. Returns an empty endpoint when
-// the target either isn't registered or hasn't yet sent an anchor packet;
-// the client treats that as "ping unavailable".
+// handlePingProbeRequest returns every known endpoint candidate for the target.
+// TargetEndpoint remains the backward-compatible preferred address: it uses
+// the LAN endpoint when both users have the same observed public IP, otherwise
+// it uses the public endpoint. Updated clients can race PublicEndpoint and
+// LocalEndpoint instead of relying on that heuristic alone.
 func (h *Hub) handlePingProbeRequest(c *Client, env protocol.Envelope) {
 	var req protocol.PingProbeRequestPayload
 	if err := json.Unmarshal(env.Data, &req); err != nil {
@@ -290,7 +291,16 @@ func (h *Hub) handlePingProbeRequest(c *Client, env protocol.Envelope) {
 	if target := h.state.GetUser(req.TargetUserID); target != nil {
 		ip, port := target.GetUDPEndpoint()
 		if ip != "" && port != 0 {
-			resp.TargetEndpoint = fmt.Sprintf("%s:%d", ip, port)
+			resp.PublicEndpoint = fmt.Sprintf("%s:%d", ip, port)
+			resp.TargetEndpoint = resp.PublicEndpoint
+		}
+
+		localIP, localPort := target.GetLocalEndpoint()
+		if localIP != "" && localPort != 0 {
+			resp.LocalEndpoint = fmt.Sprintf("%s:%d", localIP, localPort)
+			if c.user != nil && c.user.PublicIP == target.PublicIP {
+				resp.TargetEndpoint = resp.LocalEndpoint
+			}
 		}
 	}
 	c.sendEnvelope(protocol.TypePingProbeReply, env.ID, resp)
