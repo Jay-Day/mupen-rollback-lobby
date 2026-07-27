@@ -402,9 +402,11 @@ func (h *Hub) startMatchInRoom(room *state.Room, initiator string) {
 func (h *Hub) removeUserFromRoom(u *state.User, room *state.Room, reason string) {
 	// If the room is mid-match, also notify peers via MATCH_PEER_LEFT so they
 	// can drop emulation. Do this BEFORE we remove the player from the seat list.
+	var match *state.Match
 	var matchID uint64
 	if room.State == state.RoomStateInGame && u.CurrentMatch != nil {
-		matchID = u.CurrentMatch.ID
+		match = u.CurrentMatch
+		matchID = match.ID
 		h.broadcastMatchPeerLeft(room, u, matchID, reason)
 	}
 
@@ -435,8 +437,13 @@ func (h *Hub) removeUserFromRoom(u *state.User, room *state.Room, reason string)
 		}
 		h.state.RemoveRoom(room.ID)
 	} else {
-		// Otherwise the room still exists; push updated state to remaining members.
-		h.broadcastRoomState(room)
+		// A match cannot continue with fewer than two active participants. This
+		// is especially important for a two-player game when the non-host leaves:
+		// previously the host remained alone in an in_game room forever.
+		if match == nil || !h.finishMatchIfUnplayable(room, match, "player_left") {
+			// Otherwise the room still exists; push updated state to remaining members.
+			h.broadcastRoomState(room)
+		}
 	}
 
 	// End any broadcast tied to the match this user just left. A host-dissolve
@@ -444,6 +451,10 @@ func (h *Hub) removeUserFromRoom(u *state.User, room *state.Room, reason string)
 	// broadcasting (the stream dies with them).
 	if matchID != 0 {
 		if dissolve {
+			if match != nil {
+				match.SetState(state.MatchStateFinished)
+			}
+			h.state.RemoveMatch(matchID)
 			h.broadcasts.endByMatch(matchID)
 		} else {
 			h.broadcasts.endIfBroadcaster(matchID, u.ID)
@@ -583,27 +594,76 @@ func (h *Hub) handleMatchFinished(c *Client, env protocol.Envelope) {
 	}
 
 	if !isHost {
-		// Non-host drop: match keeps running for the rest of the seats.
+		// Multi-player matches may continue after one non-host drops, but once
+		// fewer than two active participants remain the game is no longer viable
+		// and must leave the Ongoing Matches list.
+		h.finishMatchIfUnplayable(room, match, "not_enough_players")
 		return
 	}
 
-	// Host drop ends the match. Room reverts to waiting; everyone stays
+	// Host drop always ends the match. Room reverts to waiting; everyone stays
 	// seated. Each surviving client's onRoomStateChanged detects the
 	// in_game → waiting transition and tears down their own emulation.
+	h.finishMatch(room, match, "host_finished")
+}
+
+// activeMatchPlayers counts players who are still connected to this exact
+// match. Match.Players is the original roster, so CurrentMatch is the source of
+// truth after a player drops or disconnects.
+func (h *Hub) activeMatchPlayers(match *state.Match) int {
+	if match == nil {
+		return 0
+	}
+	active := 0
+	for _, u := range match.Players {
+		if u == nil || u.CurrentMatch != match {
+			continue
+		}
+		// A user removed from central state is no longer connected even if a
+		// stale pointer was left behind by an interrupted cleanup path.
+		if h.state.GetUser(u.ID) != u {
+			continue
+		}
+		active++
+	}
+	return active
+}
+
+// finishMatchIfUnplayable ends a match once fewer than two participants remain.
+// It returns true when it performed the transition.
+func (h *Hub) finishMatchIfUnplayable(room *state.Room, match *state.Match, reason string) bool {
+	if h.activeMatchPlayers(match) >= 2 {
+		return false
+	}
+	return h.finishMatch(room, match, reason)
+}
+
+// finishMatch performs the shared server-side match teardown. It is safe to
+// call more than once; only the first call that still owns the room's active
+// match changes state or broadcasts updates.
+func (h *Hub) finishMatch(room *state.Room, match *state.Match, reason string) bool {
+	if room == nil || match == nil || room.State != state.RoomStateInGame {
+		return false
+	}
+
 	match.SetState(state.MatchStateFinished)
 	h.state.RemoveMatch(match.ID)
-	h.broadcasts.endByMatch(match.ID) // host ended the match → stop any broadcast
-	room.SetState(state.RoomStateWaiting)
+	h.broadcasts.endByMatch(match.ID)
+	room.MarkMatchEnded()
+
 	for _, seat := range room.Players {
-		if seat.User == nil || seat.User.ID == c.user.ID {
+		if seat.User == nil || seat.User.CurrentMatch != match {
 			continue
 		}
 		seat.User.CurrentMatch = nil
 		seat.User.SetState(state.UserStateInRoom)
 		h.broadcastPresenceUpdated(seat.User)
 	}
+
 	h.broadcastRoomState(room)
 	h.broadcastRoomList()
+	slog.Info("match ended", "match", match.ID, "room", room.ID, "reason", reason)
+	return true
 }
 
 // handleMatchConnected transitions the match from "connecting" to "active".

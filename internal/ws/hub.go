@@ -21,6 +21,16 @@ const (
 	helloTimeout    = 5 * time.Second
 	writeWait       = 10 * time.Second
 	clientSendQueue = 64
+
+	// The client sends HEARTBEAT every 15 seconds. Missing five consecutive
+	// heartbeats means the WebSocket is no longer useful even if the OS has not
+	// noticed the broken TCP path yet.
+	clientStaleAfter = 75 * time.Second
+	staleSweepEvery  = 15 * time.Second
+
+	// A match that never reaches MATCH_CONNECTED is a failed launch/punch, not
+	// an ongoing game. Active matches have deliberately no age limit.
+	connectingMatchTimeout = 2 * time.Minute
 )
 
 // Hub coordinates the set of connected WS clients and dispatches
@@ -68,10 +78,16 @@ func (h *Hub) IsBanned(ip string) (moderation.Sanction, bool) {
 // Run owns the registration/unregistration channels.
 // Spawn this in its own goroutine before calling ServeWS.
 func (h *Hub) Run(ctx context.Context) {
+	ticker := time.NewTicker(staleSweepEvery)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case now := <-ticker.C:
+			h.disconnectStaleClients(now)
+			h.reapStalledMatches(now)
 		case c := <-h.register:
 			if c.user == nil {
 				continue
@@ -81,6 +97,57 @@ func (h *Hub) Run(ctx context.Context) {
 			h.mu.Unlock()
 		case c := <-h.unregister:
 			h.cleanupClient(c)
+		}
+	}
+}
+
+// disconnectStaleClients closes half-open WebSockets that have stopped sending
+// application heartbeats. Closing the socket unblocks readLoop, which then uses
+// the normal unregister/cleanup path.
+func (h *Hub) disconnectStaleClients(now time.Time) {
+	h.mu.Lock()
+	clients := make([]*Client, 0, len(h.clients))
+	for _, c := range h.clients {
+		clients = append(clients, c)
+	}
+	h.mu.Unlock()
+
+	for _, c := range clients {
+		if c == nil || c.user == nil {
+			continue
+		}
+		lastSeen := c.user.GetLastSeen()
+		if lastSeen.IsZero() || now.Sub(lastSeen) <= clientStaleAfter {
+			continue
+		}
+		slog.Warn("disconnecting stale client",
+			"user", c.user.Username, "id", c.user.ID, "silent_for", now.Sub(lastSeen))
+		c.disconnect("Connection timed out.")
+	}
+}
+
+// reapStalledMatches is a periodic backstop for interrupted cleanup paths and
+// clients that launch a game but never complete NAT traversal. It never expires
+// an active match merely because it has been running a long time.
+func (h *Hub) reapStalledMatches(now time.Time) {
+	for _, match := range h.state.ListMatches() {
+		if match == nil {
+			continue
+		}
+		room := h.state.GetRoom(match.RoomID)
+		if room == nil {
+			match.SetState(state.MatchStateFinished)
+			h.state.RemoveMatch(match.ID)
+			h.broadcasts.endByMatch(match.ID)
+			continue
+		}
+
+		if h.activeMatchPlayers(match) < 2 {
+			h.finishMatch(room, match, "watchdog_not_enough_players")
+			continue
+		}
+		if match.GetState() == state.MatchStateConnecting && now.Sub(match.StartedAt) > connectingMatchTimeout {
+			h.finishMatch(room, match, "connecting_timeout")
 		}
 	}
 }

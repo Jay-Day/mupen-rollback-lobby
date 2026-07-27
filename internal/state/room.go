@@ -189,6 +189,16 @@ func (r *Room) MarkStarted() {
 	r.StartedAt = time.Now()
 }
 
+// MarkMatchEnded returns the room to its waiting state and clears the old
+// match timestamp. Keeping these changes under one lock prevents room-list
+// snapshots from briefly showing a waiting room with an old ongoing duration.
+func (r *Room) MarkMatchEnded() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.State = RoomStateWaiting
+	r.StartedAt = time.Time{}
+}
+
 // StartedAtUnixMs returns the match start time in unix milliseconds, or 0 if the
 // match hasn't started.
 func (r *Room) StartedAtUnixMs() int64 {
