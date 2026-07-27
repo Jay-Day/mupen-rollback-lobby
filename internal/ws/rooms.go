@@ -425,6 +425,12 @@ func (h *Hub) removeUserFromRoom(u *state.User, room *state.Room, reason string)
 		slog.Info("dissolving room",
 			"id", room.ID, "trigger", u.Username, "reason", reason,
 			"remaining_seats", len(room.Players))
+		// Members normally see "host_left"; a moderator close is surfaced as
+		// its own reason so clients can attribute it correctly.
+		memberReason := "host_left"
+		if reason == "admin_closed" {
+			memberReason = "admin_closed"
+		}
 		for _, seat := range room.Players {
 			if seat.User == nil || seat.User.ID == u.ID {
 				continue // skip the user who triggered the dissolve
@@ -433,7 +439,7 @@ func (h *Hub) removeUserFromRoom(u *state.User, room *state.Room, reason string)
 			seat.User.CurrentMatch = nil
 			seat.User.SetState(state.UserStateIdle)
 			h.broadcastPresenceUpdated(seat.User)
-			sendRoomLeft(seat.User, "host_left")
+			sendRoomLeft(seat.User, memberReason)
 		}
 		h.state.RemoveRoom(room.ID)
 	} else {
