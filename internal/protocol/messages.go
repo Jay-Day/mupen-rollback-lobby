@@ -116,6 +116,9 @@ type HelloRequest struct {
 	// can gauge connection-quality risk Slippi-style. Optional; older clients
 	// simply omit it.
 	Connection string `json:"connection,omitempty"`
+	// Standard (non-DST) UTC offset in seconds, used to split the North
+	// America country bucket into east/central/west. Optional.
+	TzOffsetSeconds int `json:"tzOffset,omitempty"`
 }
 
 type HeartbeatRequest struct {

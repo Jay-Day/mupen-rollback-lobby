@@ -251,10 +251,11 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		}
 	}
 
-	// Resolve a coarse region bucket from the client's public IP. This is
-	// the only place IPs touch geo data; the result that ships to other
-	// clients in PRESENCE is just the bucket name, never a country or city.
-	region := geo.RegionFromIP(c.ip)
+	// Resolve a coarse region bucket from the client's public IP, then split
+	// the North America country bucket into east/central/west using the
+	// client's reported standard UTC offset (country-level IP data cannot
+	// tell coasts apart).
+	region := geo.RefineNorthAmerica(geo.RegionFromIP(c.ip), req.TzOffsetSeconds)
 
 	user := &state.User{
 		ID:            h.state.NextUserID(),

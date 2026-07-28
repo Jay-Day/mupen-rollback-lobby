@@ -124,6 +124,29 @@ func RegionFromIP(ipStr string) string {
 	return DefaultRegion
 }
 
+// RefineNorthAmerica splits the country-level North America bucket into
+// east/central/west using the client's self-reported standard (non-DST) UTC
+// offset — country-level IP data cannot tell coasts apart, but the OS clock
+// can: New York -5h, Chicago -6h, Denver/Phoenix -7h, Los Angeles -8h.
+// Mountain (-7h) goes west: a mountain player mislabelled "central" makes an
+// east-coast viewer expect ~40 ms where reality is ~70; "west" predicts 80.
+// Offsets are seconds east of UTC (negative in the Americas); an absent
+// offset (0) leaves the bucket unchanged. Only the collapsed us-central
+// bucket is ever refined, so other regions are untouched.
+func RefineNorthAmerica(region string, tzOffsetSeconds int) string {
+	if region != RegionUSCentral || tzOffsetSeconds == 0 {
+		return region
+	}
+	switch {
+	case tzOffsetSeconds >= -5*3600:
+		return RegionUSEast
+	case tzOffsetSeconds >= -6*3600:
+		return RegionUSCentral
+	default:
+		return RegionUSWest
+	}
+}
+
 // CountryFromIP resolves a string IP to its ISO 3166-1 alpha-2 country code
 // (upper-case), or "" when the IP is empty, invalid, private, or unknown.
 // Clients render this as a flag next to the player's name.
