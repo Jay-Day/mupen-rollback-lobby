@@ -1,11 +1,11 @@
 // Package geo maps a public IP address to a coarse region code that the
-// lobby exposes to other clients for ping estimation.
+// lobby exposes to other clients for ping estimation, plus the ISO country
+// code that drives the client's flag display (Fightcade-style).
 //
 // Privacy: the underlying lookup uses an embedded country-level database
 // (phuslu/iploc). We deliberately do NOT use a city-level database — the
-// region buckets here aggregate ~250 ISO country codes into 9 continental
-// regions, so what other clients see is no more precise than "Europe
-// (West)" or "Asia (East)". The raw country code never leaves this package.
+// most precise thing other clients ever see is the country flag; nothing
+// below country level is looked up or stored.
 package geo
 
 import (
@@ -122,6 +122,47 @@ func RegionFromIP(ipStr string) string {
 		return region
 	}
 	return DefaultRegion
+}
+
+// RefineNorthAmerica splits the country-level North America bucket into
+// east/central/west using the client's self-reported standard (non-DST) UTC
+// offset — country-level IP data cannot tell coasts apart, but the OS clock
+// can: New York -5h, Chicago -6h, Denver/Phoenix -7h, Los Angeles -8h.
+// Mountain (-7h) goes west: a mountain player mislabelled "central" makes an
+// east-coast viewer expect ~40 ms where reality is ~70; "west" predicts 80.
+// Offsets are seconds east of UTC (negative in the Americas); an absent
+// offset (0) leaves the bucket unchanged. Only the collapsed us-central
+// bucket is ever refined, so other regions are untouched.
+func RefineNorthAmerica(region string, tzOffsetSeconds int) string {
+	if region != RegionUSCentral || tzOffsetSeconds == 0 {
+		return region
+	}
+	switch {
+	case tzOffsetSeconds >= -5*3600:
+		return RegionUSEast
+	case tzOffsetSeconds >= -6*3600:
+		return RegionUSCentral
+	default:
+		return RegionUSWest
+	}
+}
+
+// CountryFromIP resolves a string IP to its ISO 3166-1 alpha-2 country code
+// (upper-case), or "" when the IP is empty, invalid, private, or unknown.
+// Clients render this as a flag next to the player's name.
+func CountryFromIP(ipStr string) string {
+	if ipStr == "" {
+		return ""
+	}
+	ip := net.ParseIP(ipStr)
+	if ip == nil || !isPublicUnicast(ip) {
+		return ""
+	}
+	raw := iploc.Country(ip)
+	if len(raw) != 2 {
+		return ""
+	}
+	return strings.ToUpper(string(raw))
 }
 
 // isPublicUnicast filters out loopback, link-local, multicast, and RFC1918

@@ -21,6 +21,16 @@ const (
 	helloTimeout    = 5 * time.Second
 	writeWait       = 10 * time.Second
 	clientSendQueue = 64
+
+	// The client sends HEARTBEAT every 15 seconds. Missing five consecutive
+	// heartbeats means the WebSocket is no longer useful even if the OS has not
+	// noticed the broken TCP path yet.
+	clientStaleAfter = 75 * time.Second
+	staleSweepEvery  = 15 * time.Second
+
+	// A match that never reaches MATCH_CONNECTED is a failed launch/punch, not
+	// an ongoing game. Active matches have deliberately no age limit.
+	connectingMatchTimeout = 2 * time.Minute
 )
 
 // Hub coordinates the set of connected WS clients and dispatches
@@ -68,10 +78,16 @@ func (h *Hub) IsBanned(ip string) (moderation.Sanction, bool) {
 // Run owns the registration/unregistration channels.
 // Spawn this in its own goroutine before calling ServeWS.
 func (h *Hub) Run(ctx context.Context) {
+	ticker := time.NewTicker(staleSweepEvery)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case now := <-ticker.C:
+			h.disconnectStaleClients(now)
+			h.reapStalledMatches(now)
 		case c := <-h.register:
 			if c.user == nil {
 				continue
@@ -81,6 +97,57 @@ func (h *Hub) Run(ctx context.Context) {
 			h.mu.Unlock()
 		case c := <-h.unregister:
 			h.cleanupClient(c)
+		}
+	}
+}
+
+// disconnectStaleClients closes half-open WebSockets that have stopped sending
+// application heartbeats. Closing the socket unblocks readLoop, which then uses
+// the normal unregister/cleanup path.
+func (h *Hub) disconnectStaleClients(now time.Time) {
+	h.mu.Lock()
+	clients := make([]*Client, 0, len(h.clients))
+	for _, c := range h.clients {
+		clients = append(clients, c)
+	}
+	h.mu.Unlock()
+
+	for _, c := range clients {
+		if c == nil || c.user == nil {
+			continue
+		}
+		lastSeen := c.user.GetLastSeen()
+		if lastSeen.IsZero() || now.Sub(lastSeen) <= clientStaleAfter {
+			continue
+		}
+		slog.Warn("disconnecting stale client",
+			"user", c.user.Username, "id", c.user.ID, "silent_for", now.Sub(lastSeen))
+		c.disconnect("Connection timed out.")
+	}
+}
+
+// reapStalledMatches is a periodic backstop for interrupted cleanup paths and
+// clients that launch a game but never complete NAT traversal. It never expires
+// an active match merely because it has been running a long time.
+func (h *Hub) reapStalledMatches(now time.Time) {
+	for _, match := range h.state.ListMatches() {
+		if match == nil {
+			continue
+		}
+		room := h.state.GetRoom(match.RoomID)
+		if room == nil {
+			match.SetState(state.MatchStateFinished)
+			h.state.RemoveMatch(match.ID)
+			h.broadcasts.endByMatch(match.ID)
+			continue
+		}
+
+		if h.activeMatchPlayers(match) < 2 {
+			h.finishMatch(room, match, "watchdog_not_enough_players")
+			continue
+		}
+		if match.GetState() == state.MatchStateConnecting && now.Sub(match.StartedAt) > connectingMatchTimeout {
+			h.finishMatch(room, match, "connecting_timeout")
 		}
 	}
 }
@@ -154,6 +221,15 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request, ip string) {
 	h.unregister <- c
 }
 
+// clampString caps a client-supplied string to n bytes — these are echoed to
+// every peer, so don't let one client bloat presence broadcasts.
+func clampString(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
+}
+
 func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 	var req protocol.HelloRequest
 	if err := json.Unmarshal(env.Data, &req); err != nil {
@@ -175,21 +251,26 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		}
 	}
 
-	// Resolve a coarse region bucket from the client's public IP. This is
-	// the only place IPs touch geo data; the result that ships to other
-	// clients in PRESENCE is just the bucket name, never a country or city.
-	region := geo.RegionFromIP(c.ip)
+	// Resolve a coarse region bucket from the client's public IP, then split
+	// the North America country bucket into east/central/west using the
+	// client's reported standard UTC offset (country-level IP data cannot
+	// tell coasts apart).
+	region := geo.RefineNorthAmerica(geo.RegionFromIP(c.ip), req.TzOffsetSeconds)
 
 	user := &state.User{
-		ID:       h.state.NextUserID(),
-		Username: req.Username,
-		State:    state.UserStateIdle,
-		PublicIP: c.ip,
-		LocalIP:  req.LocalIP,
-		Region:   region,
-		JoinedAt: time.Now(),
-		LastSeen: time.Now(),
-		Send:     c.send,
+		ID:            h.state.NextUserID(),
+		Username:      req.Username,
+		State:         state.UserStateIdle,
+		PublicIP:      c.ip,
+		LocalIP:       req.LocalIP,
+		LocalPort:     req.LocalPort,
+		Region:        region,
+		Country:       geo.CountryFromIP(c.ip),
+		ClientVersion: clampString(req.ClientVersion, 32),
+		Connection:    clampString(req.Connection, 16),
+		JoinedAt:  time.Now(),
+		LastSeen:  time.Now(),
+		Send:      c.send,
 	}
 
 	if err := h.state.AddUser(user); err != nil {
@@ -275,25 +356,60 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 	}
 }
 
-// handlePingProbeRequest looks up the target user's last-known public UDP
-// endpoint (registered via the anchor service) and ships it back so the
-// requester can fire UDP probes directly. Returns an empty endpoint when
-// the target either isn't registered or hasn't yet sent an anchor packet;
-// the client treats that as "ping unavailable".
+// pingProbePayload returns every known endpoint candidate for target as seen
+// by viewer. TargetEndpoint remains the backward-compatible preferred address:
+// LAN when both users share an observed public IP, otherwise public.
+func pingProbePayload(viewer, target *state.User) protocol.PingProbeReplyPayload {
+	resp := protocol.PingProbeReplyPayload{}
+	if target == nil {
+		return resp
+	}
+
+	resp.TargetUserID = target.ID
+	ip, port := target.GetUDPEndpoint()
+	if ip != "" && port != 0 {
+		resp.PublicEndpoint = fmt.Sprintf("%s:%d", ip, port)
+		resp.TargetEndpoint = resp.PublicEndpoint
+	}
+
+	localIP, localPort := target.GetLocalEndpoint()
+	if localIP != "" && localPort != 0 {
+		resp.LocalEndpoint = fmt.Sprintf("%s:%d", localIP, localPort)
+		if viewer != nil && viewer.PublicIP == target.PublicIP {
+			resp.TargetEndpoint = resp.LocalEndpoint
+		}
+	}
+	return resp
+}
+
+// handlePingProbeRequest coordinates both directions of the UDP probe. The
+// requester receives the target's candidates as before, and the target receives
+// a reciprocal PING_PROBE_REPLY containing the requester's candidates. Reusing
+// the existing message keeps old clients compatible while causing both sides to
+// punch at approximately the same time.
 func (h *Hub) handlePingProbeRequest(c *Client, env protocol.Envelope) {
 	var req protocol.PingProbeRequestPayload
-	if err := json.Unmarshal(env.Data, &req); err != nil {
+	if err := json.Unmarshal(env.Data, &req); err != nil || c.user == nil || req.TargetUserID == 0 || req.TargetUserID == c.user.ID {
 		return
 	}
 
-	resp := protocol.PingProbeReplyPayload{TargetUserID: req.TargetUserID}
-	if target := h.state.GetUser(req.TargetUserID); target != nil {
-		ip, port := target.GetUDPEndpoint()
-		if ip != "" && port != 0 {
-			resp.TargetEndpoint = fmt.Sprintf("%s:%d", ip, port)
-		}
+	target := h.state.GetUser(req.TargetUserID)
+	if target == nil {
+		c.sendEnvelope(protocol.TypePingProbeReply, env.ID, protocol.PingProbeReplyPayload{TargetUserID: req.TargetUserID})
+		return
 	}
-	c.sendEnvelope(protocol.TypePingProbeReply, env.ID, resp)
+
+	c.sendEnvelope(protocol.TypePingProbeReply, env.ID, pingProbePayload(c.user, target))
+
+	// Best-effort reciprocal start. Copy the client pointer while holding the
+	// map lock, then enqueue outside the lock. If the target disconnects between
+	// these operations, sendEnvelope simply drops into its closing queue.
+	h.mu.Lock()
+	targetClient := h.clients[target.ID]
+	h.mu.Unlock()
+	if targetClient != nil {
+		targetClient.sendEnvelope(protocol.TypePingProbeReply, "", pingProbePayload(target, c.user))
+	}
 }
 
 func (h *Hub) handleHeartbeat(c *Client, env protocol.Envelope) {
@@ -401,6 +517,7 @@ func (h *Hub) handleChatSend(c *Client, env protocol.Envelope) {
 		FromUsername: c.user.Username,
 		Message:      truncateMessage(msg),
 		ServerTime:   nowMs(),
+		Admin:        c.isModerator,
 	}
 
 	switch req.Channel {
@@ -434,11 +551,14 @@ func (h *Hub) handleChatHistory(c *Client, env protocol.Envelope) {
 
 func (h *Hub) presenceUserFromState(u *state.User) protocol.PresenceUser {
 	pu := protocol.PresenceUser{
-		ID:           u.ID,
-		Username:     u.Username,
-		State:        string(u.GetState()),
-		Region:       u.Region,
-		PingToServer: u.PingToServer,
+		ID:            u.ID,
+		Username:      u.Username,
+		State:         string(u.GetState()),
+		Region:        u.Region,
+		Country:       u.Country,
+		ClientVersion: u.ClientVersion,
+		Connection:    u.Connection,
+		PingToServer:  u.PingToServer,
 	}
 	if u.CurrentRoom != nil {
 		pu.CurrentRoomID = u.CurrentRoom.ID
