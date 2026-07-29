@@ -10,7 +10,7 @@ import (
 const (
 	// RateLimit is the max number of connection attempts allowed
 	// per RateLimitWindow before triggering a ban.
-	RateLimit = 15
+	RateLimit = 5
 
 	// RateLimitWindow is the sliding window for counting attempts.
 	RateLimitWindow = 60 * time.Second
