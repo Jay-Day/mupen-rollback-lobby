@@ -111,14 +111,6 @@ type HelloRequest struct {
 	ClientVersion string   `json:"clientVersion"`
 	RomHashes     []string `json:"romHashes"`
 	LocalIP       string   `json:"localIp,omitempty"`
-	LocalPort     uint16   `json:"localPort,omitempty"`
-	// Self-reported transport medium ("wifi", "lan", "cellular", ...) so peers
-	// can gauge connection-quality risk Slippi-style. Optional; older clients
-	// simply omit it.
-	Connection string `json:"connection,omitempty"`
-	// Standard (non-DST) UTC offset in seconds, used to split the North
-	// America country bucket into east/central/west. Optional.
-	TzOffsetSeconds int `json:"tzOffset,omitempty"`
 }
 
 type HeartbeatRequest struct {
@@ -221,9 +213,6 @@ type ChatMsgPayload struct {
 	FromUsername string `json:"fromUsername"`
 	Message      string `json:"message"`
 	ServerTime   int64  `json:"serverTime"`
-	// Sender was authenticated as a moderator (ADMIN_AUTH) when sending.
-	// Clients use this to trust admin-only chat directives like "@notify".
-	Admin bool `json:"admin,omitempty"`
 }
 
 type ChatHistoryReply struct {
@@ -236,9 +225,6 @@ type PresenceUser struct {
 	Username        string `json:"username"`
 	State           string `json:"state"`
 	Region          string `json:"region"`
-	Country         string `json:"country,omitempty"`
-	ClientVersion   string `json:"clientVersion,omitempty"`
-	Connection      string `json:"connection,omitempty"`
 	PingToServer    uint16 `json:"pingToServer"`
 	CurrentRoomID   uint64 `json:"currentRoomId,omitempty"`
 	CurrentRoomName string `json:"currentRoomName,omitempty"`
@@ -317,8 +303,6 @@ type RoomLeftPayload struct {
 type PingProbeReplyPayload struct {
 	TargetUserID   uint64 `json:"targetUserId"`
 	TargetEndpoint string `json:"targetEndpoint"`
-	PublicEndpoint string `json:"publicEndpoint,omitempty"`
-	LocalEndpoint  string `json:"localEndpoint,omitempty"`
 }
 
 type MatchPeer struct {
@@ -327,7 +311,6 @@ type MatchPeer struct {
 	PublicIP   string `json:"publicIp"`
 	PublicPort uint16 `json:"publicPort"`
 	LocalIP    string `json:"localIp,omitempty"`
-	LocalPort  uint16 `json:"localPort,omitempty"`
 	Slot       int    `json:"slot"`
 }
 

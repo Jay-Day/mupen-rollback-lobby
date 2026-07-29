@@ -100,32 +100,6 @@ func (h *Hub) handleModAction(c *Client, env protocol.Envelope) {
 			c.notice("warn", "No mute found for "+target+".")
 		}
 		return
-
-	case "closeroom":
-		// Cleanly dissolve a room (and end its match, if one is running) by id.
-		// Reuses the host-leave teardown: peers get MATCH_PEER_LEFT so their
-		// emulation drops, everyone gets ROOM_LEFT, and broadcast/match records
-		// are reaped.
-		roomID, err := strconv.ParseUint(target, 10, 64)
-		if err != nil || roomID == 0 {
-			c.notice("error", "Usage: closeroom <roomId>")
-			return
-		}
-		room := h.state.GetRoom(roomID)
-		if room == nil {
-			c.notice("warn", "Room not found (already gone?).")
-			return
-		}
-		name := room.Name
-		if room.Host == nil {
-			// Hostless rooms shouldn't exist; reap the record directly.
-			h.state.RemoveRoom(roomID)
-			h.broadcastRoomList()
-		} else {
-			h.removeUserFromRoom(room.Host, room, "admin_closed")
-		}
-		h.modConfirm(c, "Closed room \""+name+"\".")
-		return
 	}
 
 	// Remaining actions target a connected user by username.
