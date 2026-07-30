@@ -154,6 +154,15 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request, ip string) {
 	h.unregister <- c
 }
 
+// clampString caps a client-supplied string to n bytes — these are echoed to
+// every peer, so don't let one client bloat presence broadcasts.
+func clampString(s string, n int) string {
+	if len(s) > n {
+		return s[:n]
+	}
+	return s
+}
+
 func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 	var req protocol.HelloRequest
 	if err := json.Unmarshal(env.Data, &req); err != nil {
@@ -175,21 +184,25 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		}
 	}
 
-	// Resolve a coarse region bucket from the client's public IP. This is
-	// the only place IPs touch geo data; the result that ships to other
-	// clients in PRESENCE is just the bucket name, never a country or city.
-	region := geo.RegionFromIP(c.ip)
+	// Resolve a coarse region bucket from the client's public IP, then split
+	// the North America country bucket into east/central/west using the
+	// client's reported standard UTC offset (country-level IP data cannot
+	// tell coasts apart).
+	region := geo.RefineNorthAmerica(geo.RegionFromIP(c.ip), req.TzOffsetSeconds)
 
 	user := &state.User{
-		ID:       h.state.NextUserID(),
-		Username: req.Username,
-		State:    state.UserStateIdle,
-		PublicIP: c.ip,
-		LocalIP:  req.LocalIP,
-		Region:   region,
-		JoinedAt: time.Now(),
-		LastSeen: time.Now(),
-		Send:     c.send,
+		ID:            h.state.NextUserID(),
+		Username:      req.Username,
+		State:         state.UserStateIdle,
+		PublicIP:      c.ip,
+		LocalIP:       req.LocalIP,
+		Region:        region,
+		Country:       geo.CountryFromIP(c.ip),
+		ClientVersion: clampString(req.ClientVersion, 32),
+		Connection:    clampString(req.Connection, 16),
+		JoinedAt:      time.Now(),
+		LastSeen:      time.Now(),
+		Send:          c.send,
 	}
 
 	if err := h.state.AddUser(user); err != nil {
@@ -401,6 +414,7 @@ func (h *Hub) handleChatSend(c *Client, env protocol.Envelope) {
 		FromUsername: c.user.Username,
 		Message:      truncateMessage(msg),
 		ServerTime:   nowMs(),
+		Admin:        c.isModerator,
 	}
 
 	switch req.Channel {
@@ -434,11 +448,14 @@ func (h *Hub) handleChatHistory(c *Client, env protocol.Envelope) {
 
 func (h *Hub) presenceUserFromState(u *state.User) protocol.PresenceUser {
 	pu := protocol.PresenceUser{
-		ID:           u.ID,
-		Username:     u.Username,
-		State:        string(u.GetState()),
-		Region:       u.Region,
-		PingToServer: u.PingToServer,
+		ID:            u.ID,
+		Username:      u.Username,
+		State:         string(u.GetState()),
+		Region:        u.Region,
+		Country:       u.Country,
+		ClientVersion: u.ClientVersion,
+		Connection:    u.Connection,
+		PingToServer:  u.PingToServer,
 	}
 	if u.CurrentRoom != nil {
 		pu.CurrentRoomID = u.CurrentRoom.ID

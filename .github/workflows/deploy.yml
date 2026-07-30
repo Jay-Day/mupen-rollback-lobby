@@ -1,14 +1,8 @@
-name: Deploy to Vultr
+name: Deploy to Vultr (prod)
 
 on:
   push:
-    branches: [master]
-    paths-ignore:
-      - '**.md'
-      - '.gitignore'
-      - '.gitattributes'
-      - 'build.ps1'
-      - 'build.sh'
+    tags: ['v*']
   workflow_dispatch:
 
 jobs:
