@@ -1,0 +1,73 @@
+name: Deploy to Test Server
+
+on:
+  push:
+    branches: [master]
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+      - '.gitattributes'
+      - 'build.ps1'
+      - 'build.sh'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Test
+        run: go test ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build Linux amd64 binary
+        env:
+          GOOS: linux
+          GOARCH: amd64
+          CGO_ENABLED: 0
+        run: |
+          go build -trimpath -ldflags="-s -w" -o lobby-server ./cmd/lobby-server
+          ls -lh lobby-server
+          file lobby-server
+
+      - name: Upload binary to test VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.TEST_VPS_HOST }}
+          username: ${{ secrets.TEST_VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: "lobby-server"
+          target: "/tmp/"
+
+      - name: Install and restart service
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+        with:
+          host: ${{ secrets.TEST_VPS_HOST }}
+          username: ${{ secrets.TEST_VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          envs: COMMIT_SHA
+          script: |
+            set -e
+            # Stage with .new suffix, then atomic rename. systemctl restart
+            # picks up the new binary; mv on same filesystem is guaranteed
+            # atomic so a running process never sees a half-uploaded file.
+            sudo cp /tmp/lobby-server /opt/rmgk-lobby/lobby-server.new
+            sudo chmod +x /opt/rmgk-lobby/lobby-server.new
+            sudo chown rmgk:rmgk /opt/rmgk-lobby/lobby-server.new
+            sudo mv /opt/rmgk-lobby/lobby-server.new /opt/rmgk-lobby/lobby-server
+            sudo systemctl restart rmgk-lobby
+            sleep 2
+            sudo systemctl is-active rmgk-lobby
+            curl -fsS http://localhost:8080/health
+            rm -f /tmp/lobby-server
+            echo "Test deploy of ${COMMIT_SHA::7} complete"
