@@ -192,6 +192,32 @@ func (h *Hub) handleRoomJoin(c *Client, env protocol.Envelope) {
 
 	// And the joiner's presence state.
 	h.broadcastPresenceUpdated(c.user)
+
+	// Punch the joiner against everyone already seated, both directions at
+	// once. Start gating waits on these measurements, so leaving it to the
+	// client's 3s probe loop means the host stares at "Measuring ping…" until
+	// two one-sided probes happen to cross.
+	h.introduceRoomPeers(room, c.user)
+}
+
+// introduceRoomPeers cross-introduces `joiner` with every other player seated
+// in `room`, so both ends fire a probe within one RTT and the NAT mappings open
+// together — the same simultaneous-open n02/NATLinker does on JOIN. Server
+// initiated, so it deliberately skips the per-client introduce cooldown that
+// guards the client-requested path; joining a room is not a spammable action
+// (rate limited upstream by room join itself).
+func (h *Hub) introduceRoomPeers(room *state.Room, joiner *state.User) {
+	if room == nil || joiner == nil {
+		return
+	}
+	for _, seat := range room.Players {
+		peer := seat.User
+		if peer == nil || peer.ID == joiner.ID {
+			continue
+		}
+		h.introduceTo(peer, joiner)
+		h.introduceTo(joiner, peer)
+	}
 }
 
 func (c *Client) sendRoomJoinFail(id, reason string) {

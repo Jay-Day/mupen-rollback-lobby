@@ -293,20 +293,61 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 // requester can fire UDP probes directly. Returns an empty endpoint when
 // the target either isn't registered or hasn't yet sent an anchor packet;
 // the client treats that as "ping unavailable".
+// It also introduces the two sides to each other: the target gets an
+// unsolicited PING_PROBE_INCOMING naming the requester, so both punch at once
+// instead of the requester's packet dying at the target's NAT.
 func (h *Hub) handlePingProbeRequest(c *Client, env protocol.Envelope) {
 	var req protocol.PingProbeRequestPayload
 	if err := json.Unmarshal(env.Data, &req); err != nil {
 		return
 	}
+	if req.TargetUserID == c.user.ID {
+		return
+	}
+	// Dropped silently: a client over its budget is either buggy or hostile,
+	// and an error reply would just hand it a second message to spam.
+	if !c.allowProbeRequest(time.Now()) {
+		slog.Debug("ping probe rate limited", "user", c.user.Username, "target", req.TargetUserID)
+		return
+	}
+
+	target := h.state.GetUser(req.TargetUserID)
 
 	resp := protocol.PingProbeReplyPayload{TargetUserID: req.TargetUserID}
-	if target := h.state.GetUser(req.TargetUserID); target != nil {
+	if target != nil {
 		ip, port := target.GetUDPEndpoint()
 		if ip != "" && port != 0 {
 			resp.TargetEndpoint = fmt.Sprintf("%s:%d", ip, port)
 		}
 	}
 	c.sendEnvelope(protocol.TypePingProbeReply, env.ID, resp)
+
+	if target != nil && resp.TargetEndpoint != "" && c.allowIntroduce(req.TargetUserID, time.Now()) {
+		h.introduceTo(target, c.user)
+	}
+}
+
+// introduceTo tells `to` that `from` wants to measure ping, so it probes back
+// and both NAT mappings open together. No-op when `from` has no observed
+// endpoint yet (never sent an anchor packet) or `to` isn't connected.
+func (h *Hub) introduceTo(to *state.User, from *state.User) {
+	if to == nil || from == nil || to.ID == from.ID {
+		return
+	}
+	ip, port := from.GetUDPEndpoint()
+	if ip == "" || port == 0 {
+		return
+	}
+	h.mu.Lock()
+	target := h.clients[to.ID]
+	h.mu.Unlock()
+	if target == nil {
+		return
+	}
+	target.sendEnvelope(protocol.TypePingProbeIncoming, "", protocol.PingProbeIncomingPayload{
+		FromUserID:   from.ID,
+		FromEndpoint: fmt.Sprintf("%s:%d", ip, port),
+	})
 }
 
 func (h *Hub) handleHeartbeat(c *Client, env protocol.Envelope) {
