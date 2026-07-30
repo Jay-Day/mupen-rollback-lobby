@@ -67,9 +67,15 @@ const (
 	TypeRoomCreateFail   = "ROOM_CREATE_FAIL"
 	TypeRoomLeft         = "ROOM_LEFT"
 	TypePingProbeReply   = "PING_PROBE_REPLY"
-	TypeMatchBegin       = "MATCH_BEGIN"
-	TypeMatchPeerLeft    = "MATCH_PEER_LEFT"
-	TypeQuickMatchStatus = "QUICK_MATCH_STATUS"
+	// Unsolicited: tells the recipient that someone wants to measure ping with
+	// them, so both sides punch at the same time. A lone PING_PROBE_REPLY only
+	// arms the requester, whose UDP probe then dies at the target's NAT unless
+	// the target happens to have an open mapping already. Pushed on room join
+	// and alongside each PING_PROBE_REPLY.
+	TypePingProbeIncoming = "PING_PROBE_INCOMING"
+	TypeMatchBegin        = "MATCH_BEGIN"
+	TypeMatchPeerLeft     = "MATCH_PEER_LEFT"
+	TypeQuickMatchStatus  = "QUICK_MATCH_STATUS"
 
 	// Spectating (server → spectator).
 	TypeSpectateBegin = "SPECTATE_BEGIN" // ack: stream is starting; history follows
@@ -316,6 +322,16 @@ type RoomLeftPayload struct {
 type PingProbeReplyPayload struct {
 	TargetUserID   uint64 `json:"targetUserId"`
 	TargetEndpoint string `json:"targetEndpoint"`
+}
+
+// PingProbeIncomingPayload names the peer that wants to be measured and the
+// endpoint to probe back. FromEndpoint is always the server's *observed* UDP
+// source for that user (set in udp/anchor.go from the packet address), never
+// anything the client declared — so this can't be used to aim probes at a
+// third party.
+type PingProbeIncomingPayload struct {
+	FromUserID   uint64 `json:"fromUserId"`
+	FromEndpoint string `json:"fromEndpoint"`
 }
 
 type MatchPeer struct {

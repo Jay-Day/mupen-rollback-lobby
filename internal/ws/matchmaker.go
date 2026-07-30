@@ -257,6 +257,12 @@ func (h *Hub) quickMatchAttempt(searcher *state.User) {
 		joinerClient.sendEnvelope(protocol.TypeRoomJoinOK, "", payload)
 	}
 
+	// Punch the pair against each other immediately. The warmup below is only
+	// long enough to be useful if a real ping lands inside it, and a one-sided
+	// probe usually won't — so the Auto delay would fall back to the region
+	// estimate on exactly the path that most needs a measurement.
+	h.introduceRoomPeers(room, joinerUser)
+
 	// Don't start instantly. Give both clients a short warmup in the in-room
 	// view: seats + live peer ping render, and the host's Auto delay resolves
 	// from that ping and pushes ROOM_UPDATE_SETTINGS before the match locks in.

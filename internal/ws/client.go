@@ -34,11 +34,29 @@ type Client struct {
 
 	// Chat flood window. Only touched from this client's read loop, so no lock.
 	chatTimes []time.Time
+
+	// Ping-probe flood window, and the last time we introduced this client to
+	// each target. Same read-loop-only rule as chatTimes, so no lock.
+	probeTimes   []time.Time
+	introducedAt map[uint64]time.Time
 }
 
 const (
 	chatBurst  = 5 // max chat messages per chatWindow
 	chatWindow = 5 * time.Second
+
+	// A seated 4-player room refreshes 3 peers every 3s, so ~5 requests per 5s
+	// is the honest ceiling; 12 leaves room for that plus a user clicking
+	// around the lobby without ever letting one client hammer the server.
+	probeBurst  = 12
+	probeWindow = 5 * time.Second
+
+	// How often one client may cause us to poke a given target. The probe reply
+	// still goes out when this trips — only the *unsolicited* push to the target
+	// is suppressed, so a spammer can't make someone else emit packets on
+	// demand. Introduction only needs to bootstrap the NAT mapping; once both
+	// sides are probing each other the 3s seat refresh keeps it open.
+	introduceCooldown = 10 * time.Second
 )
 
 // allowChat records a chat attempt and reports whether it's within the flood
@@ -56,6 +74,39 @@ func (c *Client) allowChat(now time.Time) bool {
 		return false
 	}
 	c.chatTimes = append(c.chatTimes, now)
+	return true
+}
+
+// allowProbeRequest records a PING_PROBE_REQUEST and reports whether it's
+// within the flood limit. Called only from this client's read loop.
+func (c *Client) allowProbeRequest(now time.Time) bool {
+	cutoff := now.Add(-probeWindow)
+	kept := c.probeTimes[:0]
+	for _, t := range c.probeTimes {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	c.probeTimes = kept
+	if len(c.probeTimes) >= probeBurst {
+		return false
+	}
+	c.probeTimes = append(c.probeTimes, now)
+	return true
+}
+
+// allowIntroduce reports whether we may push an unsolicited PING_PROBE_INCOMING
+// about this client to targetID, and records the attempt when we may. Keyed per
+// target so hammering one victim is bounded even while the caller stays inside
+// the overall probe budget. Called only from this client's read loop.
+func (c *Client) allowIntroduce(targetID uint64, now time.Time) bool {
+	if c.introducedAt == nil {
+		c.introducedAt = make(map[uint64]time.Time)
+	}
+	if last, ok := c.introducedAt[targetID]; ok && now.Sub(last) < introduceCooldown {
+		return false
+	}
+	c.introducedAt[targetID] = now
 	return true
 }
 
