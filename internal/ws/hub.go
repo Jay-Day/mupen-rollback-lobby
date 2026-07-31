@@ -358,6 +358,21 @@ func (h *Hub) handleHeartbeat(c *Client, env protocol.Envelope) {
 	if req.PingToServer > 0 {
 		c.user.SetPingToServer(req.PingToServer)
 	}
+
+	// AFK presence. Only the two "doing nothing" states flip to away — a
+	// seated/searching/playing user keeps their real state (those states are
+	// set and cleared by their own flows, and an AFK label would clobber
+	// them). Returning from away lands on idle; if they were actually
+	// browsing, the next room-list interaction restores that on its own.
+	switch st := c.user.GetState(); {
+	case req.Away && (st == state.UserStateIdle || st == state.UserStateBrowsing):
+		c.user.SetState(state.UserStateAway)
+		h.broadcastPresenceUpdated(c.user)
+	case !req.Away && st == state.UserStateAway:
+		c.user.SetState(state.UserStateIdle)
+		h.broadcastPresenceUpdated(c.user)
+	}
+
 	c.sendEnvelope(protocol.TypeHeartbeatAck, env.ID, protocol.HeartbeatAckResponse{
 		ServerTime: time.Now().UnixMilli(),
 	})
