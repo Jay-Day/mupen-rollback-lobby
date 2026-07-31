@@ -128,6 +128,10 @@ type HelloRequest struct {
 
 type HeartbeatRequest struct {
 	PingToServer uint16 `json:"pingToServer,omitempty"`
+	// True while the client has seen no keyboard/mouse input for a while.
+	// The server flips idle/browsing users to the "away" presence state on it;
+	// users who are seated, searching, or playing keep their real state.
+	Away bool `json:"away,omitempty"`
 }
 
 type ChatSendRequest struct {
