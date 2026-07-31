@@ -99,11 +99,13 @@ func (h *Hub) handleRoomCreate(c *Client, env protocol.Envelope) {
 		State:          state.RoomStateWaiting,
 		CreatedAt:      time.Now(),
 	}
-	_ = room.AddPlayer(c.user)
+	if err := h.seatUser(c.user, room, state.UserStateHosting); err != nil {
+		c.sendRoomCreateFail(env.ID, protocol.ReasonAlreadyInRoom)
+		return
+	}
 
 	h.state.AddRoom(room)
-	c.user.CurrentRoom = room
-	c.user.SetState(state.UserStateHosting)
+	h.dequeueQuickMatch(c)
 
 	slog.Info("room created",
 		"id", room.ID, "host", c.user.Username, "rom", room.RomName,
@@ -167,14 +169,15 @@ func (h *Hub) handleRoomJoin(c *Client, env protocol.Envelope) {
 		c.sendRoomJoinFail(env.ID, protocol.ReasonWrongPassword)
 		return
 	}
-	if err := room.AddPlayer(c.user); err != nil {
-		// AddPlayer only returns ErrRoomFull right now.
-		c.sendRoomJoinFail(env.ID, protocol.ReasonRoomFull)
+	if err := h.seatUser(c.user, room, state.UserStateInRoom); err != nil {
+		if err == state.ErrAlreadyInRoom {
+			c.sendRoomJoinFail(env.ID, protocol.ReasonAlreadyInRoom)
+		} else {
+			c.sendRoomJoinFail(env.ID, protocol.ReasonRoomFull)
+		}
 		return
 	}
-
-	c.user.CurrentRoom = room
-	c.user.SetState(state.UserStateInRoom)
+	h.dequeueQuickMatch(c)
 
 	slog.Info("room joined",
 		"id", room.ID, "user", c.user.Username,
@@ -420,6 +423,34 @@ func (h *Hub) startMatchInRoom(room *state.Room, initiator string) {
 		"initiator", initiator)
 }
 
+// seatUser and unseatUser are the ONLY code allowed to change room
+// membership. "Who is in what room" is double-booked — the room's seat list
+// and the user's CurrentRoom pointer — and every ghost-room bug so far has
+// been those two diverging because some handler updated one without the
+// other. Funneling every change through this pair makes the divergence
+// unrepresentable: seatUser refuses (loudly) to seat a user whose pointer is
+// already set elsewhere, and unseatUser always clears both sides together.
+func (h *Hub) seatUser(u *state.User, room *state.Room, st state.UserState) error {
+	if u.CurrentRoom == room {
+		return nil // already seated here; never double-seat
+	}
+	if u.CurrentRoom != nil {
+		slog.Warn("seatUser refused: user already in a room",
+			"user", u.Username, "in_room", u.CurrentRoom.ID, "target_room", room.ID)
+		return state.ErrAlreadyInRoom
+	}
+	if err := room.AddPlayer(u); err != nil {
+		return err
+	}
+	u.CurrentRoom = room
+	u.SetState(st)
+	return nil
+}
+
+func (h *Hub) unseatUser(u *state.User, room *state.Room) {
+	h.unseatUser(u, room)
+}
+
 // removeUserFromRoom handles the bookkeeping for a user leaving a room
 // (by ROOM_LEAVE, by disconnect, or by host dissolving). reason is informational
 // for log lines and propagated when notifying peers of in-game departures.
@@ -453,15 +484,16 @@ func (h *Hub) removeUserFromRoom(u *state.User, room *state.Room, reason string)
 		if reason == "admin_closed" {
 			memberReason = "admin_closed"
 		}
-		for _, seat := range room.Players {
+		// Snapshot first: unseatUser mutates room.Players while we iterate.
+		seats := append([]*state.RoomSeat(nil), room.Players...)
+		for _, seat := range seats {
 			if seat.User == nil || seat.User.ID == u.ID {
 				continue // skip the user who triggered the dissolve
 			}
-			seat.User.CurrentRoom = nil
-			seat.User.CurrentMatch = nil
-			seat.User.SetState(state.UserStateIdle)
-			h.broadcastPresenceUpdated(seat.User)
-			sendRoomLeft(seat.User, memberReason)
+			member := seat.User
+			h.unseatUser(member, room)
+			h.broadcastPresenceUpdated(member)
+			sendRoomLeft(member, memberReason)
 		}
 		h.state.RemoveRoom(room.ID)
 	} else {

@@ -21,6 +21,14 @@ const (
 	helloTimeout    = 5 * time.Second
 	writeWait       = 10 * time.Second
 	clientSendQueue = 64
+
+	// A connection that has sent nothing for this long is dead: clients
+	// heartbeat every 15s, so this is four missed beats. Without it, a client
+	// that vanishes silently (power loss, network drop) leaves its read loop
+	// blocked forever — the user never gets cleaned up, and a room they were
+	// hosting sits "in game" until the server restarts.
+	clientSilenceTimeout = 60 * time.Second
+	reapInterval         = 30 * time.Second
 )
 
 // Hub coordinates the set of connected WS clients and dispatches
@@ -68,10 +76,15 @@ func (h *Hub) IsBanned(ip string) (moderation.Sanction, bool) {
 // Run owns the registration/unregistration channels.
 // Spawn this in its own goroutine before calling ServeWS.
 func (h *Hub) Run(ctx context.Context) {
+	reap := time.NewTicker(reapInterval)
+	defer reap.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-reap.C:
+			h.reapSilentClients()
+			h.reapOrphanRooms()
 		case c := <-h.register:
 			if c.user == nil {
 				continue
@@ -111,6 +124,77 @@ func (h *Hub) cleanupClient(c *Client) {
 	// TODO: if user was in a match, send MATCH_PEER_LEFT to peers.
 
 	h.broadcastPresenceRemoved(uid)
+}
+
+// reapSilentClients force-closes connections that have been silent past
+// clientSilenceTimeout. Closing the socket unblocks the connection's read
+// loop, which drives the normal unregister/cleanup path — leave room,
+// dissolve if host, presence removal — so a vanished client's room dies the
+// same way a graceful disconnect's would.
+func (h *Hub) reapSilentClients() {
+	cutoff := time.Now().Add(-clientSilenceTimeout)
+	var stale []*Client
+	h.mu.Lock()
+	for _, c := range h.clients {
+		if c.user != nil && c.user.GetLastSeen().Before(cutoff) {
+			stale = append(stale, c)
+		}
+	}
+	h.mu.Unlock()
+
+	for _, c := range stale {
+		slog.Info("reaping silent client",
+			"user", c.user.Username, "id", c.user.ID,
+			"last_seen", c.user.GetLastSeen().Format(time.RFC3339))
+		c.disconnect("connection timed out")
+	}
+}
+
+// reapOrphanRooms removes rooms in which no seated player is still connected.
+// The normal leave/dissolve paths should make this a no-op; it's the safety
+// net for any path that orphans a seat (and for whatever the next such bug
+// is), so a ghost room lasts at most one reap interval instead of until a
+// server restart. A room with even one connected player is left alone —
+// playing on alone in a room is allowed by design.
+func (h *Hub) reapOrphanRooms() {
+	h.mu.Lock()
+	connected := make(map[uint64]bool, len(h.clients))
+	for id := range h.clients {
+		connected[id] = true
+	}
+	h.mu.Unlock()
+
+	removed := 0
+	for _, room := range h.state.ListRooms() {
+		// Grace period so a room mid-creation (seat added, CurrentRoom pointer
+		// not assigned yet) can't be swept by an unluckily timed tick.
+		if time.Since(room.CreatedAt) < 2*reapInterval {
+			continue
+		}
+		// Alive means connected AND still actually in this room. The second
+		// half matters: an orphaned seat (a bug overwrote the user's
+		// CurrentRoom while their seat stayed behind) keeps pointing at a
+		// perfectly connected user who may be chatting in the lobby or playing
+		// a different game — connectedness alone would call that ghost alive
+		// forever.
+		alive := false
+		for _, seat := range room.Players {
+			if seat.User != nil && connected[seat.User.ID] && seat.User.CurrentRoom == room {
+				alive = true
+				break
+			}
+		}
+		if alive {
+			continue
+		}
+		id, _, name, seats, _, st := room.Snapshot()
+		slog.Warn("reaping orphan room", "id", id, "name", name, "seats", seats, "state", st)
+		h.state.RemoveRoom(id)
+		removed++
+	}
+	if removed > 0 {
+		h.broadcastRoomList()
+	}
 }
 
 // ServeWS upgrades an HTTP request to WebSocket and runs the client until disconnect.
