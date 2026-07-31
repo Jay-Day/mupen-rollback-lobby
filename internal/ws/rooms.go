@@ -104,6 +104,7 @@ func (h *Hub) handleRoomCreate(c *Client, env protocol.Envelope) {
 	h.state.AddRoom(room)
 	c.user.CurrentRoom = room
 	c.user.SetState(state.UserStateHosting)
+	h.dequeueQuickMatch(c)
 
 	slog.Info("room created",
 		"id", room.ID, "host", c.user.Username, "rom", room.RomName,
@@ -175,6 +176,7 @@ func (h *Hub) handleRoomJoin(c *Client, env protocol.Envelope) {
 
 	c.user.CurrentRoom = room
 	c.user.SetState(state.UserStateInRoom)
+	h.dequeueQuickMatch(c)
 
 	slog.Info("room joined",
 		"id", room.ID, "user", c.user.Username,

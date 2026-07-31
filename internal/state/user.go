@@ -80,6 +80,12 @@ func (u *User) Touch() {
 	u.LastSeen = time.Now()
 }
 
+func (u *User) GetLastSeen() time.Time {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	return u.LastSeen
+}
+
 func (u *User) SetPingToServer(rtt uint16) {
 	u.mu.Lock()
 	defer u.mu.Unlock()

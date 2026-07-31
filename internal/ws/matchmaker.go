@@ -162,6 +162,22 @@ func (h *Hub) handleQuickMatchCancel(c *Client, env protocol.Envelope) {
 	slog.Info("quick match cancelled", "user", c.user.Username, "queue", h.matchmaker.size())
 }
 
+// dequeueQuickMatch drops a user's quick-match queue entry when they enter a
+// room by other means, and resets their client's search toggle. Without this
+// the stale entry sits in the queue until pairing fires and corrupts their
+// room state (see quickMatchAttempt).
+func (h *Hub) dequeueQuickMatch(c *Client) {
+	if !h.matchmaker.contains(c.user.ID) {
+		return
+	}
+	h.matchmaker.remove(c.user.ID)
+	c.sendEnvelope(protocol.TypeQuickMatchStatus, "", protocol.QuickMatchStatusPayload{
+		Searching: false,
+		QueueSize: h.matchmaker.size(),
+	})
+	slog.Info("quick match dequeued: entered a room", "user", c.user.Username)
+}
+
 // quickMatchAttempt runs the pairing logic on behalf of `searcher`.
 // If an opponent is found, both are removed from the queue and dropped into
 // an auto-created room which then auto-starts.
@@ -183,6 +199,22 @@ func (h *Hub) quickMatchAttempt(searcher *state.User) {
 	}
 	opponent := h.state.GetUser(opponentID)
 	if opponent == nil {
+		h.matchmaker.remove(opponentID)
+		return
+	}
+
+	// A queued user who has since entered a room by other means is a stale
+	// entry: pairing them would overwrite their CurrentRoom pointer and orphan
+	// their seat, leaving behind a room nobody can dissolve — the "ghost match
+	// that sits in the list until a server restart" bug. Drop the stale side
+	// and let the live side keep searching.
+	if searcher.CurrentRoom != nil {
+		slog.Info("quick match dropped stale queue entry", "user", searcher.Username)
+		h.matchmaker.remove(searcher.ID)
+		return
+	}
+	if opponent.CurrentRoom != nil {
+		slog.Info("quick match dropped stale queue entry", "user", opponent.Username)
 		h.matchmaker.remove(opponentID)
 		return
 	}
