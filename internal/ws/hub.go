@@ -188,7 +188,7 @@ func (h *Hub) reapOrphanRooms() {
 			continue
 		}
 		id, _, name, seats, _, st := room.Snapshot()
-		slog.Info("reaping orphan room", "id", id, "name", name, "seats", seats, "state", st)
+		slog.Warn("reaping orphan room", "id", id, "name", name, "seats", seats, "state", st)
 		h.state.RemoveRoom(id)
 		removed++
 	}

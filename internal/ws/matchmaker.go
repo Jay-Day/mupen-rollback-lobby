@@ -209,12 +209,12 @@ func (h *Hub) quickMatchAttempt(searcher *state.User) {
 	// that sits in the list until a server restart" bug. Drop the stale side
 	// and let the live side keep searching.
 	if searcher.CurrentRoom != nil {
-		slog.Info("quick match dropped stale queue entry", "user", searcher.Username)
+		slog.Warn("quick match dropped stale queue entry", "user", searcher.Username)
 		h.matchmaker.remove(searcher.ID)
 		return
 	}
 	if opponent.CurrentRoom != nil {
-		slog.Info("quick match dropped stale queue entry", "user", opponent.Username)
+		slog.Warn("quick match dropped stale queue entry", "user", opponent.Username)
 		h.matchmaker.remove(opponentID)
 		return
 	}
@@ -270,13 +270,20 @@ func (h *Hub) quickMatchAttempt(searcher *state.User) {
 
 	slog.Info("quick match paired", "rom", hostRom.Name, "md5", hostRom.MD5,
 		"host", hostUser.Username, "joiner", joinerUser.Username, "room", room.ID)
-	_ = room.AddPlayer(hostUser)
-	_ = room.AddPlayer(joinerUser)
-
-	hostUser.CurrentRoom = room
-	joinerUser.CurrentRoom = room
-	hostUser.SetState(state.UserStateInRoom)
-	joinerUser.SetState(state.UserStateInRoom)
+	// Seat through the choke point: if a racing handler seated either user
+	// between the pair-time check above and here, this refuses instead of
+	// corrupting their membership — the room object is simply discarded.
+	if err := h.seatUser(hostUser, room, state.UserStateInRoom); err != nil {
+		slog.Warn("quick match aborted: host could not be seated",
+			"user", hostUser.Username, "err", err)
+		return
+	}
+	if err := h.seatUser(joinerUser, room, state.UserStateInRoom); err != nil {
+		slog.Warn("quick match aborted: joiner could not be seated",
+			"user", joinerUser.Username, "err", err)
+		h.unseatUser(hostUser, room)
+		return
+	}
 
 	h.state.AddRoom(room)
 
