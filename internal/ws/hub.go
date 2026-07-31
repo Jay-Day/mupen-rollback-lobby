@@ -166,9 +166,20 @@ func (h *Hub) reapOrphanRooms() {
 
 	removed := 0
 	for _, room := range h.state.ListRooms() {
+		// Grace period so a room mid-creation (seat added, CurrentRoom pointer
+		// not assigned yet) can't be swept by an unluckily timed tick.
+		if time.Since(room.CreatedAt) < 2*reapInterval {
+			continue
+		}
+		// Alive means connected AND still actually in this room. The second
+		// half matters: an orphaned seat (a bug overwrote the user's
+		// CurrentRoom while their seat stayed behind) keeps pointing at a
+		// perfectly connected user who may be chatting in the lobby or playing
+		// a different game — connectedness alone would call that ghost alive
+		// forever.
 		alive := false
 		for _, seat := range room.Players {
-			if seat.User != nil && connected[seat.User.ID] {
+			if seat.User != nil && connected[seat.User.ID] && seat.User.CurrentRoom == room {
 				alive = true
 				break
 			}
