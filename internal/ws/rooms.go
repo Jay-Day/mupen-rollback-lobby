@@ -448,7 +448,10 @@ func (h *Hub) seatUser(u *state.User, room *state.Room, st state.UserState) erro
 }
 
 func (h *Hub) unseatUser(u *state.User, room *state.Room) {
-	h.unseatUser(u, room)
+	room.RemovePlayer(u.ID)
+	u.CurrentRoom = nil
+	u.CurrentMatch = nil
+	u.SetState(state.UserStateIdle)
 }
 
 // removeUserFromRoom handles the bookkeeping for a user leaving a room
@@ -463,10 +466,7 @@ func (h *Hub) removeUserFromRoom(u *state.User, room *state.Room, reason string)
 		h.broadcastMatchPeerLeft(room, u, matchID, reason)
 	}
 
-	room.RemovePlayer(u.ID)
-	u.CurrentRoom = nil
-	u.CurrentMatch = nil
-	u.SetState(state.UserStateIdle)
+	h.unseatUser(u, room)
 
 	// Dissolve only when the host leaves — the host owns the room. Any
 	// non-host drop leaves the room intact regardless of remaining seat count;
