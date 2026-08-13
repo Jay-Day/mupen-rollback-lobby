@@ -284,6 +284,7 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		Country:       geo.CountryFromIP(c.ip),
 		ClientVersion: clampString(req.ClientVersion, 32),
 		Connection:    clampString(req.Connection, 16),
+		Anonymous:     req.Anonymous,
 		JoinedAt:      time.Now(),
 		LastSeen:      time.Now(),
 		Send:          c.send,
@@ -596,6 +597,14 @@ func (h *Hub) presenceUserFromState(u *state.User) protocol.PresenceUser {
 		ClientVersion: u.ClientVersion,
 		Connection:    u.Connection,
 		PingToServer:  u.PingToServer,
+	}
+	// Withholding happens here, at the single choke point every presence
+	// message flows through, so no other broadcast path can leak the country.
+	// Region stays: clients need it for region-based ping estimation, and the
+	// relayed Anonymous flag tells them not to render it as a location badge.
+	if u.Anonymous {
+		pu.Country = ""
+		pu.Anonymous = true
 	}
 	if u.CurrentRoom != nil {
 		pu.CurrentRoomID = u.CurrentRoom.ID

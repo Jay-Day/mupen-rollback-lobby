@@ -124,6 +124,10 @@ type HelloRequest struct {
 	// Standard (non-DST) UTC offset in seconds, used to split the North
 	// America country bucket into east/central/west. Optional.
 	TzOffsetSeconds int `json:"tzOffset,omitempty"`
+	// User opted out of location display: presence withholds their country
+	// and relays this flag so clients suppress the region badge fallback too.
+	// Region still flows for ping estimation.
+	Anonymous bool `json:"anonymous,omitempty"`
 }
 
 type HeartbeatRequest struct {
@@ -247,6 +251,7 @@ type PresenceUser struct {
 	Region          string `json:"region"`
 	Country         string `json:"country,omitempty"`
 	ClientVersion   string `json:"clientVersion,omitempty"`
+	Anonymous       bool   `json:"anonymous,omitempty"` // location withheld at the user's request
 	Connection      string `json:"connection,omitempty"`
 	PingToServer    uint16 `json:"pingToServer"`
 	CurrentRoomID   uint64 `json:"currentRoomId,omitempty"`
