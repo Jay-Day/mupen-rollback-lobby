@@ -33,6 +33,7 @@ type User struct {
 	LocalIP       string
 	Region        string
 	Country       string // ISO 3166-1 alpha-2, "" when unknown; drives client flags
+	Anonymous     bool   // withhold Country from presence at the user's request
 	ClientVersion string // self-reported build, shown in peer tooltips
 	Connection    string // self-reported transport medium ("wifi"/"lan"/...)
 
