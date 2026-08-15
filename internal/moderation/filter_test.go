@@ -19,6 +19,10 @@ func TestFilterBlocks(t *testing.T) {
 		"tranny",
 		"sand nigger",     // two words, second is a slur token
 		"g0ok",            // leet o
+		"fag",             // short form, whole word
+		"fags",            // short form, plural
+		"f4g",             // short form, leet
+		"faaag",           // short form, stretched (collapses to fag)
 	}
 	for _, m := range blocked {
 		if _, hit := f.Check(m); !hit {
@@ -44,6 +48,9 @@ func TestFilterAllowsInnocent(t *testing.T) {
 		"it's a trap",      // trap omitted from default list
 		"shotgun",
 		"that was clutch",
+		"capture the flag",  // "flag" contains "fag" — whole-word must not fire
+		"flagged the play",  // "flagged" contains "fagg"
+		"fragged him",       // adjacent fragment
 	}
 	for _, m := range allowed {
 		if tok, hit := f.Check(m); hit {
