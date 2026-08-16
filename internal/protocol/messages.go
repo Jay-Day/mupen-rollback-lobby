@@ -128,7 +128,25 @@ type HelloRequest struct {
 	// and relays this flag so clients suppress the region badge fallback too.
 	// Region still flows for ping estimation.
 	Anonymous bool `json:"anonymous,omitempty"`
+	// Lobby protocol revision this client speaks. Compared against
+	// MinLobbyProtocol at HELLO; clients that predate the field send nothing
+	// and unmarshal to 0. This is a compatibility number, not a build
+	// version — it only moves when an emulator change requires a matching
+	// server change (or vice versa).
+	Protocol int `json:"protocol,omitempty"`
 }
+
+// MinLobbyProtocol is the oldest client protocol revision this server admits.
+// Bump it in the same deploy as any change that breaks older clients — the
+// rejected client shows its stock "Client version is incompatible with this
+// server" message, which every shipped build already maps from
+// ReasonVersionMismatch.
+//
+// History:
+//   1 (2026-08-16): shared-anchor-socket era. Forces out pre-actor-count
+//     builds whose GekkoNet sessions are sized by seat and desync sparse
+//     rooms for everyone else.
+const MinLobbyProtocol = 1
 
 type HeartbeatRequest struct {
 	PingToServer uint16 `json:"pingToServer,omitempty"`

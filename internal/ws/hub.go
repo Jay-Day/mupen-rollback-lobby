@@ -254,6 +254,17 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		return err
 	}
 
+	// Compatibility gate before anything else: an out-of-date client can
+	// break matches for everyone it plays (session shape, input contracts),
+	// so it never gets past HELLO. Old builds send no protocol field at all.
+	if req.Protocol < protocol.MinLobbyProtocol {
+		c.sendFail(protocol.TypeHelloFail, env.ID, protocol.ReasonVersionMismatch)
+		slog.Info("rejected outdated client", "ip", c.ip,
+			"protocol", req.Protocol, "min", protocol.MinLobbyProtocol,
+			"clientVersion", clampString(req.ClientVersion, 32))
+		return nil
+	}
+
 	if !isValidUsername(req.Username) {
 		c.sendFail(protocol.TypeHelloFail, env.ID, protocol.ReasonInvalidPayload)
 		return errInvalidUsername
