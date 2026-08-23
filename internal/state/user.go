@@ -36,6 +36,7 @@ type User struct {
 	Anonymous     bool   // withhold Country from presence at the user's request
 	ClientVersion string // self-reported build, shown in peer tooltips
 	Connection    string // self-reported transport medium ("wifi"/"lan"/...)
+	ICESupported  bool   // room-scoped libjuice signaling/transport support
 
 	PingToServer uint16
 

@@ -203,12 +203,9 @@ func (h *Hub) handleRoomJoin(c *Client, env protocol.Envelope) {
 	h.introduceRoomPeers(room, c.user)
 }
 
-// introduceRoomPeers cross-introduces `joiner` with every other player seated
-// in `room`, so both ends fire a probe within one RTT and the NAT mappings open
-// together — the same simultaneous-open n02/NATLinker does on JOIN. Server
-// initiated, so it deliberately skips the per-client introduce cooldown that
-// guards the client-requested path; joining a room is not a spammable action
-// (rate limited upstream by room join itself).
+// introduceRoomPeers keeps the legacy UDP-anchor introduction available when
+// either side is an older client. Two ICE-capable clients negotiate through
+// ICE_SIGNAL instead and must not activate the custom punch path.
 func (h *Hub) introduceRoomPeers(room *state.Room, joiner *state.User) {
 	if room == nil || joiner == nil {
 		return
@@ -216,6 +213,9 @@ func (h *Hub) introduceRoomPeers(room *state.Room, joiner *state.User) {
 	for _, seat := range room.Players {
 		peer := seat.User
 		if peer == nil || peer.ID == joiner.ID {
+			continue
+		}
+		if peer.ICESupported && joiner.ICESupported {
 			continue
 		}
 		h.introduceTo(peer, joiner)
@@ -388,12 +388,13 @@ func (h *Hub) startMatchInRoom(room *state.Room, initiator string) {
 
 		ip, port := seat.User.GetUDPEndpoint()
 		peers = append(peers, protocol.MatchPeer{
-			UserID:     seat.User.ID,
-			Username:   seat.User.Username,
-			PublicIP:   ip,
-			PublicPort: port,
-			LocalIP:    seat.User.LocalIP,
-			Slot:       seat.Slot,
+			UserID:       seat.User.ID,
+			Username:     seat.User.Username,
+			PublicIP:     ip,
+			PublicPort:   port,
+			LocalIP:      seat.User.LocalIP,
+			Slot:         seat.Slot,
+			ICESupported: seat.User.ICESupported,
 		})
 	}
 
@@ -788,9 +789,10 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 			continue
 		}
 		out.Players = append(out.Players, protocol.RoomSeatPayload{
-			UserID:   seat.User.ID,
-			Username: seat.User.Username,
-			Slot:     seat.Slot,
+			UserID:       seat.User.ID,
+			Username:     seat.User.Username,
+			Slot:         seat.Slot,
+			ICESupported: seat.User.ICESupported,
 		})
 	}
 	return out

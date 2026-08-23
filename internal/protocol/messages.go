@@ -29,6 +29,9 @@ const (
 	TypeMatchFinished      = "MATCH_FINISHED"
 	TypeQuickMatchJoin     = "QUICK_MATCH_JOIN"
 	TypeQuickMatchCancel   = "QUICK_MATCH_CANCEL"
+	// ICE signaling is relayed over the authenticated lobby WebSocket. The
+	// server never sees gameplay datagrams and is not a TURN relay.
+	TypeICESignal = "ICE_SIGNAL"
 
 	// Spectating: one player streams the match's .krec up via BROADCAST_*; other
 	// users pull it back down via SPECTATE_*. krec bytes ride as base64 strings
@@ -128,6 +131,9 @@ type HelloRequest struct {
 	// and relays this flag so clients suppress the region badge fallback too.
 	// Region still flows for ping estimation.
 	Anonymous bool `json:"anonymous,omitempty"`
+	// Advertises support for the room-scoped libjuice transport. Older clients
+	// omit this and are prevented from entering an ICE match with newer clients.
+	ICESupported bool `json:"iceSupported,omitempty"`
 }
 
 type HeartbeatRequest struct {
@@ -204,6 +210,13 @@ type MatchPeerEventRequest struct {
 	Reason     string `json:"reason,omitempty"`
 }
 
+type ICESignalRequest struct {
+	TargetUserID uint64 `json:"targetUserId"`
+	RoomID       uint64 `json:"roomId"`
+	Kind         string `json:"kind"`
+	Value        string `json:"value,omitempty"`
+}
+
 // QuickMatchJoinRequest scopes a quick-match search to a specific ROM. The
 // matchmaker pairs only searchers whose Rom.MD5 agree; Rom.Name is carried so
 // the auto-created room can be resolved by name on both clients.
@@ -214,10 +227,23 @@ type QuickMatchJoinRequest struct {
 // -- Response payloads --
 
 type HelloOKResponse struct {
-	UserID     uint64 `json:"userId"`
-	ObservedIP string `json:"observedIp"`
-	UDPAnchor  string `json:"udpAnchor"`
-	Region     string `json:"region"`
+	UserID     uint64           `json:"userId"`
+	ObservedIP string           `json:"observedIp"`
+	UDPAnchor  string           `json:"udpAnchor"`
+	Region     string           `json:"region"`
+	ICE        ICEConfiguration `json:"ice"`
+}
+
+type ICETransportServer struct {
+	Host     string `json:"host"`
+	Port     uint16 `json:"port"`
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
+}
+
+type ICEConfiguration struct {
+	STUN ICETransportServer   `json:"stun"`
+	TURN []ICETransportServer `json:"turn"`
 }
 
 type HelloFailResponse struct {
@@ -294,9 +320,10 @@ type RoomListPayload struct {
 }
 
 type RoomSeatPayload struct {
-	UserID   uint64 `json:"userId"`
-	Username string `json:"username"`
-	Slot     int    `json:"slot"`
+	UserID       uint64 `json:"userId"`
+	Username     string `json:"username"`
+	Slot         int    `json:"slot"`
+	ICESupported bool   `json:"iceSupported,omitempty"`
 }
 
 type RoomStatePayload struct {
@@ -344,17 +371,25 @@ type PingProbeIncomingPayload struct {
 }
 
 type MatchPeer struct {
-	UserID     uint64 `json:"userId"`
-	Username   string `json:"username"`
-	PublicIP   string `json:"publicIp"`
-	PublicPort uint16 `json:"publicPort"`
-	LocalIP    string `json:"localIp,omitempty"`
-	Slot       int    `json:"slot"`
+	UserID       uint64 `json:"userId"`
+	Username     string `json:"username"`
+	PublicIP     string `json:"publicIp"`
+	PublicPort   uint16 `json:"publicPort"`
+	LocalIP      string `json:"localIp,omitempty"`
+	Slot         int    `json:"slot"`
+	ICESupported bool   `json:"iceSupported,omitempty"`
 }
 
 type MatchBeginPayload struct {
 	MatchID uint64      `json:"matchId"`
 	Peers   []MatchPeer `json:"peers"`
+}
+
+type ICESignalPayload struct {
+	FromUserID uint64 `json:"fromUserId"`
+	RoomID     uint64 `json:"roomId"`
+	Kind       string `json:"kind"`
+	Value      string `json:"value,omitempty"`
 }
 
 type MatchPeerLeftPayload struct {
