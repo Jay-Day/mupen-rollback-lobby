@@ -13,11 +13,11 @@ Then finally ./build.sh
 ## ICE configuration
 
 The lobby WebSocket relays ICE signaling only; game traffic remains directly
-peer-to-peer. By default the server advertises `stun.l.google.com:19302` and no
+peer-to-peer. By default the server advertises `216.128.157.98:3478` and no
 TURN relay:
 
 ```text
-lobby-server --stun-host stun.l.google.com --stun-port 19302
+lobby-server --stun-host 216.128.157.98 --stun-port 3478
 ```
 
 TURN support is reserved for a future deployment and is disabled unless
