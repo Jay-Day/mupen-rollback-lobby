@@ -14,7 +14,7 @@ import (
 )
 
 var (
-	usernameRegexp     = regexp.MustCompile(`^[A-Za-z0-9_\-\.]{3,16}$`)
+	usernameRegexp     = regexp.MustCompile(`^[A-Za-z0-9_\-\.]{2,20}$`)
 	errInvalidUsername = errors.New("invalid username")
 )
 
