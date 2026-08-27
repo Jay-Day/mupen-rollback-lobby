@@ -255,6 +255,13 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		c.sendFail(protocol.TypeHelloFail, env.ID, protocol.ReasonInvalidPayload)
 		return err
 	}
+	if !isSupportedClientVersion(req.ClientVersion) {
+		c.sendFailMessage(protocol.TypeHelloFail, env.ID, protocol.ReasonVersionMismatch,
+			minimumClientMessage)
+		slog.Info("out-of-date client rejected", "ip", c.ip,
+			"version", clampString(req.ClientVersion, 64))
+		return errUnsupportedClientVersion
+	}
 
 	if !isValidUsername(req.Username) {
 		c.sendFail(protocol.TypeHelloFail, env.ID, protocol.ReasonInvalidPayload)
@@ -342,6 +349,8 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleRoomStart(c, env)
 	case protocol.TypeRoomUpdateSettings:
 		h.handleRoomUpdateSettings(c, env)
+	case protocol.TypeRoomUpdateDelay:
+		h.handleRoomUpdateDelay(c, env)
 	case protocol.TypeRoomSwapSlots:
 		h.handleRoomSwapSlots(c, env)
 	case protocol.TypePingProbeRequest:

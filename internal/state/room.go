@@ -35,14 +35,13 @@ type Room struct {
 	RomRegion string
 
 	MaxPlayers int
-	Delay      int
-	Prediction int
+	Delay      int // legacy host delay; current values live on RoomSeat
+	Prediction int // fixed to the lobby prediction window
 	// Pacing is the time-sync model (0 = aggressive/symmetric default,
 	// 1 = smooth/asymmetric). Host-set; broadcast so every seat runs the same
 	// model. No Auto concept — it's a discrete choice, not ping-derived.
 	Pacing int
-	// DelayAuto/PredictionAuto record whether the host left each value on "Auto"
-	// so the state we broadcast lets non-hosts mirror the host's label.
+	// Legacy compatibility flags for clients that still render shared settings.
 	DelayAuto      bool
 	PredictionAuto bool
 	Visibility     Visibility
@@ -59,8 +58,10 @@ type Room struct {
 }
 
 type RoomSeat struct {
-	User *User
-	Slot int
+	User       *User
+	Slot       int
+	FrameDelay int
+	DelayAuto  bool
 }
 
 func (r *Room) Snapshot() (id, hostID uint64, name string, players, max int, st RoomState) {
@@ -98,8 +99,33 @@ func (r *Room) AddPlayer(u *User) error {
 			break
 		}
 	}
-	r.Players = append(r.Players, &RoomSeat{User: u, Slot: slot})
+	r.Players = append(r.Players, &RoomSeat{
+		User:       u,
+		Slot:       slot,
+		FrameDelay: r.Delay,
+		DelayAuto:  r.DelayAuto,
+	})
 	return nil
+}
+
+// SetPlayerDelay updates one seated player's independently chosen input delay.
+// Callers validate range and room state; false means the user was not seated or
+// the published value was unchanged.
+func (r *Room) SetPlayerDelay(userID uint64, delay int, delayAuto bool) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, seat := range r.Players {
+		if seat.User == nil || seat.User.ID != userID {
+			continue
+		}
+		if seat.FrameDelay == delay && seat.DelayAuto == delayAuto {
+			return false
+		}
+		seat.FrameDelay = delay
+		seat.DelayAuto = delayAuto
+		return true
+	}
+	return false
 }
 
 func (r *Room) RemovePlayer(userID uint64) bool {
@@ -120,9 +146,8 @@ func (r *Room) SetState(s RoomState) {
 	r.State = s
 }
 
-// SetRollbackSettings updates the room's delay/prediction/pacing parameters and
-// whether delay/prediction are host-Auto-driven. Callers should validate
-// range/host/state first; this only mutates under the lock.
+// SetRollbackSettings updates legacy shared settings. Current clients publish
+// independent delays through SetPlayerDelay. Callers validate first.
 func (r *Room) SetRollbackSettings(delay, prediction, pacing int, delayAuto, predictionAuto bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

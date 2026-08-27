@@ -82,3 +82,36 @@ func TestAddPlayerFillsAllSlotsAfterChurn(t *testing.T) {
 		t.Fatalf("expected 4 distinct slots, got %d (%v)", len(slots), slots)
 	}
 }
+
+func TestPlayerFrameDelaysAreIndependent(t *testing.T) {
+	r := &Room{MaxPlayers: 2, Delay: 2, DelayAuto: true}
+	for i := uint64(1); i <= 2; i++ {
+		if err := r.AddPlayer(newTestUser(i, "")); err != nil {
+			t.Fatalf("AddPlayer %d: %v", i, err)
+		}
+	}
+	for _, seat := range r.Players {
+		if seat.FrameDelay != 2 || !seat.DelayAuto {
+			t.Fatalf("initial delay for user %d = (%d, %v), want (2, true)",
+				seat.User.ID, seat.FrameDelay, seat.DelayAuto)
+		}
+	}
+
+	if !r.SetPlayerDelay(1, 1, false) {
+		t.Fatal("SetPlayerDelay should report the first player's change")
+	}
+	if !r.SetPlayerDelay(2, 5, true) {
+		t.Fatal("SetPlayerDelay should report the second player's change")
+	}
+	if r.Players[0].FrameDelay != 1 || r.Players[0].DelayAuto {
+		t.Fatalf("player 1 delay = (%d, %v), want (1, false)",
+			r.Players[0].FrameDelay, r.Players[0].DelayAuto)
+	}
+	if r.Players[1].FrameDelay != 5 || !r.Players[1].DelayAuto {
+		t.Fatalf("player 2 delay = (%d, %v), want (5, true)",
+			r.Players[1].FrameDelay, r.Players[1].DelayAuto)
+	}
+	if r.SetPlayerDelay(2, 5, true) {
+		t.Fatal("unchanged delay should not report a mutation")
+	}
+}
