@@ -22,6 +22,7 @@ const (
 	TypeRoomKick           = "ROOM_KICK"
 	TypeRoomStart          = "ROOM_START"
 	TypeRoomUpdateSettings = "ROOM_UPDATE_SETTINGS"
+	TypeRoomUpdateDelay    = "ROOM_UPDATE_DELAY"
 	TypeRoomSwapSlots      = "ROOM_SWAP_SLOTS"
 	TypePingProbeRequest   = "PING_PROBE_REQUEST"
 	TypeMatchConnected     = "MATCH_CONNECTED"
@@ -187,17 +188,23 @@ type RoomSwapSlotsRequest struct {
 	SlotB int `json:"slotB"`
 }
 
-// RoomUpdateSettingsRequest changes a waiting room's rollback parameters.
-// Host-only; the server clamps to [0,9] and rebroadcasts ROOM_STATE so every
-// seated client (and the match itself) picks the new values up. The *Auto flags
-// carry whether the host left each setting on "Auto" so non-hosts can render the
-// same "Auto (N f)" label the host sees instead of a bare number.
+// RoomUpdateSettingsRequest is retained for older host-controlled clients.
+// Current clients publish independent delays with RoomUpdateDelayRequest, and
+// the server fixes prediction at the lobby-wide value.
 type RoomUpdateSettingsRequest struct {
 	Delay          int  `json:"delay"`
 	Prediction     int  `json:"prediction"`
 	Pacing         int  `json:"pacing,omitempty"`
 	DelayAuto      bool `json:"delayAuto"`
 	PredictionAuto bool `json:"predictionAuto"`
+}
+
+// RoomUpdateDelayRequest publishes the caller's resolved local input delay.
+// Every seated player owns this value independently; the server only validates,
+// stores it on that player's seat, and rebroadcasts ROOM_STATE.
+type RoomUpdateDelayRequest struct {
+	Delay     int  `json:"delay"`
+	DelayAuto bool `json:"delayAuto"`
 }
 
 type PingProbeRequestPayload struct {
@@ -247,7 +254,8 @@ type ICEConfiguration struct {
 }
 
 type HelloFailResponse struct {
-	Reason string `json:"reason"`
+	Reason  string `json:"reason"`
+	Message string `json:"message,omitempty"`
 }
 
 type HeartbeatAckResponse struct {
@@ -323,6 +331,8 @@ type RoomSeatPayload struct {
 	UserID       uint64 `json:"userId"`
 	Username     string `json:"username"`
 	Slot         int    `json:"slot"`
+	FrameDelay   int    `json:"frameDelay"`
+	DelayAuto    bool   `json:"delayAuto"`
 	ICESupported bool   `json:"iceSupported,omitempty"`
 }
 

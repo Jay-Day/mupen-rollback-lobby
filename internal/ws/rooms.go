@@ -11,15 +11,14 @@ import (
 )
 
 const (
-	roomNameMaxLen = 48
-	minDelay       = 0
-	maxDelay       = 9
-	minPrediction  = 0
-	maxPrediction  = 9
-	minPacing      = 0 // 0 = aggressive/symmetric (engine default)
-	maxPacing      = 1 // 1 = smooth/asymmetric
-	minRoomPlayers = 2
-	maxRoomPlayers = 4
+	roomNameMaxLen  = 48
+	minDelay        = 0
+	maxDelay        = 9
+	lobbyPrediction = 9
+	minPacing       = 0 // 0 = aggressive/symmetric (engine default)
+	maxPacing       = 1 // 1 = smooth/asymmetric
+	minRoomPlayers  = 2
+	maxRoomPlayers  = 4
 )
 
 func (h *Hub) handleRoomCreate(c *Client, env protocol.Envelope) {
@@ -56,11 +55,7 @@ func (h *Hub) handleRoomCreate(c *Client, env protocol.Envelope) {
 	} else if req.Delay > maxDelay {
 		req.Delay = maxDelay
 	}
-	if req.Prediction < minPrediction {
-		req.Prediction = minPrediction
-	} else if req.Prediction > maxPrediction {
-		req.Prediction = maxPrediction
-	}
+	req.Prediction = lobbyPrediction
 	if req.Pacing < minPacing {
 		req.Pacing = minPacing
 	} else if req.Pacing > maxPacing {
@@ -92,7 +87,7 @@ func (h *Hub) handleRoomCreate(c *Client, env protocol.Envelope) {
 		// New rooms open on Auto — the in-room combos default to it and Create
 		// Room no longer surfaces these, so this matches what the host sees.
 		DelayAuto:      true,
-		PredictionAuto: true,
+		PredictionAuto: false,
 		Visibility:     visibility,
 		Password:       req.Password,
 		Players:        nil,
@@ -252,11 +247,9 @@ func (h *Hub) handleRoomStart(c *Client, env protocol.Envelope) {
 	h.startMatchInRoom(room, c.user.Username)
 }
 
-// handleRoomUpdateSettings lets the host tune the room's rollback delay /
-// prediction while it's still waiting. Quick Match relies on this: the host's
-// client resolves Auto delay from the measured peer ping during the warmup and
-// pushes the concrete value here, so every seated client (and the match itself)
-// uses it. Validates: caller is host, room is waiting.
+// handleRoomUpdateSettings remains for older clients. Prediction is fixed at 9;
+// the host's delay is mirrored into its seat, while current clients publish
+// their independent values through ROOM_UPDATE_DELAY.
 func (h *Hub) handleRoomUpdateSettings(c *Client, env protocol.Envelope) {
 	var req protocol.RoomUpdateSettingsRequest
 	if err := json.Unmarshal(env.Data, &req); err != nil {
@@ -280,27 +273,52 @@ func (h *Hub) handleRoomUpdateSettings(c *Client, env protocol.Envelope) {
 	} else if req.Delay > maxDelay {
 		req.Delay = maxDelay
 	}
-	if req.Prediction < minPrediction {
-		req.Prediction = minPrediction
-	} else if req.Prediction > maxPrediction {
-		req.Prediction = maxPrediction
-	}
+	req.Prediction = lobbyPrediction
+	req.PredictionAuto = false
 	if req.Pacing < minPacing {
 		req.Pacing = minPacing
 	} else if req.Pacing > maxPacing {
 		req.Pacing = maxPacing
 	}
 
-	if room.Delay == req.Delay && room.Prediction == req.Prediction &&
+	seatChanged := room.SetPlayerDelay(c.user.ID, req.Delay, req.DelayAuto)
+	sharedUnchanged := room.Delay == req.Delay && room.Prediction == req.Prediction &&
 		room.Pacing == req.Pacing &&
-		room.DelayAuto == req.DelayAuto && room.PredictionAuto == req.PredictionAuto {
+		room.DelayAuto == req.DelayAuto && room.PredictionAuto == req.PredictionAuto
+	if sharedUnchanged && !seatChanged {
 		return // no change — skip the rebroadcast
 	}
-	room.SetRollbackSettings(req.Delay, req.Prediction, req.Pacing, req.DelayAuto, req.PredictionAuto)
+	if !sharedUnchanged {
+		room.SetRollbackSettings(req.Delay, req.Prediction, req.Pacing, req.DelayAuto, req.PredictionAuto)
+	}
 	slog.Info("room settings updated", "room", room.ID,
 		"delay", req.Delay, "pred", req.Prediction, "pacing", req.Pacing,
 		"delayAuto", req.DelayAuto, "predAuto", req.PredictionAuto, "by", c.user.Username)
 
+	h.broadcastRoomState(room)
+}
+
+// handleRoomUpdateDelay stores the caller's independently selected input delay.
+// Unlike shared legacy settings, this is available to every seated player.
+func (h *Hub) handleRoomUpdateDelay(c *Client, env protocol.Envelope) {
+	var req protocol.RoomUpdateDelayRequest
+	if err := json.Unmarshal(env.Data, &req); err != nil {
+		return
+	}
+	room := c.user.CurrentRoom
+	if room == nil || room.State != state.RoomStateWaiting {
+		return
+	}
+	if req.Delay < minDelay {
+		req.Delay = minDelay
+	} else if req.Delay > maxDelay {
+		req.Delay = maxDelay
+	}
+	if !room.SetPlayerDelay(c.user.ID, req.Delay, req.DelayAuto) {
+		return
+	}
+	slog.Info("player frame delay updated", "room", room.ID, "delay", req.Delay,
+		"delayAuto", req.DelayAuto, "by", c.user.Username)
 	h.broadcastRoomState(room)
 }
 
@@ -792,6 +810,8 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 			UserID:       seat.User.ID,
 			Username:     seat.User.Username,
 			Slot:         seat.Slot,
+			FrameDelay:   seat.FrameDelay,
+			DelayAuto:    seat.DelayAuto,
 			ICESupported: seat.User.ICESupported,
 		})
 	}
