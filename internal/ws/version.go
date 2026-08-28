@@ -8,11 +8,12 @@ import (
 )
 
 const (
-	minimumReleaseMajor = 9
-	minimumReleaseMinor = 13
+	minimumReleaseMajor = 0
+	minimumReleaseMinor = 9
+	minimumReleasePatch = 13
 	minimumDevBuild     = 2367
 
-	minimumClientMessage = "Your RMG-K client is out of date. This lobby requires RMG-K 9.13 or vdev-2367 or newer."
+	minimumClientMessage = "Your RMG-K client is out of date. This lobby requires RMG-K 0.9.13 or vdev-2367 or newer."
 )
 
 var (
@@ -22,7 +23,7 @@ var (
 )
 
 // isSupportedClientVersion accepts the two version schemes emitted by RMG-K:
-// release tags such as 9.13/v9.13.1 and monotonically numbered development
+// release tags such as 0.9.13/v0.9.14 and monotonically numbered development
 // builds such as vdev-2367. Unknown formats fail closed.
 func isSupportedClientVersion(raw string) bool {
 	version := strings.TrimSpace(raw)
@@ -37,9 +38,19 @@ func isSupportedClientVersion(raw string) bool {
 	}
 	major, majorErr := strconv.Atoi(match[1])
 	minor, minorErr := strconv.Atoi(match[2])
-	if majorErr != nil || minorErr != nil {
+	patch := 0
+	var patchErr error
+	if match[3] != "" {
+		patch, patchErr = strconv.Atoi(match[3])
+	}
+	if majorErr != nil || minorErr != nil || patchErr != nil {
 		return false
 	}
-	return major > minimumReleaseMajor ||
-		(major == minimumReleaseMajor && minor >= minimumReleaseMinor)
+	if major != minimumReleaseMajor {
+		return major > minimumReleaseMajor
+	}
+	if minor != minimumReleaseMinor {
+		return minor > minimumReleaseMinor
+	}
+	return patch >= minimumReleasePatch
 }
