@@ -253,8 +253,7 @@ func (h *Hub) handleRoomStart(c *Client, env protocol.Envelope) {
 }
 
 // handleRoomUpdateSettings remains for older host-controlled clients. The
-// host's values are mirrored into its own seat, while current clients publish
-// independent values through ROOM_UPDATE_PLAYER_SETTINGS.
+// host's delay is mirrored into its own seat; prediction and pacing are shared.
 func (h *Hub) handleRoomUpdateSettings(c *Client, env protocol.Envelope) {
 	var req protocol.RoomUpdateSettingsRequest
 	if err := json.Unmarshal(env.Data, &req); err != nil {
@@ -289,8 +288,7 @@ func (h *Hub) handleRoomUpdateSettings(c *Client, env protocol.Envelope) {
 		req.Pacing = maxPacing
 	}
 
-	seatChanged := room.SetPlayerRollbackSettings(c.user.ID, req.Delay, req.DelayAuto,
-		req.Prediction, req.PredictionAuto)
+	seatChanged := room.SetPlayerDelay(c.user.ID, req.Delay, req.DelayAuto)
 	sharedUnchanged := room.Delay == req.Delay && room.Prediction == req.Prediction &&
 		room.Pacing == req.Pacing &&
 		room.DelayAuto == req.DelayAuto && room.PredictionAuto == req.PredictionAuto
@@ -331,8 +329,9 @@ func (h *Hub) handleRoomUpdateDelay(c *Client, env protocol.Envelope) {
 	h.broadcastRoomState(room)
 }
 
-// handleRoomUpdatePlayerSettings stores the caller's independently selected
-// delay and prediction window. Every seated player may update only their seat.
+// handleRoomUpdatePlayerSettings is retained for compatibility with clients
+// that sent delay and prediction together. Delay remains per-player; prediction
+// is accepted only from the host and becomes the room-wide value.
 func (h *Hub) handleRoomUpdatePlayerSettings(c *Client, env protocol.Envelope) {
 	var req protocol.RoomUpdatePlayerSettingsRequest
 	if err := json.Unmarshal(env.Data, &req); err != nil {
@@ -347,17 +346,55 @@ func (h *Hub) handleRoomUpdatePlayerSettings(c *Client, env protocol.Envelope) {
 	} else if req.Delay > maxDelay {
 		req.Delay = maxDelay
 	}
+	delayChanged := room.SetPlayerDelay(c.user.ID, req.Delay, req.DelayAuto)
+	predictionChanged := false
+	if room.Host != nil && room.Host.ID == c.user.ID {
+		if req.Prediction < minPrediction {
+			req.Prediction = minPrediction
+		} else if req.Prediction > maxPrediction {
+			req.Prediction = maxPrediction
+		}
+		predictionChanged = room.SetPrediction(req.Prediction, req.PredictionAuto)
+	}
+	if !delayChanged && !predictionChanged {
+		return
+	}
+	slog.Info("player frame delay updated via compatibility message", "room", room.ID,
+		"delay", req.Delay, "delayAuto", req.DelayAuto,
+		"roomPredictionChanged", predictionChanged, "by", c.user.Username)
+	h.broadcastRoomState(room)
+}
+
+// handleRoomUpdatePrediction stores the room-wide prediction window. The
+// authorization check lives here so a modified non-host client cannot change it.
+func (h *Hub) handleRoomUpdatePrediction(c *Client, env protocol.Envelope) {
+	var req protocol.RoomUpdatePredictionRequest
+	if err := json.Unmarshal(env.Data, &req); err != nil {
+		return
+	}
+	room := c.user.CurrentRoom
+	if room == nil {
+		return
+	}
+	if room.Host == nil || room.Host.ID != c.user.ID {
+		slog.Debug("ROOM_UPDATE_PREDICTION rejected: not host",
+			"user", c.user.Username, "room", room.ID)
+		return
+	}
+	if room.State != state.RoomStateWaiting {
+		slog.Debug("ROOM_UPDATE_PREDICTION rejected: not waiting",
+			"room", room.ID, "state", room.State)
+		return
+	}
 	if req.Prediction < minPrediction {
 		req.Prediction = minPrediction
 	} else if req.Prediction > maxPrediction {
 		req.Prediction = maxPrediction
 	}
-	if !room.SetPlayerRollbackSettings(c.user.ID, req.Delay, req.DelayAuto,
-		req.Prediction, req.PredictionAuto) {
+	if !room.SetPrediction(req.Prediction, req.PredictionAuto) {
 		return
 	}
-	slog.Info("player rollback settings updated", "room", room.ID,
-		"delay", req.Delay, "delayAuto", req.DelayAuto,
+	slog.Info("room prediction updated", "room", room.ID,
 		"prediction", req.Prediction, "predictionAuto", req.PredictionAuto,
 		"by", c.user.Username)
 	h.broadcastRoomState(room)
@@ -853,8 +890,8 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 			Slot:             seat.Slot,
 			FrameDelay:       seat.FrameDelay,
 			DelayAuto:        seat.DelayAuto,
-			PredictionWindow: seat.PredictionWindow,
-			PredictionAuto:   seat.PredictionAuto,
+			PredictionWindow: r.Prediction,
+			PredictionAuto:   r.PredictionAuto,
 			ICESupported:     seat.User.ICESupported,
 		})
 	}

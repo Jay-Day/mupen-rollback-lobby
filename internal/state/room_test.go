@@ -83,7 +83,7 @@ func TestAddPlayerFillsAllSlotsAfterChurn(t *testing.T) {
 	}
 }
 
-func TestPlayerRollbackSettingsAreIndependent(t *testing.T) {
+func TestPlayerDelayIsIndependentAndPredictionIsRoomOwned(t *testing.T) {
 	r := &Room{MaxPlayers: 2, Delay: 2, DelayAuto: true, Prediction: 7, PredictionAuto: true}
 	for i := uint64(1); i <= 2; i++ {
 		if err := r.AddPlayer(newTestUser(i, "")); err != nil {
@@ -91,30 +91,36 @@ func TestPlayerRollbackSettingsAreIndependent(t *testing.T) {
 		}
 	}
 	for _, seat := range r.Players {
-		if seat.FrameDelay != 2 || !seat.DelayAuto ||
-			seat.PredictionWindow != 7 || !seat.PredictionAuto {
-			t.Fatalf("initial settings for user %d = (%d, %v, %d, %v)",
-				seat.User.ID, seat.FrameDelay, seat.DelayAuto,
-				seat.PredictionWindow, seat.PredictionAuto)
+		if seat.FrameDelay != 2 || !seat.DelayAuto {
+			t.Fatalf("initial delay for user %d = (%d, %v)",
+				seat.User.ID, seat.FrameDelay, seat.DelayAuto)
 		}
 	}
 
-	if !r.SetPlayerRollbackSettings(1, 1, false, 4, false) {
-		t.Fatal("SetPlayerRollbackSettings should report the first player's change")
+	if !r.SetPlayerDelay(1, 1, false) {
+		t.Fatal("SetPlayerDelay should report the first player's change")
 	}
-	if !r.SetPlayerRollbackSettings(2, 5, true, 9, true) {
-		t.Fatal("SetPlayerRollbackSettings should report the second player's change")
+	if !r.SetPlayerDelay(2, 5, true) {
+		t.Fatal("SetPlayerDelay should report the second player's change")
 	}
-	if r.Players[0].FrameDelay != 1 || r.Players[0].DelayAuto ||
-		r.Players[0].PredictionWindow != 4 || r.Players[0].PredictionAuto {
-		t.Fatalf("player 1 settings were not stored independently")
+	if r.Players[0].FrameDelay != 1 || r.Players[0].DelayAuto {
+		t.Fatalf("player 1 delay was not stored independently")
 	}
-	if r.Players[1].FrameDelay != 5 || !r.Players[1].DelayAuto ||
-		r.Players[1].PredictionWindow != 9 || !r.Players[1].PredictionAuto {
-		t.Fatalf("player 2 settings were not stored independently")
+	if r.Players[1].FrameDelay != 5 || !r.Players[1].DelayAuto {
+		t.Fatalf("player 2 delay was not stored independently")
 	}
-	if r.SetPlayerRollbackSettings(2, 5, true, 9, true) {
-		t.Fatal("unchanged settings should not report a mutation")
+	if r.SetPlayerDelay(2, 5, true) {
+		t.Fatal("unchanged delay should not report a mutation")
+	}
+	if !r.SetPrediction(9, false) {
+		t.Fatal("SetPrediction should report the room change")
+	}
+	if r.Prediction != 9 || r.PredictionAuto {
+		t.Fatalf("room prediction = (%d, %v), want (9, false)",
+			r.Prediction, r.PredictionAuto)
+	}
+	if r.SetPrediction(9, false) {
+		t.Fatal("unchanged room prediction should not report a mutation")
 	}
 }
 
