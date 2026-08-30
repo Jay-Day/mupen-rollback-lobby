@@ -11,14 +11,15 @@ import (
 )
 
 const (
-	roomNameMaxLen  = 48
-	minDelay        = 0
-	maxDelay        = 9
-	lobbyPrediction = 9
-	minPacing       = 0 // 0 = aggressive/symmetric (engine default)
-	maxPacing       = 1 // 1 = smooth/asymmetric
-	minRoomPlayers  = 2
-	maxRoomPlayers  = 4
+	roomNameMaxLen = 48
+	minDelay       = 0
+	maxDelay       = 9
+	minPrediction  = 1
+	maxPrediction  = 9
+	minPacing      = 0 // 0 = aggressive/symmetric (engine default)
+	maxPacing      = 1 // 1 = smooth/asymmetric
+	minRoomPlayers = 2
+	maxRoomPlayers = 4
 )
 
 func (h *Hub) handleRoomCreate(c *Client, env protocol.Envelope) {
@@ -55,7 +56,11 @@ func (h *Hub) handleRoomCreate(c *Client, env protocol.Envelope) {
 	} else if req.Delay > maxDelay {
 		req.Delay = maxDelay
 	}
-	req.Prediction = lobbyPrediction
+	if req.Prediction < minPrediction {
+		req.Prediction = minPrediction
+	} else if req.Prediction > maxPrediction {
+		req.Prediction = maxPrediction
+	}
 	if req.Pacing < minPacing {
 		req.Pacing = minPacing
 	} else if req.Pacing > maxPacing {
@@ -87,7 +92,7 @@ func (h *Hub) handleRoomCreate(c *Client, env protocol.Envelope) {
 		// New rooms open on Auto — the in-room combos default to it and Create
 		// Room no longer surfaces these, so this matches what the host sees.
 		DelayAuto:      true,
-		PredictionAuto: false,
+		PredictionAuto: true,
 		Visibility:     visibility,
 		Password:       req.Password,
 		Players:        nil,
@@ -149,10 +154,10 @@ func (h *Hub) handleRoomJoin(c *Client, env protocol.Envelope) {
 		return
 	}
 
-	// A kicked player can't rejoin the same room for a short cooldown.
-	const kickRejoinCooldown = 30 * time.Second
-	if room.KickCoolingDown(c.user.ID, kickRejoinCooldown) {
-		c.sendRoomJoinFail(env.ID, protocol.ReasonKickedRecently)
+	// A kick is permanent for this room object. Destroying the room destroys the
+	// ban list, so the same user may join a newly created room normally.
+	if room.WasKicked(c.user.ID, c.user.Username) {
+		c.sendRoomJoinFail(env.ID, protocol.ReasonKickedFromRoom)
 		return
 	}
 
@@ -247,9 +252,9 @@ func (h *Hub) handleRoomStart(c *Client, env protocol.Envelope) {
 	h.startMatchInRoom(room, c.user.Username)
 }
 
-// handleRoomUpdateSettings remains for older clients. Prediction is fixed at 9;
-// the host's delay is mirrored into its seat, while current clients publish
-// their independent values through ROOM_UPDATE_DELAY.
+// handleRoomUpdateSettings remains for older host-controlled clients. The
+// host's values are mirrored into its own seat, while current clients publish
+// independent values through ROOM_UPDATE_PLAYER_SETTINGS.
 func (h *Hub) handleRoomUpdateSettings(c *Client, env protocol.Envelope) {
 	var req protocol.RoomUpdateSettingsRequest
 	if err := json.Unmarshal(env.Data, &req); err != nil {
@@ -273,15 +278,19 @@ func (h *Hub) handleRoomUpdateSettings(c *Client, env protocol.Envelope) {
 	} else if req.Delay > maxDelay {
 		req.Delay = maxDelay
 	}
-	req.Prediction = lobbyPrediction
-	req.PredictionAuto = false
+	if req.Prediction < minPrediction {
+		req.Prediction = minPrediction
+	} else if req.Prediction > maxPrediction {
+		req.Prediction = maxPrediction
+	}
 	if req.Pacing < minPacing {
 		req.Pacing = minPacing
 	} else if req.Pacing > maxPacing {
 		req.Pacing = maxPacing
 	}
 
-	seatChanged := room.SetPlayerDelay(c.user.ID, req.Delay, req.DelayAuto)
+	seatChanged := room.SetPlayerRollbackSettings(c.user.ID, req.Delay, req.DelayAuto,
+		req.Prediction, req.PredictionAuto)
 	sharedUnchanged := room.Delay == req.Delay && room.Prediction == req.Prediction &&
 		room.Pacing == req.Pacing &&
 		room.DelayAuto == req.DelayAuto && room.PredictionAuto == req.PredictionAuto
@@ -319,6 +328,38 @@ func (h *Hub) handleRoomUpdateDelay(c *Client, env protocol.Envelope) {
 	}
 	slog.Info("player frame delay updated", "room", room.ID, "delay", req.Delay,
 		"delayAuto", req.DelayAuto, "by", c.user.Username)
+	h.broadcastRoomState(room)
+}
+
+// handleRoomUpdatePlayerSettings stores the caller's independently selected
+// delay and prediction window. Every seated player may update only their seat.
+func (h *Hub) handleRoomUpdatePlayerSettings(c *Client, env protocol.Envelope) {
+	var req protocol.RoomUpdatePlayerSettingsRequest
+	if err := json.Unmarshal(env.Data, &req); err != nil {
+		return
+	}
+	room := c.user.CurrentRoom
+	if room == nil || room.State != state.RoomStateWaiting {
+		return
+	}
+	if req.Delay < minDelay {
+		req.Delay = minDelay
+	} else if req.Delay > maxDelay {
+		req.Delay = maxDelay
+	}
+	if req.Prediction < minPrediction {
+		req.Prediction = minPrediction
+	} else if req.Prediction > maxPrediction {
+		req.Prediction = maxPrediction
+	}
+	if !room.SetPlayerRollbackSettings(c.user.ID, req.Delay, req.DelayAuto,
+		req.Prediction, req.PredictionAuto) {
+		return
+	}
+	slog.Info("player rollback settings updated", "room", room.ID,
+		"delay", req.Delay, "delayAuto", req.DelayAuto,
+		"prediction", req.Prediction, "predictionAuto", req.PredictionAuto,
+		"by", c.user.Username)
 	h.broadcastRoomState(room)
 }
 
@@ -380,7 +421,7 @@ func (h *Hub) handleRoomKick(c *Client, env protocol.Envelope) {
 		return
 	}
 	slog.Info("room kick", "host", c.user.Username, "target", target.Username, "room", room.ID)
-	room.MarkKicked(target.ID) // start their rejoin cooldown
+	room.MarkKicked(target.ID, target.Username)
 	h.removeUserFromRoom(target, room, "kicked")
 }
 
@@ -807,12 +848,14 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 			continue
 		}
 		out.Players = append(out.Players, protocol.RoomSeatPayload{
-			UserID:       seat.User.ID,
-			Username:     seat.User.Username,
-			Slot:         seat.Slot,
-			FrameDelay:   seat.FrameDelay,
-			DelayAuto:    seat.DelayAuto,
-			ICESupported: seat.User.ICESupported,
+			UserID:           seat.User.ID,
+			Username:         seat.User.Username,
+			Slot:             seat.Slot,
+			FrameDelay:       seat.FrameDelay,
+			DelayAuto:        seat.DelayAuto,
+			PredictionWindow: seat.PredictionWindow,
+			PredictionAuto:   seat.PredictionAuto,
+			ICESupported:     seat.User.ICESupported,
 		})
 	}
 	return out

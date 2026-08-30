@@ -351,6 +351,8 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleRoomUpdateSettings(c, env)
 	case protocol.TypeRoomUpdateDelay:
 		h.handleRoomUpdateDelay(c, env)
+	case protocol.TypeRoomUpdatePlayerSettings:
+		h.handleRoomUpdatePlayerSettings(c, env)
 	case protocol.TypeRoomSwapSlots:
 		h.handleRoomSwapSlots(c, env)
 	case protocol.TypePingProbeRequest:
@@ -401,20 +403,7 @@ func (h *Hub) handleICESignal(c *Client, env protocol.Envelope) {
 		req.TargetUserID == c.user.ID || !c.user.ICESupported {
 		return
 	}
-	switch req.Kind {
-	case "description":
-		if len(req.Value) == 0 || len(req.Value) > 4096 {
-			return
-		}
-	case "candidate":
-		if len(req.Value) == 0 || len(req.Value) > 512 {
-			return
-		}
-	case "gathering_done":
-		if req.Value != "" {
-			return
-		}
-	default:
+	if !validICESignalRequest(req) {
 		return
 	}
 
@@ -433,7 +422,32 @@ func (h *Hub) handleICESignal(c *Client, env protocol.Envelope) {
 		RoomID:     room.ID,
 		Kind:       req.Kind,
 		Value:      req.Value,
+		Generation: req.Generation,
 	})
+}
+
+func validICESignalRequest(req protocol.ICESignalRequest) bool {
+	switch req.Kind {
+	case "description":
+		if len(req.Value) == 0 || len(req.Value) > 4096 {
+			return false
+		}
+	case "candidate":
+		if len(req.Value) == 0 || len(req.Value) > 512 {
+			return false
+		}
+	case "gathering_done":
+		if req.Value != "" {
+			return false
+		}
+	case "restart":
+		if req.Generation == 0 || req.Value != "" {
+			return false
+		}
+	default:
+		return false
+	}
+	return true
 }
 
 // handlePingProbeRequest looks up the target user's last-known public UDP

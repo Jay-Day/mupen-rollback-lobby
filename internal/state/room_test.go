@@ -83,35 +83,59 @@ func TestAddPlayerFillsAllSlotsAfterChurn(t *testing.T) {
 	}
 }
 
-func TestPlayerFrameDelaysAreIndependent(t *testing.T) {
-	r := &Room{MaxPlayers: 2, Delay: 2, DelayAuto: true}
+func TestPlayerRollbackSettingsAreIndependent(t *testing.T) {
+	r := &Room{MaxPlayers: 2, Delay: 2, DelayAuto: true, Prediction: 7, PredictionAuto: true}
 	for i := uint64(1); i <= 2; i++ {
 		if err := r.AddPlayer(newTestUser(i, "")); err != nil {
 			t.Fatalf("AddPlayer %d: %v", i, err)
 		}
 	}
 	for _, seat := range r.Players {
-		if seat.FrameDelay != 2 || !seat.DelayAuto {
-			t.Fatalf("initial delay for user %d = (%d, %v), want (2, true)",
-				seat.User.ID, seat.FrameDelay, seat.DelayAuto)
+		if seat.FrameDelay != 2 || !seat.DelayAuto ||
+			seat.PredictionWindow != 7 || !seat.PredictionAuto {
+			t.Fatalf("initial settings for user %d = (%d, %v, %d, %v)",
+				seat.User.ID, seat.FrameDelay, seat.DelayAuto,
+				seat.PredictionWindow, seat.PredictionAuto)
 		}
 	}
 
-	if !r.SetPlayerDelay(1, 1, false) {
-		t.Fatal("SetPlayerDelay should report the first player's change")
+	if !r.SetPlayerRollbackSettings(1, 1, false, 4, false) {
+		t.Fatal("SetPlayerRollbackSettings should report the first player's change")
 	}
-	if !r.SetPlayerDelay(2, 5, true) {
-		t.Fatal("SetPlayerDelay should report the second player's change")
+	if !r.SetPlayerRollbackSettings(2, 5, true, 9, true) {
+		t.Fatal("SetPlayerRollbackSettings should report the second player's change")
 	}
-	if r.Players[0].FrameDelay != 1 || r.Players[0].DelayAuto {
-		t.Fatalf("player 1 delay = (%d, %v), want (1, false)",
-			r.Players[0].FrameDelay, r.Players[0].DelayAuto)
+	if r.Players[0].FrameDelay != 1 || r.Players[0].DelayAuto ||
+		r.Players[0].PredictionWindow != 4 || r.Players[0].PredictionAuto {
+		t.Fatalf("player 1 settings were not stored independently")
 	}
-	if r.Players[1].FrameDelay != 5 || !r.Players[1].DelayAuto {
-		t.Fatalf("player 2 delay = (%d, %v), want (5, true)",
-			r.Players[1].FrameDelay, r.Players[1].DelayAuto)
+	if r.Players[1].FrameDelay != 5 || !r.Players[1].DelayAuto ||
+		r.Players[1].PredictionWindow != 9 || !r.Players[1].PredictionAuto {
+		t.Fatalf("player 2 settings were not stored independently")
 	}
-	if r.SetPlayerDelay(2, 5, true) {
-		t.Fatal("unchanged delay should not report a mutation")
+	if r.SetPlayerRollbackSettings(2, 5, true, 9, true) {
+		t.Fatal("unchanged settings should not report a mutation")
+	}
+}
+
+func TestKickedUserIsBarredForRoomLifetime(t *testing.T) {
+	room := &Room{MaxPlayers: 2}
+	const userID = uint64(42)
+	const username = "KickedPlayer"
+	if room.WasKicked(userID, username) {
+		t.Fatal("new room unexpectedly reports user as kicked")
+	}
+
+	room.MarkKicked(userID, username)
+	if !room.WasKicked(userID, username) {
+		t.Fatal("kicked user should remain barred from the room")
+	}
+	if !room.WasKicked(99, "kickedplayer") {
+		t.Fatal("kicked username should remain barred after reconnect")
+	}
+
+	replacementRoom := &Room{MaxPlayers: 2}
+	if replacementRoom.WasKicked(userID, username) {
+		t.Fatal("kick should not carry into a different room")
 	}
 }
