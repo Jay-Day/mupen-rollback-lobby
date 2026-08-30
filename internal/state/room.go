@@ -1,6 +1,7 @@
 package state
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -54,7 +55,8 @@ type Room struct {
 	CreatedAt time.Time
 	StartedAt time.Time // set when the match goes in-game; zero until then
 
-	kickedAt map[uint64]time.Time // userID -> last kick time, for a rejoin cooldown
+	kickedUserIDs   map[uint64]struct{} // active connection identity
+	kickedUsernames map[string]struct{} // survives reconnects with the same name
 }
 
 type RoomSeat struct {
@@ -216,22 +218,32 @@ func (r *Room) SwapSlots(slotA, slotB int) bool {
 	return true
 }
 
-// MarkKicked records that a user was just kicked, starting their rejoin cooldown.
-func (r *Room) MarkKicked(userID uint64) {
+// MarkKicked bars a user from rejoining this room. The set belongs to the Room,
+// so it disappears automatically only when the room itself is destroyed.
+func (r *Room) MarkKicked(userID uint64, username string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.kickedAt == nil {
-		r.kickedAt = make(map[uint64]time.Time)
+	if r.kickedUserIDs == nil {
+		r.kickedUserIDs = make(map[uint64]struct{})
 	}
-	r.kickedAt[userID] = time.Now()
+	if r.kickedUsernames == nil {
+		r.kickedUsernames = make(map[string]struct{})
+	}
+	r.kickedUserIDs[userID] = struct{}{}
+	r.kickedUsernames[strings.ToLower(strings.TrimSpace(username))] = struct{}{}
 }
 
-// KickCoolingDown reports whether the user was kicked within the last `within`.
-func (r *Room) KickCoolingDown(userID uint64, within time.Duration) bool {
+// WasKicked reports whether a user is barred from this room. Username matching
+// keeps the ban effective if the kicked client disconnects and receives a new
+// transient user ID before trying to rejoin.
+func (r *Room) WasKicked(userID uint64, username string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	t, ok := r.kickedAt[userID]
-	return ok && time.Since(t) < within
+	if _, kicked := r.kickedUserIDs[userID]; kicked {
+		return true
+	}
+	_, kicked := r.kickedUsernames[strings.ToLower(strings.TrimSpace(username))]
+	return kicked
 }
 
 // MarkStarted stamps the match start time (used for the Ongoing Matches duration).

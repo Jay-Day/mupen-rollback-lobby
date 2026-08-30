@@ -117,3 +117,25 @@ func TestPlayerRollbackSettingsAreIndependent(t *testing.T) {
 		t.Fatal("unchanged settings should not report a mutation")
 	}
 }
+
+func TestKickedUserIsBarredForRoomLifetime(t *testing.T) {
+	room := &Room{MaxPlayers: 2}
+	const userID = uint64(42)
+	const username = "KickedPlayer"
+	if room.WasKicked(userID, username) {
+		t.Fatal("new room unexpectedly reports user as kicked")
+	}
+
+	room.MarkKicked(userID, username)
+	if !room.WasKicked(userID, username) {
+		t.Fatal("kicked user should remain barred from the room")
+	}
+	if !room.WasKicked(99, "kickedplayer") {
+		t.Fatal("kicked username should remain barred after reconnect")
+	}
+
+	replacementRoom := &Room{MaxPlayers: 2}
+	if replacementRoom.WasKicked(userID, username) {
+		t.Fatal("kick should not carry into a different room")
+	}
+}

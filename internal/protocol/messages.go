@@ -112,7 +112,7 @@ const (
 	ReasonNotAuthorized   = "not_authorized"
 	ReasonRoomNotFound    = "room_not_found"
 	ReasonAlreadyInRoom   = "already_in_room"
-	ReasonKickedRecently  = "kicked_recently"
+	ReasonKickedFromRoom  = "kicked_from_room"
 )
 
 // -- Request payloads --

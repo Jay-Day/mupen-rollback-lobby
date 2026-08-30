@@ -154,10 +154,10 @@ func (h *Hub) handleRoomJoin(c *Client, env protocol.Envelope) {
 		return
 	}
 
-	// A kicked player can't rejoin the same room for a short cooldown.
-	const kickRejoinCooldown = 30 * time.Second
-	if room.KickCoolingDown(c.user.ID, kickRejoinCooldown) {
-		c.sendRoomJoinFail(env.ID, protocol.ReasonKickedRecently)
+	// A kick is permanent for this room object. Destroying the room destroys the
+	// ban list, so the same user may join a newly created room normally.
+	if room.WasKicked(c.user.ID, c.user.Username) {
+		c.sendRoomJoinFail(env.ID, protocol.ReasonKickedFromRoom)
 		return
 	}
 
@@ -421,7 +421,7 @@ func (h *Hub) handleRoomKick(c *Client, env protocol.Envelope) {
 		return
 	}
 	slog.Info("room kick", "host", c.user.Username, "target", target.Username, "room", room.ID)
-	room.MarkKicked(target.ID) // start their rejoin cooldown
+	room.MarkKicked(target.ID, target.Username)
 	h.removeUserFromRoom(target, room, "kicked")
 }
 
