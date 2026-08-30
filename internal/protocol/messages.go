@@ -24,6 +24,7 @@ const (
 	TypeRoomUpdateSettings       = "ROOM_UPDATE_SETTINGS"
 	TypeRoomUpdateDelay          = "ROOM_UPDATE_DELAY"
 	TypeRoomUpdatePlayerSettings = "ROOM_UPDATE_PLAYER_SETTINGS"
+	TypeRoomUpdatePrediction     = "ROOM_UPDATE_PREDICTION"
 	TypeRoomSwapSlots            = "ROOM_SWAP_SLOTS"
 	TypePingProbeRequest         = "PING_PROBE_REQUEST"
 	TypeMatchConnected           = "MATCH_CONNECTED"
@@ -190,8 +191,8 @@ type RoomSwapSlotsRequest struct {
 }
 
 // RoomUpdateSettingsRequest is retained for older host-controlled clients.
-// Current clients publish both values per seat with
-// RoomUpdatePlayerSettingsRequest.
+// Current clients publish per-player delay and host-owned prediction through
+// separate messages.
 type RoomUpdateSettingsRequest struct {
 	Delay          int  `json:"delay"`
 	Prediction     int  `json:"prediction"`
@@ -208,11 +209,19 @@ type RoomUpdateDelayRequest struct {
 	DelayAuto bool `json:"delayAuto"`
 }
 
-// RoomUpdatePlayerSettingsRequest publishes the caller's local rollback
-// settings. Both values belong to the individual seat rather than the room.
+// RoomUpdatePlayerSettingsRequest is retained for compatibility with clients
+// that published both values per seat. Delay remains per-player; Prediction is
+// consumed only when the caller is the host and becomes room state.
 type RoomUpdatePlayerSettingsRequest struct {
 	Delay          int  `json:"delay"`
 	DelayAuto      bool `json:"delayAuto"`
+	Prediction     int  `json:"prediction"`
+	PredictionAuto bool `json:"predictionAuto"`
+}
+
+// RoomUpdatePredictionRequest changes the room-wide prediction window. Only
+// the host may update it, and only while the room is waiting.
+type RoomUpdatePredictionRequest struct {
 	Prediction     int  `json:"prediction"`
 	PredictionAuto bool `json:"predictionAuto"`
 }
@@ -339,14 +348,16 @@ type RoomListPayload struct {
 }
 
 type RoomSeatPayload struct {
-	UserID           uint64 `json:"userId"`
-	Username         string `json:"username"`
-	Slot             int    `json:"slot"`
-	FrameDelay       int    `json:"frameDelay"`
-	DelayAuto        bool   `json:"delayAuto"`
-	PredictionWindow int    `json:"predictionWindow"`
-	PredictionAuto   bool   `json:"predictionAuto"`
-	ICESupported     bool   `json:"iceSupported,omitempty"`
+	UserID     uint64 `json:"userId"`
+	Username   string `json:"username"`
+	Slot       int    `json:"slot"`
+	FrameDelay int    `json:"frameDelay"`
+	DelayAuto  bool   `json:"delayAuto"`
+	// Compatibility mirrors of the host-owned room prediction. New clients use
+	// RoomStatePayload.Prediction and PredictionAuto directly.
+	PredictionWindow int  `json:"predictionWindow"`
+	PredictionAuto   bool `json:"predictionAuto"`
+	ICESupported     bool `json:"iceSupported,omitempty"`
 }
 
 type RoomStatePayload struct {
@@ -360,8 +371,8 @@ type RoomStatePayload struct {
 	// Pacing time-sync model (0 = aggressive, 1 = smooth); host-set, applies to
 	// every seat. Discrete choice, so no Auto flag.
 	Pacing int `json:"pacing"`
-	// Legacy host-controlled flags retained for older clients. Current clients
-	// consume the corresponding values from their individual seat.
+	// DelayAuto is retained for older clients. PredictionAuto describes the
+	// host-owned room prediction selection (Default versus an explicit value).
 	DelayAuto      bool              `json:"delayAuto"`
 	PredictionAuto bool              `json:"predictionAuto"`
 	Players        []RoomSeatPayload `json:"players"`

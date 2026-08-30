@@ -304,7 +304,7 @@ func (h *Hub) quickMatchAttempt(searcher *state.User) {
 
 	// Don't start instantly. Give both clients a short warmup in the in-room
 	// view: seats + live peer ping render, and the host's Auto delay resolves
-	// from that ping and pushes ROOM_UPDATE_SETTINGS before the match locks in.
+	// from that ping and pushes ROOM_UPDATE_DELAY before the match locks in.
 	// The match then auto-starts with the tuned delay.
 	for _, u := range []*state.User{hostUser, joinerUser} {
 		h.broadcastPresenceUpdated(u)
