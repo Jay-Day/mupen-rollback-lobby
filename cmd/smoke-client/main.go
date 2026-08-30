@@ -28,7 +28,7 @@ func main() {
 	var (
 		url      = flag.String("url", "ws://127.0.0.1:8080/ws", "WebSocket URL")
 		username = flag.String("user", "smoke", "Username")
-		version  = flag.String("client-version", "vdev-2367", "RMG-K version reported during HELLO")
+		version  = flag.String("client-version", "vdev-2374", "RMG-K version reported during HELLO")
 		say      = flag.String("say", "", "Optional chat line to send after HELLO")
 		listenMs = flag.Int("listen-ms", 2000, "How long to listen after sending before exiting")
 	)
