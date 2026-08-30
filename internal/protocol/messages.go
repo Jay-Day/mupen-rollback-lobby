@@ -222,6 +222,7 @@ type ICESignalRequest struct {
 	RoomID       uint64 `json:"roomId"`
 	Kind         string `json:"kind"`
 	Value        string `json:"value,omitempty"`
+	Generation   uint32 `json:"generation"`
 }
 
 // QuickMatchJoinRequest scopes a quick-match search to a specific ROM. The
@@ -400,6 +401,7 @@ type ICESignalPayload struct {
 	RoomID     uint64 `json:"roomId"`
 	Kind       string `json:"kind"`
 	Value      string `json:"value,omitempty"`
+	Generation uint32 `json:"generation"`
 }
 
 type MatchPeerLeftPayload struct {
