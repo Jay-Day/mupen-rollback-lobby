@@ -351,6 +351,8 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleRoomUpdateSettings(c, env)
 	case protocol.TypeRoomUpdateDelay:
 		h.handleRoomUpdateDelay(c, env)
+	case protocol.TypeRoomUpdatePlayerSettings:
+		h.handleRoomUpdatePlayerSettings(c, env)
 	case protocol.TypeRoomSwapSlots:
 		h.handleRoomSwapSlots(c, env)
 	case protocol.TypePingProbeRequest:

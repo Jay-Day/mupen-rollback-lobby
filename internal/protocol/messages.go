@@ -12,24 +12,25 @@ type Envelope struct {
 
 // Client → Server message types
 const (
-	TypeHello              = "HELLO"
-	TypeHeartbeat          = "HEARTBEAT"
-	TypeChatSend           = "CHAT_SEND"
-	TypeChatHistory        = "CHAT_HISTORY"
-	TypeRoomCreate         = "ROOM_CREATE"
-	TypeRoomJoin           = "ROOM_JOIN"
-	TypeRoomLeave          = "ROOM_LEAVE"
-	TypeRoomKick           = "ROOM_KICK"
-	TypeRoomStart          = "ROOM_START"
-	TypeRoomUpdateSettings = "ROOM_UPDATE_SETTINGS"
-	TypeRoomUpdateDelay    = "ROOM_UPDATE_DELAY"
-	TypeRoomSwapSlots      = "ROOM_SWAP_SLOTS"
-	TypePingProbeRequest   = "PING_PROBE_REQUEST"
-	TypeMatchConnected     = "MATCH_CONNECTED"
-	TypeMatchPunchFailed   = "MATCH_PUNCH_FAILED"
-	TypeMatchFinished      = "MATCH_FINISHED"
-	TypeQuickMatchJoin     = "QUICK_MATCH_JOIN"
-	TypeQuickMatchCancel   = "QUICK_MATCH_CANCEL"
+	TypeHello                    = "HELLO"
+	TypeHeartbeat                = "HEARTBEAT"
+	TypeChatSend                 = "CHAT_SEND"
+	TypeChatHistory              = "CHAT_HISTORY"
+	TypeRoomCreate               = "ROOM_CREATE"
+	TypeRoomJoin                 = "ROOM_JOIN"
+	TypeRoomLeave                = "ROOM_LEAVE"
+	TypeRoomKick                 = "ROOM_KICK"
+	TypeRoomStart                = "ROOM_START"
+	TypeRoomUpdateSettings       = "ROOM_UPDATE_SETTINGS"
+	TypeRoomUpdateDelay          = "ROOM_UPDATE_DELAY"
+	TypeRoomUpdatePlayerSettings = "ROOM_UPDATE_PLAYER_SETTINGS"
+	TypeRoomSwapSlots            = "ROOM_SWAP_SLOTS"
+	TypePingProbeRequest         = "PING_PROBE_REQUEST"
+	TypeMatchConnected           = "MATCH_CONNECTED"
+	TypeMatchPunchFailed         = "MATCH_PUNCH_FAILED"
+	TypeMatchFinished            = "MATCH_FINISHED"
+	TypeQuickMatchJoin           = "QUICK_MATCH_JOIN"
+	TypeQuickMatchCancel         = "QUICK_MATCH_CANCEL"
 	// ICE signaling is relayed over the authenticated lobby WebSocket. The
 	// server never sees gameplay datagrams and is not a TURN relay.
 	TypeICESignal = "ICE_SIGNAL"
@@ -189,8 +190,8 @@ type RoomSwapSlotsRequest struct {
 }
 
 // RoomUpdateSettingsRequest is retained for older host-controlled clients.
-// Current clients publish independent delays with RoomUpdateDelayRequest, and
-// the server fixes prediction at the lobby-wide value.
+// Current clients publish both values per seat with
+// RoomUpdatePlayerSettingsRequest.
 type RoomUpdateSettingsRequest struct {
 	Delay          int  `json:"delay"`
 	Prediction     int  `json:"prediction"`
@@ -205,6 +206,15 @@ type RoomUpdateSettingsRequest struct {
 type RoomUpdateDelayRequest struct {
 	Delay     int  `json:"delay"`
 	DelayAuto bool `json:"delayAuto"`
+}
+
+// RoomUpdatePlayerSettingsRequest publishes the caller's local rollback
+// settings. Both values belong to the individual seat rather than the room.
+type RoomUpdatePlayerSettingsRequest struct {
+	Delay          int  `json:"delay"`
+	DelayAuto      bool `json:"delayAuto"`
+	Prediction     int  `json:"prediction"`
+	PredictionAuto bool `json:"predictionAuto"`
 }
 
 type PingProbeRequestPayload struct {
@@ -329,12 +339,14 @@ type RoomListPayload struct {
 }
 
 type RoomSeatPayload struct {
-	UserID       uint64 `json:"userId"`
-	Username     string `json:"username"`
-	Slot         int    `json:"slot"`
-	FrameDelay   int    `json:"frameDelay"`
-	DelayAuto    bool   `json:"delayAuto"`
-	ICESupported bool   `json:"iceSupported,omitempty"`
+	UserID           uint64 `json:"userId"`
+	Username         string `json:"username"`
+	Slot             int    `json:"slot"`
+	FrameDelay       int    `json:"frameDelay"`
+	DelayAuto        bool   `json:"delayAuto"`
+	PredictionWindow int    `json:"predictionWindow"`
+	PredictionAuto   bool   `json:"predictionAuto"`
+	ICESupported     bool   `json:"iceSupported,omitempty"`
 }
 
 type RoomStatePayload struct {
@@ -348,8 +360,8 @@ type RoomStatePayload struct {
 	// Pacing time-sync model (0 = aggressive, 1 = smooth); host-set, applies to
 	// every seat. Discrete choice, so no Auto flag.
 	Pacing int `json:"pacing"`
-	// Whether each value is host-Auto-driven, so non-hosts can mirror the
-	// host's "Auto (N f)" / "Default" labels rather than showing a bare number.
+	// Legacy host-controlled flags retained for older clients. Current clients
+	// consume the corresponding values from their individual seat.
 	DelayAuto      bool              `json:"delayAuto"`
 	PredictionAuto bool              `json:"predictionAuto"`
 	Players        []RoomSeatPayload `json:"players"`
