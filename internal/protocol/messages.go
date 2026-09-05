@@ -374,9 +374,8 @@ type QuickMatchStatusPayload struct {
 }
 
 // -- Broadcast / spectate payloads --
-// krec bytes travel as base64 in the Data field. The same shape is reused for
-// the broadcaster's uplink (BROADCAST_DATA) and the spectator's downlink
-// (SPECTATE_DATA) so the server can forward a chunk verbatim.
+// krec bytes travel as base64 in the Data field. The spectator downlink adds a
+// server-owned logical offset so receivers can reject gaps and duplicates.
 
 type BroadcastBeginRequest struct {
 	MatchID uint64 `json:"matchId"`
@@ -406,8 +405,9 @@ type SpectateBeginPayload struct {
 
 type SpectateDataPayload struct {
 	MatchID uint64 `json:"matchId"`
-	Data    string `json:"data"`  // base64 krec chunk
-	Frame   int    `json:"frame"` // broadcaster's live krec frame (fast-forward target)
+	Data    string `json:"data"`   // base64 krec chunk
+	Frame   int    `json:"frame"`  // broadcaster's live krec frame (fast-forward target)
+	Offset  int64  `json:"offset"` // logical byte offset in this spectator's krec stream
 }
 
 type SpectateEndPayload struct {
