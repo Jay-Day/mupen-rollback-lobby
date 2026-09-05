@@ -154,6 +154,11 @@ func TestKeyframeSpectateStreamHasContiguousLogicalOffsets(t *testing.T) {
 	if tailStart < 0 {
 		t.Fatal("locate keyframe input")
 	}
+	// A state captured after the latest complete input legitimately points to
+	// the next record at EOF; live input appended later must continue from there.
+	if got := krecFrameOffset(krec, 5); got != int64(len(krec)) {
+		t.Fatalf("EOF keyframe offset = %d, want %d", got, len(krec))
+	}
 	keyframe := bytes.Repeat([]byte{0xA5}, spectateDataChunkBytes+17)
 	b.mu.Lock()
 	b.keyframeFrame = 2

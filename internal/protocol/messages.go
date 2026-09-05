@@ -421,8 +421,8 @@ type SpectateFailPayload struct {
 }
 
 // BroadcastKeyframeRequest carries one chunk of a periodic savestate keyframe.
-// Frame is the krec input-frame index the savestate corresponds to (its state is
-// "about to apply frame Frame's input"). The savestate (compressed) is split into
+// Frame is the krec input-record index to consume immediately after restoring
+// the savestate. The savestate (compressed) is split into
 // ChunkCount chunks to stay under the server's per-message read limit; the server
 // reassembles them and keeps only the latest complete keyframe.
 type BroadcastKeyframeRequest struct {
@@ -434,9 +434,8 @@ type BroadcastKeyframeRequest struct {
 }
 
 // SpectateKeyframePayload delivers the latest keyframe (chunked) to a joining
-// spectator. After reassembling it, the spectator restores the savestate at Frame;
-// the SPECTATE_DATA that follows is the krec from Frame onward (header + tail), so
-// the spectator's first replayed input is Frame.
+// spectator. After reassembling it, the spectator restores the savestate and the
+// SPECTATE_DATA that follows begins with input record Frame.
 type SpectateKeyframePayload struct {
 	MatchID    uint64 `json:"matchId"`
 	Frame      int    `json:"frame"`

@@ -31,9 +31,9 @@ type broadcast struct {
 	liveFrame  int   // broadcaster's latest stamped live krec frame
 	written    int64 // spool bytes written, enforced against maxSpoolBytes
 
-	// Latest complete savestate keyframe (compressed bytes) + the krec input-frame
-	// index it corresponds to, so a late spectator can restore here and fast-forward
-	// only the tail. 0 frame = none yet (spectators fall back to full-spool replay).
+	// Latest complete savestate keyframe (compressed bytes) + the first krec input
+	// record to consume after restore, so a late spectator fast-forwards only the tail.
+	// 0 = none yet (spectators fall back to full-spool replay).
 	keyframeFrame int
 	keyframeData  []byte
 	// In-progress reassembly of a chunked BROADCAST_KEYFRAME upload.
@@ -260,7 +260,9 @@ func (m *broadcastManager) keyframe(senderID, matchID uint64, frame, chunkIndex,
 }
 
 // krecFrameOffset returns the byte offset of the (frame)-th input (0x12) record in
-// a krec buffer, or -1 if not present yet. Mirrors the client's record grammar:
+// a krec buffer. It also returns EOF when frame is exactly one past the final complete
+// record, allowing a freshly captured keyframe to wait for its next live input.
+// Otherwise it returns -1. Mirrors the client's record grammar:
 // KRC1=400 / KRC0=272 header, then 0x12 <u16 len> data | 0x14 nick\0 +4 | 0x08 nick\0 msg\0.
 func krecFrameOffset(data []byte, frame int) int64 {
 	n := len(data)
@@ -316,6 +318,9 @@ func krecFrameOffset(data []byte, frame int) int64 {
 		default:
 			return -1
 		}
+	}
+	if count == frame {
+		return int64(p) // the next input is one past the current complete tail
 	}
 	return -1
 }
@@ -479,12 +484,12 @@ func (m *broadcastManager) spectateStart(c *Client, matchID uint64) {
 	mode := "full"
 	historyBytes := b.written
 
-	// Prefer the keyframe path: if we hold a complete keyframe whose frame is
-	// present in the spool, send the savestate + only the krec [header + tail from
-	// that frame]. The spectator restores the savestate and its first replayed
-	// input is that frame, so catch-up is bounded to the tail regardless of how
+	// Prefer the keyframe path: if we hold a complete keyframe whose next input is
+	// locatable in the spool, send the savestate + only the krec [header + tail from
+	// that input]. The spectator restores the savestate and consumes that record
+	// first, so catch-up is bounded to the tail regardless of how
 	// long the match has run. Fall back to the full spool (frame 0) otherwise —
-	// e.g. in the first ~60s before any keyframe exists.
+	// e.g. during startup before any keyframe exists.
 	if b.keyframeFrame > 0 && len(b.keyframeData) > 0 {
 		data, err := os.ReadFile(b.path)
 		if err != nil {
