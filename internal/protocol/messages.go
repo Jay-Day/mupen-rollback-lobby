@@ -44,7 +44,7 @@ const (
 	TypeBroadcastData  = "BROADCAST_DATA"  // broadcaster: a chunk of krec bytes (base64)
 	TypeBroadcastEnd   = "BROADCAST_END"   // broadcaster: stream finished
 	// Periodic savestate "keyframe": the broadcaster uploads a compressed savestate
-	// every ~60s so a late-joining spectator can restore near the live edge and
+	// periodically so a late-joining spectator can restore near the live edge and
 	// fast-forward only the short tail (bounded catch-up, independent of match length).
 	// Sent in chunks to stay under the server's per-message read limit.
 	TypeBroadcastKeyframe = "BROADCAST_KEYFRAME"
@@ -91,6 +91,8 @@ const (
 	TypeSpectateKeyframe = "SPECTATE_KEYFRAME"
 	TypeSpectateEnd      = "SPECTATE_END"  // stream ended (match over / broadcaster left)
 	TypeSpectateFail     = "SPECTATE_FAIL" // request rejected (not broadcasting, ended)
+	// Sent to the broadcaster and every active spectator whenever the audience changes.
+	TypeBroadcastViewerCount = "BROADCAST_VIEWER_COUNT"
 
 	// Moderation (server → client).
 	TypeAdminAuthOK   = "ADMIN_AUTH_OK"   // moderator role granted
@@ -444,9 +446,8 @@ type QuickMatchStatusPayload struct {
 }
 
 // -- Broadcast / spectate payloads --
-// krec bytes travel as base64 in the Data field. The same shape is reused for
-// the broadcaster's uplink (BROADCAST_DATA) and the spectator's downlink
-// (SPECTATE_DATA) so the server can forward a chunk verbatim.
+// krec bytes travel as base64 in the Data field. The spectator downlink adds a
+// server-owned logical offset so receivers can reject gaps and duplicates.
 
 type BroadcastBeginRequest struct {
 	MatchID uint64 `json:"matchId"`
@@ -476,8 +477,9 @@ type SpectateBeginPayload struct {
 
 type SpectateDataPayload struct {
 	MatchID uint64 `json:"matchId"`
-	Data    string `json:"data"`  // base64 krec chunk
-	Frame   int    `json:"frame"` // broadcaster's live krec frame (fast-forward target)
+	Data    string `json:"data"`   // base64 krec chunk
+	Frame   int    `json:"frame"`  // broadcaster's live krec frame (fast-forward target)
+	Offset  int64  `json:"offset"` // logical byte offset in this spectator's krec stream
 }
 
 type SpectateEndPayload struct {
@@ -490,9 +492,14 @@ type SpectateFailPayload struct {
 	Reason  string `json:"reason"`
 }
 
+type BroadcastViewerCountPayload struct {
+	MatchID     uint64 `json:"matchId"`
+	ViewerCount int    `json:"viewerCount"`
+}
+
 // BroadcastKeyframeRequest carries one chunk of a periodic savestate keyframe.
-// Frame is the krec input-frame index the savestate corresponds to (its state is
-// "about to apply frame Frame's input"). The savestate (compressed) is split into
+// Frame is the krec input-record index to consume immediately after restoring
+// the savestate. The savestate (compressed) is split into
 // ChunkCount chunks to stay under the server's per-message read limit; the server
 // reassembles them and keeps only the latest complete keyframe.
 type BroadcastKeyframeRequest struct {
@@ -504,9 +511,8 @@ type BroadcastKeyframeRequest struct {
 }
 
 // SpectateKeyframePayload delivers the latest keyframe (chunked) to a joining
-// spectator. After reassembling it, the spectator restores the savestate at Frame;
-// the SPECTATE_DATA that follows is the krec from Frame onward (header + tail), so
-// the spectator's first replayed input is Frame.
+// spectator. After reassembling it, the spectator restores the savestate and the
+// SPECTATE_DATA that follows begins with input record Frame.
 type SpectateKeyframePayload struct {
 	MatchID    uint64 `json:"matchId"`
 	Frame      int    `json:"frame"`

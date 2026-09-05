@@ -181,21 +181,40 @@ func (c *Client) writeLoop(ctx context.Context) {
 	}
 }
 
-// sendEnvelope marshals data as the inner payload and emits a single envelope.
-// Drops the message silently if the outbound queue is full.
-func (c *Client) sendEnvelope(msgType, id string, data any) {
+// trySendEnvelope marshals data as the inner payload and attempts to enqueue a
+// single envelope. Callers that require reliable ordered delivery can retain
+// their cursor and retry when this returns false.
+func (c *Client) trySendEnvelope(msgType, id string, data any) bool {
 	payload, err := json.Marshal(data)
 	if err != nil {
-		return
+		return false
 	}
 	env, err := json.Marshal(protocol.Envelope{Type: msgType, ID: id, Data: payload})
 	if err != nil {
-		return
+		return false
 	}
 	select {
 	case c.send <- env:
+		return true
 	default:
+		return false
 	}
+}
+
+// trySendEnvelopeReserved leaves room for latency-sensitive lobby/control
+// messages while a replay history pump is filling the same connection queue.
+func (c *Client) trySendEnvelopeReserved(msgType, id string, data any, reserve int) bool {
+	if reserve > 0 && cap(c.send) > reserve && len(c.send) >= cap(c.send)-reserve {
+		return false
+	}
+	return c.trySendEnvelope(msgType, id, data)
+}
+
+// sendEnvelope is best-effort for ordinary lobby notifications. Replay data
+// uses trySendEnvelopeReserved and retries from its on-disk cursor instead of
+// silently advancing past a full queue.
+func (c *Client) sendEnvelope(msgType, id string, data any) {
+	_ = c.trySendEnvelope(msgType, id, data)
 }
 
 func (c *Client) sendFail(msgType, id, reason string) {
