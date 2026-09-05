@@ -333,6 +333,27 @@ func stopBroadcastSpectator(sc *broadcastSpectator) {
 	close(sc.done)
 }
 
+// notifyViewerCountLocked publishes the current authoritative audience size to
+// the broadcaster and every active viewer. Call with b.mu held so membership
+// mutations and their notifications retain the same order.
+func (m *broadcastManager) notifyViewerCountLocked(b *broadcast) {
+	if m.hub == nil {
+		return
+	}
+	payload := protocol.BroadcastViewerCountPayload{
+		MatchID:     b.matchID,
+		ViewerCount: len(b.spectators),
+	}
+	if broadcaster := m.hub.getClient(b.broadcasterID); broadcaster != nil {
+		broadcaster.sendEnvelope(protocol.TypeBroadcastViewerCount, "", payload)
+	}
+	for userID, sc := range b.spectators {
+		if userID != b.broadcasterID {
+			sc.client.sendEnvelope(protocol.TypeBroadcastViewerCount, "", payload)
+		}
+	}
+}
+
 // pumpSpectator runs one ordered producer per viewer. It reads only from the
 // durable spool and advances its cursor only after an envelope was accepted by
 // the connection queue. Queue pressure therefore delays this spectator without
@@ -432,6 +453,7 @@ func (m *broadcastManager) pumpSpectatorChunk(b *broadcast, userID uint64, sc *b
 		sc.client.sendEnvelope(protocol.TypeSpectateEnd, "", protocol.SpectateEndPayload{
 			MatchID: b.matchID, Reason: "stream_read_error",
 		})
+		m.notifyViewerCountLocked(b)
 		return false, false
 	}
 
@@ -511,6 +533,7 @@ func (m *broadcastManager) spectateStart(c *Client, matchID uint64) {
 	}
 
 	b.spectators[c.user.ID] = sc
+	m.notifyViewerCountLocked(b)
 	b.mu.Unlock()
 	go m.pumpSpectator(b, c.user.ID, sc)
 	slog.Info("spectate start", "mode", mode, "match", matchID, "user", c.user.Username,
@@ -528,6 +551,7 @@ func (m *broadcastManager) spectateStop(userID, matchID uint64) {
 	if sc := b.spectators[userID]; sc != nil {
 		stopBroadcastSpectator(sc)
 		delete(b.spectators, userID)
+		m.notifyViewerCountLocked(b)
 	}
 	b.mu.Unlock()
 }
@@ -586,6 +610,12 @@ func (m *broadcastManager) finish(b *broadcast, reason string) bool {
 			MatchID: b.matchID, Reason: reason,
 		})
 	}
+	if m.hub != nil {
+		if broadcaster := m.hub.getClient(b.broadcasterID); broadcaster != nil {
+			broadcaster.sendEnvelope(protocol.TypeBroadcastViewerCount, "",
+				protocol.BroadcastViewerCountPayload{MatchID: b.matchID, ViewerCount: 0})
+		}
+	}
 	slog.Info("broadcast end", "match", b.matchID, "reason", reason, "spectators", len(specs))
 	return true
 }
@@ -614,6 +644,7 @@ func (m *broadcastManager) onUserGone(userID uint64) {
 		if sc := b.spectators[userID]; sc != nil {
 			stopBroadcastSpectator(sc)
 			delete(b.spectators, userID)
+			m.notifyViewerCountLocked(b)
 		}
 		b.mu.Unlock()
 	}
@@ -644,6 +675,9 @@ func (h *Hub) handleBroadcastBegin(c *Client, env protocol.Envelope) {
 	}
 	if h.broadcasts.begin(match.ID, match.RoomID, c.user.ID) {
 		slog.Info("broadcast begin", "match", match.ID, "by", c.user.Username)
+		c.sendEnvelope(protocol.TypeBroadcastViewerCount, "", protocol.BroadcastViewerCountPayload{
+			MatchID: match.ID, ViewerCount: 0,
+		})
 		h.broadcastRoomList() // flag the room as broadcasting
 	}
 }

@@ -38,7 +38,7 @@ const (
 	TypeBroadcastData  = "BROADCAST_DATA"  // broadcaster: a chunk of krec bytes (base64)
 	TypeBroadcastEnd   = "BROADCAST_END"   // broadcaster: stream finished
 	// Periodic savestate "keyframe": the broadcaster uploads a compressed savestate
-	// every ~60s so a late-joining spectator can restore near the live edge and
+	// periodically so a late-joining spectator can restore near the live edge and
 	// fast-forward only the short tail (bounded catch-up, independent of match length).
 	// Sent in chunks to stay under the server's per-message read limit.
 	TypeBroadcastKeyframe = "BROADCAST_KEYFRAME"
@@ -85,6 +85,8 @@ const (
 	TypeSpectateKeyframe = "SPECTATE_KEYFRAME"
 	TypeSpectateEnd      = "SPECTATE_END"  // stream ended (match over / broadcaster left)
 	TypeSpectateFail     = "SPECTATE_FAIL" // request rejected (not broadcasting, ended)
+	// Sent to the broadcaster and every active spectator whenever the audience changes.
+	TypeBroadcastViewerCount = "BROADCAST_VIEWER_COUNT"
 
 	// Moderation (server → client).
 	TypeAdminAuthOK   = "ADMIN_AUTH_OK"   // moderator role granted
@@ -418,6 +420,11 @@ type SpectateEndPayload struct {
 type SpectateFailPayload struct {
 	MatchID uint64 `json:"matchId"`
 	Reason  string `json:"reason"`
+}
+
+type BroadcastViewerCountPayload struct {
+	MatchID     uint64 `json:"matchId"`
+	ViewerCount int    `json:"viewerCount"`
 }
 
 // BroadcastKeyframeRequest carries one chunk of a periodic savestate keyframe.

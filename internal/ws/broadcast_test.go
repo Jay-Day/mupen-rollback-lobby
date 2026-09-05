@@ -12,6 +12,72 @@ import (
 	"github.com/jay-day/rmgk-lobby/internal/state"
 )
 
+func waitViewerCount(t *testing.T, c *Client, matchID uint64, want int) {
+	t.Helper()
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case raw := <-c.send:
+			var env protocol.Envelope
+			if err := json.Unmarshal(raw, &env); err != nil {
+				t.Fatalf("decode viewer-count envelope: %v", err)
+			}
+			if env.Type != protocol.TypeBroadcastViewerCount {
+				continue
+			}
+			var payload protocol.BroadcastViewerCountPayload
+			if err := json.Unmarshal(env.Data, &payload); err != nil {
+				t.Fatalf("decode viewer-count payload: %v", err)
+			}
+			if payload.MatchID != matchID || payload.ViewerCount != want {
+				t.Fatalf("viewer count = match %d/count %d, want match %d/count %d",
+					payload.MatchID, payload.ViewerCount, matchID, want)
+			}
+			return
+		case <-deadline:
+			t.Fatalf("timed out waiting for viewer count %d", want)
+		}
+	}
+}
+
+func TestViewerCountTracksJoinStopAndDisconnect(t *testing.T) {
+	const matchID uint64 = 77
+	broadcaster := &Client{user: &state.User{ID: 10, Username: "host"}, send: make(chan []byte, 16)}
+	viewer1 := &Client{user: &state.User{ID: 11, Username: "viewer-one"}, send: make(chan []byte, 16)}
+	viewer2 := &Client{user: &state.User{ID: 12, Username: "viewer-two"}, send: make(chan []byte, 16)}
+	h := &Hub{clients: map[uint64]*Client{
+		broadcaster.user.ID: broadcaster,
+		viewer1.user.ID:     viewer1,
+		viewer2.user.ID:     viewer2,
+	}}
+	m := &broadcastManager{
+		hub:     h,
+		dir:     t.TempDir(),
+		byMatch: make(map[uint64]*broadcast),
+	}
+	h.broadcasts = m
+	if !m.begin(matchID, 1, broadcaster.user.ID) {
+		t.Fatal("begin broadcast")
+	}
+	t.Cleanup(func() { m.endByMatch(matchID) })
+
+	m.spectateStart(viewer1, matchID)
+	waitViewerCount(t, broadcaster, matchID, 1)
+	waitViewerCount(t, viewer1, matchID, 1)
+
+	m.spectateStart(viewer2, matchID)
+	waitViewerCount(t, broadcaster, matchID, 2)
+	waitViewerCount(t, viewer1, matchID, 2)
+	waitViewerCount(t, viewer2, matchID, 2)
+
+	m.spectateStop(viewer1.user.ID, matchID)
+	waitViewerCount(t, broadcaster, matchID, 1)
+	waitViewerCount(t, viewer2, matchID, 1)
+
+	m.onUserGone(viewer2.user.ID)
+	waitViewerCount(t, broadcaster, matchID, 0)
+}
+
 func TestSpectatePumpRetriesFullQueueWithoutGap(t *testing.T) {
 	m := &broadcastManager{
 		dir:     t.TempDir(),
