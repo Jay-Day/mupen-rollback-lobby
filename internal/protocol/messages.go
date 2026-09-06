@@ -25,6 +25,7 @@ const (
 	TypeRoomUpdateDelay          = "ROOM_UPDATE_DELAY"
 	TypeRoomUpdatePlayerSettings = "ROOM_UPDATE_PLAYER_SETTINGS"
 	TypeRoomUpdatePrediction     = "ROOM_UPDATE_PREDICTION"
+	TypeRoomUpdateLiveReplay     = "ROOM_UPDATE_LIVE_REPLAY"
 	TypeRoomSwapSlots            = "ROOM_SWAP_SLOTS"
 	TypePingProbeRequest         = "PING_PROBE_REQUEST"
 	TypeMatchConnected           = "MATCH_CONNECTED"
@@ -228,6 +229,13 @@ type RoomUpdatePredictionRequest struct {
 	PredictionAuto bool `json:"predictionAuto"`
 }
 
+// RoomUpdateLiveReplayRequest changes whether the host intends to stream the
+// next match. Host-only and waiting-room-only; the server rebroadcasts the
+// authoritative choice in ROOM_STATE so every seated player can see it.
+type RoomUpdateLiveReplayRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
 type PingProbeRequestPayload struct {
 	TargetUserID uint64 `json:"targetUserId"`
 }
@@ -375,10 +383,11 @@ type RoomStatePayload struct {
 	Pacing int `json:"pacing"`
 	// DelayAuto is retained for older clients. PredictionAuto describes the
 	// host-owned room prediction selection (Default versus an explicit value).
-	DelayAuto      bool              `json:"delayAuto"`
-	PredictionAuto bool              `json:"predictionAuto"`
-	Players        []RoomSeatPayload `json:"players"`
-	State          string            `json:"state"`
+	DelayAuto         bool              `json:"delayAuto"`
+	PredictionAuto    bool              `json:"predictionAuto"`
+	LiveReplayEnabled bool              `json:"liveReplayEnabled"`
+	Players           []RoomSeatPayload `json:"players"`
+	State             string            `json:"state"`
 }
 
 type RoomJoinFailPayload struct {

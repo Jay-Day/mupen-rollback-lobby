@@ -43,10 +43,11 @@ type Room struct {
 	// model. No Auto concept — it's a discrete choice, not ping-derived.
 	Pacing int
 	// Legacy compatibility flags for clients that still render shared settings.
-	DelayAuto      bool
-	PredictionAuto bool
-	Visibility     Visibility
-	Password       string
+	DelayAuto         bool
+	PredictionAuto    bool
+	LiveReplayEnabled bool // host's room-wide choice for streaming the next match
+	Visibility        Visibility
+	Password          string
 
 	Players    []*RoomSeat
 	Spectators []*User
@@ -171,6 +172,18 @@ func (r *Room) SetRollbackSettings(delay, prediction, pacing int, delayAuto, pre
 	r.Pacing = pacing
 	r.DelayAuto = delayAuto
 	r.PredictionAuto = predictionAuto
+}
+
+// SetLiveReplayEnabled updates the host's room-wide streaming choice and
+// reports whether it changed. The caller is responsible for host/state checks.
+func (r *Room) SetLiveReplayEnabled(enabled bool) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.LiveReplayEnabled == enabled {
+		return false
+	}
+	r.LiveReplayEnabled = enabled
+	return true
 }
 
 // SwapSlots exchanges the slot numbers of whoever occupies slotA and slotB. If
