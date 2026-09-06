@@ -43,10 +43,12 @@ func waitViewerCount(t *testing.T, c *Client, matchID uint64, want int) {
 func TestViewerCountTracksJoinStopAndDisconnect(t *testing.T) {
 	const matchID uint64 = 77
 	broadcaster := &Client{user: &state.User{ID: 10, Username: "host"}, send: make(chan []byte, 16)}
+	player := &Client{user: &state.User{ID: 13, Username: "player"}, send: make(chan []byte, 16)}
 	viewer1 := &Client{user: &state.User{ID: 11, Username: "viewer-one"}, send: make(chan []byte, 16)}
 	viewer2 := &Client{user: &state.User{ID: 12, Username: "viewer-two"}, send: make(chan []byte, 16)}
 	h := &Hub{clients: map[uint64]*Client{
 		broadcaster.user.ID: broadcaster,
+		player.user.ID:      player,
 		viewer1.user.ID:     viewer1,
 		viewer2.user.ID:     viewer2,
 	}}
@@ -56,26 +58,70 @@ func TestViewerCountTracksJoinStopAndDisconnect(t *testing.T) {
 		byMatch: make(map[uint64]*broadcast),
 	}
 	h.broadcasts = m
-	if !m.begin(matchID, 1, broadcaster.user.ID) {
+	if !m.begin(matchID, 1, broadcaster.user.ID, []uint64{broadcaster.user.ID, player.user.ID}) {
 		t.Fatal("begin broadcast")
 	}
 	t.Cleanup(func() { m.endByMatch(matchID) })
+	m.notifyViewerCount(matchID)
+	waitViewerCount(t, broadcaster, matchID, 0)
+	waitViewerCount(t, player, matchID, 0)
 
 	m.spectateStart(viewer1, matchID)
 	waitViewerCount(t, broadcaster, matchID, 1)
+	waitViewerCount(t, player, matchID, 1)
 	waitViewerCount(t, viewer1, matchID, 1)
 
 	m.spectateStart(viewer2, matchID)
 	waitViewerCount(t, broadcaster, matchID, 2)
+	waitViewerCount(t, player, matchID, 2)
 	waitViewerCount(t, viewer1, matchID, 2)
 	waitViewerCount(t, viewer2, matchID, 2)
 
 	m.spectateStop(viewer1.user.ID, matchID)
 	waitViewerCount(t, broadcaster, matchID, 1)
+	waitViewerCount(t, player, matchID, 1)
 	waitViewerCount(t, viewer2, matchID, 1)
 
 	m.onUserGone(viewer2.user.ID)
 	waitViewerCount(t, broadcaster, matchID, 0)
+	waitViewerCount(t, player, matchID, 0)
+
+	if !m.endByMatch(matchID) {
+		t.Fatal("end broadcast")
+	}
+	waitViewerCount(t, broadcaster, matchID, 0)
+	waitViewerCount(t, player, matchID, 0)
+}
+
+func TestKeyframeAssemblyAcceptsManyPacedChunks(t *testing.T) {
+	m := &broadcastManager{
+		dir:     t.TempDir(),
+		byMatch: make(map[uint64]*broadcast),
+	}
+	const matchID uint64 = 88
+	const broadcasterID uint64 = 99
+	if !m.begin(matchID, 1, broadcasterID, nil) {
+		t.Fatal("begin broadcast")
+	}
+	t.Cleanup(func() { m.endByMatch(matchID) })
+
+	// A raw 16 MiB fallback uses about 257 of the client's new 64 KiB chunks,
+	// well beyond the legacy 64-chunk shape limit.
+	const chunks = 257
+	var want []byte
+	for i := 0; i < chunks; i++ {
+		part := []byte{byte(i), byte(i >> 8)}
+		want = append(want, part...)
+		m.keyframe(broadcasterID, matchID, 123, i, chunks,
+			base64.StdEncoding.EncodeToString(part))
+	}
+
+	b := m.byMatch[matchID]
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.keyframeFrame != 123 || !bytes.Equal(b.keyframeData, want) {
+		t.Fatal("paced keyframe chunks were not reassembled")
+	}
 }
 
 func TestSpectatePumpRetriesFullQueueWithoutGap(t *testing.T) {
@@ -85,7 +131,7 @@ func TestSpectatePumpRetriesFullQueueWithoutGap(t *testing.T) {
 	}
 	const matchID uint64 = 11
 	const broadcasterID uint64 = 22
-	if !m.begin(matchID, 1, broadcasterID) {
+	if !m.begin(matchID, 1, broadcasterID, nil) {
 		t.Fatal("begin broadcast")
 	}
 	b := m.byMatch[matchID]
@@ -196,7 +242,7 @@ func TestKeyframeSpectateStreamHasContiguousLogicalOffsets(t *testing.T) {
 	}
 	const matchID uint64 = 44
 	const broadcasterID uint64 = 55
-	if !m.begin(matchID, 1, broadcasterID) {
+	if !m.begin(matchID, 1, broadcasterID, nil) {
 		t.Fatal("begin broadcast")
 	}
 	b := m.byMatch[matchID]

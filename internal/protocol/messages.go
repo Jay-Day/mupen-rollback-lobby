@@ -91,7 +91,7 @@ const (
 	TypeSpectateKeyframe = "SPECTATE_KEYFRAME"
 	TypeSpectateEnd      = "SPECTATE_END"  // stream ended (match over / broadcaster left)
 	TypeSpectateFail     = "SPECTATE_FAIL" // request rejected (not broadcasting, ended)
-	// Sent to the broadcaster and every active spectator whenever the audience changes.
+	// Sent to every match participant and active spectator whenever the audience changes.
 	TypeBroadcastViewerCount = "BROADCAST_VIEWER_COUNT"
 
 	// Moderation (server → client).

@@ -19,10 +19,11 @@ import (
 // ends — we keep it on disk (not in RAM) so a late-joining spectator can be
 // served the full history from frame 0, then tail the live edge.
 type broadcast struct {
-	matchID       uint64
-	roomID        uint64
-	broadcasterID uint64
-	path          string
+	matchID        uint64
+	roomID         uint64
+	broadcasterID  uint64
+	participantIDs []uint64
+	path           string
 
 	mu         sync.Mutex
 	file       *os.File
@@ -40,6 +41,7 @@ type broadcast struct {
 	kfAsmFrame  int
 	kfAsmCount  int
 	kfAsmGot    int
+	kfAsmBytes  int
 	kfAsmChunks [][]byte
 }
 
@@ -69,10 +71,12 @@ type broadcastSpectator struct {
 // (~+33%) plus the JSON envelope must stay under the server read limit (1 MiB).
 const keyframeChunkBytes = 512 * 1024
 
-// maxKeyframeChunks bounds the chunk count a broadcaster may declare. A real
-// savestate (~17 MB uncompressed) is ~33 chunks; anything beyond this is a
-// hostile client trying to make the server allocate a huge reassembly buffer.
-const maxKeyframeChunks = 64
+// New clients use small paced chunks so chat can preempt between them; older
+// clients used 512 KiB chunks. Bound both the shape and total decoded bytes.
+const (
+	maxKeyframeChunks = 512
+	maxKeyframeBytes  = 32 << 20
+)
 
 // maxSpoolBytes caps one broadcast's spool file. A krec is input records — even
 // an hours-long 4-player match is a few MB — so hitting this means a hostile or
@@ -126,7 +130,7 @@ func (m *broadcastManager) roomBroadcast(roomID uint64) (matchID uint64, ok bool
 // begin registers a new broadcast and opens its spool file. Returns false if
 // the match is already being broadcast (first broadcaster wins) or the file
 // can't be opened.
-func (m *broadcastManager) begin(matchID, roomID, broadcasterID uint64) bool {
+func (m *broadcastManager) begin(matchID, roomID, broadcasterID uint64, participantIDs []uint64) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, exists := m.byMatch[matchID]; exists {
@@ -139,12 +143,13 @@ func (m *broadcastManager) begin(matchID, roomID, broadcasterID uint64) bool {
 		return false
 	}
 	m.byMatch[matchID] = &broadcast{
-		matchID:       matchID,
-		roomID:        roomID,
-		broadcasterID: broadcasterID,
-		path:          path,
-		file:          f,
-		spectators:    make(map[uint64]*broadcastSpectator),
+		matchID:        matchID,
+		roomID:         roomID,
+		broadcasterID:  broadcasterID,
+		participantIDs: append([]uint64(nil), participantIDs...),
+		path:           path,
+		file:           f,
+		spectators:     make(map[uint64]*broadcastSpectator),
 	}
 	return true
 }
@@ -224,7 +229,8 @@ func (m *broadcastManager) keyframe(senderID, matchID uint64, frame, chunkIndex,
 	if b.closed || b.broadcasterID != senderID {
 		return
 	}
-	if chunkCount <= 0 || chunkCount > maxKeyframeChunks || chunkIndex < 0 || chunkIndex >= chunkCount {
+	if chunkCount <= 0 || chunkCount > maxKeyframeChunks || chunkIndex < 0 || chunkIndex >= chunkCount ||
+		len(raw) == 0 || len(raw) > keyframeChunkBytes {
 		return
 	}
 
@@ -234,10 +240,18 @@ func (m *broadcastManager) keyframe(senderID, matchID uint64, frame, chunkIndex,
 		b.kfAsmCount = chunkCount
 		b.kfAsmChunks = make([][]byte, chunkCount)
 		b.kfAsmGot = 0
+		b.kfAsmBytes = 0
 	}
 	if b.kfAsmChunks[chunkIndex] == nil {
+		if b.kfAsmBytes+len(raw) > maxKeyframeBytes {
+			b.kfAsmChunks = nil
+			b.kfAsmGot = 0
+			b.kfAsmBytes = 0
+			return
+		}
 		b.kfAsmChunks[chunkIndex] = raw
 		b.kfAsmGot++
+		b.kfAsmBytes += len(raw)
 	}
 	if b.kfAsmGot < b.kfAsmCount {
 		return
@@ -256,6 +270,7 @@ func (m *broadcastManager) keyframe(senderID, matchID uint64, frame, chunkIndex,
 	b.keyframeData = buf
 	b.kfAsmChunks = nil
 	b.kfAsmGot = 0
+	b.kfAsmBytes = 0
 	slog.Info("broadcast keyframe stored", "match", matchID, "frame", frame, "bytes", len(buf))
 }
 
@@ -334,7 +349,7 @@ func stopBroadcastSpectator(sc *broadcastSpectator) {
 }
 
 // notifyViewerCountLocked publishes the current authoritative audience size to
-// the broadcaster and every active viewer. Call with b.mu held so membership
+// every match participant and active viewer. Call with b.mu held so membership
 // mutations and their notifications retain the same order.
 func (m *broadcastManager) notifyViewerCountLocked(b *broadcast) {
 	if m.hub == nil {
@@ -344,14 +359,40 @@ func (m *broadcastManager) notifyViewerCountLocked(b *broadcast) {
 		MatchID:     b.matchID,
 		ViewerCount: len(b.spectators),
 	}
-	if broadcaster := m.hub.getClient(b.broadcasterID); broadcaster != nil {
-		broadcaster.sendEnvelope(protocol.TypeBroadcastViewerCount, "", payload)
+	notified := make(map[uint64]struct{}, len(b.participantIDs)+len(b.spectators)+1)
+	for _, userID := range b.participantIDs {
+		if _, exists := notified[userID]; exists {
+			continue
+		}
+		notified[userID] = struct{}{}
+		if participant := m.hub.getClient(userID); participant != nil {
+			participant.sendEnvelope(protocol.TypeBroadcastViewerCount, "", payload)
+		}
+	}
+	// Defensive fallback for broadcasts created without a participant snapshot.
+	if _, exists := notified[b.broadcasterID]; !exists {
+		notified[b.broadcasterID] = struct{}{}
+		if broadcaster := m.hub.getClient(b.broadcasterID); broadcaster != nil {
+			broadcaster.sendEnvelope(protocol.TypeBroadcastViewerCount, "", payload)
+		}
 	}
 	for userID, sc := range b.spectators {
-		if userID != b.broadcasterID {
+		if _, exists := notified[userID]; !exists {
 			sc.client.sendEnvelope(protocol.TypeBroadcastViewerCount, "", payload)
 		}
 	}
+}
+
+func (m *broadcastManager) notifyViewerCount(matchID uint64) {
+	m.mu.Lock()
+	b := m.byMatch[matchID]
+	m.mu.Unlock()
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	m.notifyViewerCountLocked(b)
+	b.mu.Unlock()
 }
 
 // pumpSpectator runs one ordered producer per viewer. It reads only from the
@@ -611,9 +652,22 @@ func (m *broadcastManager) finish(b *broadcast, reason string) bool {
 		})
 	}
 	if m.hub != nil {
-		if broadcaster := m.hub.getClient(b.broadcasterID); broadcaster != nil {
-			broadcaster.sendEnvelope(protocol.TypeBroadcastViewerCount, "",
-				protocol.BroadcastViewerCountPayload{MatchID: b.matchID, ViewerCount: 0})
+		notified := make(map[uint64]struct{}, len(b.participantIDs)+1)
+		for _, userID := range b.participantIDs {
+			if _, exists := notified[userID]; exists {
+				continue
+			}
+			notified[userID] = struct{}{}
+			if participant := m.hub.getClient(userID); participant != nil {
+				participant.sendEnvelope(protocol.TypeBroadcastViewerCount, "",
+					protocol.BroadcastViewerCountPayload{MatchID: b.matchID, ViewerCount: 0})
+			}
+		}
+		if _, exists := notified[b.broadcasterID]; !exists {
+			if broadcaster := m.hub.getClient(b.broadcasterID); broadcaster != nil {
+				broadcaster.sendEnvelope(protocol.TypeBroadcastViewerCount, "",
+					protocol.BroadcastViewerCountPayload{MatchID: b.matchID, ViewerCount: 0})
+			}
 		}
 	}
 	slog.Info("broadcast end", "match", b.matchID, "reason", reason, "spectators", len(specs))
@@ -673,11 +727,15 @@ func (h *Hub) handleBroadcastBegin(c *Client, env protocol.Envelope) {
 		slog.Debug("BROADCAST_BEGIN rejected: not host", "user", c.user.ID, "match", req.MatchID)
 		return
 	}
-	if h.broadcasts.begin(match.ID, match.RoomID, c.user.ID) {
+	participantIDs := make([]uint64, 0, len(match.Players))
+	for _, player := range match.Players {
+		if player != nil {
+			participantIDs = append(participantIDs, player.ID)
+		}
+	}
+	if h.broadcasts.begin(match.ID, match.RoomID, c.user.ID, participantIDs) {
 		slog.Info("broadcast begin", "match", match.ID, "by", c.user.Username)
-		c.sendEnvelope(protocol.TypeBroadcastViewerCount, "", protocol.BroadcastViewerCountPayload{
-			MatchID: match.ID, ViewerCount: 0,
-		})
+		h.broadcasts.notifyViewerCount(match.ID)
 		h.broadcastRoomList() // flag the room as broadcasting
 	}
 }
