@@ -1,6 +1,7 @@
 package state
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -35,14 +36,13 @@ type Room struct {
 	RomRegion string
 
 	MaxPlayers int
-	Delay      int
-	Prediction int
+	Delay      int // legacy host delay; current values live on RoomSeat
+	Prediction int // host-controlled, room-wide rollback prediction window
 	// Pacing is the time-sync model (0 = aggressive/symmetric default,
 	// 1 = smooth/asymmetric). Host-set; broadcast so every seat runs the same
 	// model. No Auto concept — it's a discrete choice, not ping-derived.
 	Pacing int
-	// DelayAuto/PredictionAuto record whether the host left each value on "Auto"
-	// so the state we broadcast lets non-hosts mirror the host's label.
+	// Legacy compatibility flags for clients that still render shared settings.
 	DelayAuto         bool
 	PredictionAuto    bool
 	LiveReplayEnabled bool // host's room-wide choice for streaming the next match
@@ -56,12 +56,15 @@ type Room struct {
 	CreatedAt time.Time
 	StartedAt time.Time // set when the match goes in-game; zero until then
 
-	kickedAt map[uint64]time.Time // userID -> last kick time, for a rejoin cooldown
+	kickedUserIDs   map[uint64]struct{} // active connection identity
+	kickedUsernames map[string]struct{} // survives reconnects with the same name
 }
 
 type RoomSeat struct {
-	User *User
-	Slot int
+	User       *User
+	Slot       int
+	FrameDelay int
+	DelayAuto  bool
 }
 
 func (r *Room) Snapshot() (id, hostID uint64, name string, players, max int, st RoomState) {
@@ -99,8 +102,33 @@ func (r *Room) AddPlayer(u *User) error {
 			break
 		}
 	}
-	r.Players = append(r.Players, &RoomSeat{User: u, Slot: slot})
+	r.Players = append(r.Players, &RoomSeat{
+		User:       u,
+		Slot:       slot,
+		FrameDelay: r.Delay,
+		DelayAuto:  r.DelayAuto,
+	})
 	return nil
+}
+
+// SetPlayerDelay updates one seated player's independently chosen input delay.
+// Callers validate range and room state; false means the user was not seated or
+// the published value was unchanged.
+func (r *Room) SetPlayerDelay(userID uint64, delay int, delayAuto bool) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, seat := range r.Players {
+		if seat.User == nil || seat.User.ID != userID {
+			continue
+		}
+		if seat.FrameDelay == delay && seat.DelayAuto == delayAuto {
+			return false
+		}
+		seat.FrameDelay = delay
+		seat.DelayAuto = delayAuto
+		return true
+	}
+	return false
 }
 
 func (r *Room) RemovePlayer(userID uint64) bool {
@@ -121,9 +149,21 @@ func (r *Room) SetState(s RoomState) {
 	r.State = s
 }
 
-// SetRollbackSettings updates the room's delay/prediction/pacing parameters and
-// whether delay/prediction are host-Auto-driven. Callers should validate
-// range/host/state first; this only mutates under the lock.
+// SetPrediction updates the host-controlled room prediction window. Callers
+// enforce host ownership, range, and waiting-room state.
+func (r *Room) SetPrediction(prediction int, predictionAuto bool) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.Prediction == prediction && r.PredictionAuto == predictionAuto {
+		return false
+	}
+	r.Prediction = prediction
+	r.PredictionAuto = predictionAuto
+	return true
+}
+
+// SetRollbackSettings updates the legacy shared settings message. Delay is
+// mirrored only for older clients; prediction and pacing remain room-wide.
 func (r *Room) SetRollbackSettings(delay, prediction, pacing int, delayAuto, predictionAuto bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -177,22 +217,32 @@ func (r *Room) SwapSlots(slotA, slotB int) bool {
 	return true
 }
 
-// MarkKicked records that a user was just kicked, starting their rejoin cooldown.
-func (r *Room) MarkKicked(userID uint64) {
+// MarkKicked bars a user from rejoining this room. The set belongs to the Room,
+// so it disappears automatically only when the room itself is destroyed.
+func (r *Room) MarkKicked(userID uint64, username string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.kickedAt == nil {
-		r.kickedAt = make(map[uint64]time.Time)
+	if r.kickedUserIDs == nil {
+		r.kickedUserIDs = make(map[uint64]struct{})
 	}
-	r.kickedAt[userID] = time.Now()
+	if r.kickedUsernames == nil {
+		r.kickedUsernames = make(map[string]struct{})
+	}
+	r.kickedUserIDs[userID] = struct{}{}
+	r.kickedUsernames[strings.ToLower(strings.TrimSpace(username))] = struct{}{}
 }
 
-// KickCoolingDown reports whether the user was kicked within the last `within`.
-func (r *Room) KickCoolingDown(userID uint64, within time.Duration) bool {
+// WasKicked reports whether a user is barred from this room. Username matching
+// keeps the ban effective if the kicked client disconnects and receives a new
+// transient user ID before trying to rejoin.
+func (r *Room) WasKicked(userID uint64, username string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	t, ok := r.kickedAt[userID]
-	return ok && time.Since(t) < within
+	if _, kicked := r.kickedUserIDs[userID]; kicked {
+		return true
+	}
+	_, kicked := r.kickedUsernames[strings.ToLower(strings.TrimSpace(username))]
+	return kicked
 }
 
 // MarkStarted stamps the match start time (used for the Ongoing Matches duration).

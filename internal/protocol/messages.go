@@ -12,24 +12,30 @@ type Envelope struct {
 
 // Client → Server message types
 const (
-	TypeHello                = "HELLO"
-	TypeHeartbeat            = "HEARTBEAT"
-	TypeChatSend             = "CHAT_SEND"
-	TypeChatHistory          = "CHAT_HISTORY"
-	TypeRoomCreate           = "ROOM_CREATE"
-	TypeRoomJoin             = "ROOM_JOIN"
-	TypeRoomLeave            = "ROOM_LEAVE"
-	TypeRoomKick             = "ROOM_KICK"
-	TypeRoomStart            = "ROOM_START"
-	TypeRoomUpdateSettings   = "ROOM_UPDATE_SETTINGS"
-	TypeRoomUpdateLiveReplay = "ROOM_UPDATE_LIVE_REPLAY"
-	TypeRoomSwapSlots        = "ROOM_SWAP_SLOTS"
-	TypePingProbeRequest     = "PING_PROBE_REQUEST"
-	TypeMatchConnected       = "MATCH_CONNECTED"
-	TypeMatchPunchFailed     = "MATCH_PUNCH_FAILED"
-	TypeMatchFinished        = "MATCH_FINISHED"
-	TypeQuickMatchJoin       = "QUICK_MATCH_JOIN"
-	TypeQuickMatchCancel     = "QUICK_MATCH_CANCEL"
+	TypeHello                    = "HELLO"
+	TypeHeartbeat                = "HEARTBEAT"
+	TypeChatSend                 = "CHAT_SEND"
+	TypeChatHistory              = "CHAT_HISTORY"
+	TypeRoomCreate               = "ROOM_CREATE"
+	TypeRoomJoin                 = "ROOM_JOIN"
+	TypeRoomLeave                = "ROOM_LEAVE"
+	TypeRoomKick                 = "ROOM_KICK"
+	TypeRoomStart                = "ROOM_START"
+	TypeRoomUpdateSettings       = "ROOM_UPDATE_SETTINGS"
+	TypeRoomUpdateDelay          = "ROOM_UPDATE_DELAY"
+	TypeRoomUpdatePlayerSettings = "ROOM_UPDATE_PLAYER_SETTINGS"
+	TypeRoomUpdatePrediction     = "ROOM_UPDATE_PREDICTION"
+	TypeRoomUpdateLiveReplay     = "ROOM_UPDATE_LIVE_REPLAY"
+	TypeRoomSwapSlots            = "ROOM_SWAP_SLOTS"
+	TypePingProbeRequest         = "PING_PROBE_REQUEST"
+	TypeMatchConnected           = "MATCH_CONNECTED"
+	TypeMatchPunchFailed         = "MATCH_PUNCH_FAILED"
+	TypeMatchFinished            = "MATCH_FINISHED"
+	TypeQuickMatchJoin           = "QUICK_MATCH_JOIN"
+	TypeQuickMatchCancel         = "QUICK_MATCH_CANCEL"
+	// ICE signaling is relayed over the authenticated lobby WebSocket. The
+	// server never sees gameplay datagrams and is not a TURN relay.
+	TypeICESignal = "ICE_SIGNAL"
 
 	// Spectating: one player streams the match's .krec up via BROADCAST_*; other
 	// users pull it back down via SPECTATE_*. krec bytes ride as base64 strings
@@ -110,7 +116,7 @@ const (
 	ReasonNotAuthorized   = "not_authorized"
 	ReasonRoomNotFound    = "room_not_found"
 	ReasonAlreadyInRoom   = "already_in_room"
-	ReasonKickedRecently  = "kicked_recently"
+	ReasonKickedFromRoom  = "kicked_from_room"
 )
 
 // -- Request payloads --
@@ -131,6 +137,9 @@ type HelloRequest struct {
 	// and relays this flag so clients suppress the region badge fallback too.
 	// Region still flows for ping estimation.
 	Anonymous bool `json:"anonymous,omitempty"`
+	// Advertises support for the room-scoped libjuice transport. Older clients
+	// omit this and are prevented from entering an ICE match with newer clients.
+	ICESupported bool `json:"iceSupported,omitempty"`
 }
 
 type HeartbeatRequest struct {
@@ -184,16 +193,39 @@ type RoomSwapSlotsRequest struct {
 	SlotB int `json:"slotB"`
 }
 
-// RoomUpdateSettingsRequest changes a waiting room's rollback parameters.
-// Host-only; the server clamps to [0,9] and rebroadcasts ROOM_STATE so every
-// seated client (and the match itself) picks the new values up. The *Auto flags
-// carry whether the host left each setting on "Auto" so non-hosts can render the
-// same "Auto (N f)" label the host sees instead of a bare number.
+// RoomUpdateSettingsRequest is retained for older host-controlled clients.
+// Current clients publish per-player delay and host-owned prediction through
+// separate messages.
 type RoomUpdateSettingsRequest struct {
 	Delay          int  `json:"delay"`
 	Prediction     int  `json:"prediction"`
 	Pacing         int  `json:"pacing,omitempty"`
 	DelayAuto      bool `json:"delayAuto"`
+	PredictionAuto bool `json:"predictionAuto"`
+}
+
+// RoomUpdateDelayRequest publishes the caller's resolved local input delay.
+// Every seated player owns this value independently; the server only validates,
+// stores it on that player's seat, and rebroadcasts ROOM_STATE.
+type RoomUpdateDelayRequest struct {
+	Delay     int  `json:"delay"`
+	DelayAuto bool `json:"delayAuto"`
+}
+
+// RoomUpdatePlayerSettingsRequest is retained for compatibility with clients
+// that published both values per seat. Delay remains per-player; Prediction is
+// consumed only when the caller is the host and becomes room state.
+type RoomUpdatePlayerSettingsRequest struct {
+	Delay          int  `json:"delay"`
+	DelayAuto      bool `json:"delayAuto"`
+	Prediction     int  `json:"prediction"`
+	PredictionAuto bool `json:"predictionAuto"`
+}
+
+// RoomUpdatePredictionRequest changes the room-wide prediction window. Only
+// the host may update it, and only while the room is waiting.
+type RoomUpdatePredictionRequest struct {
+	Prediction     int  `json:"prediction"`
 	PredictionAuto bool `json:"predictionAuto"`
 }
 
@@ -214,6 +246,14 @@ type MatchPeerEventRequest struct {
 	Reason     string `json:"reason,omitempty"`
 }
 
+type ICESignalRequest struct {
+	TargetUserID uint64 `json:"targetUserId"`
+	RoomID       uint64 `json:"roomId"`
+	Kind         string `json:"kind"`
+	Value        string `json:"value,omitempty"`
+	Generation   uint32 `json:"generation"`
+}
+
 // QuickMatchJoinRequest scopes a quick-match search to a specific ROM. The
 // matchmaker pairs only searchers whose Rom.MD5 agree; Rom.Name is carried so
 // the auto-created room can be resolved by name on both clients.
@@ -224,14 +264,28 @@ type QuickMatchJoinRequest struct {
 // -- Response payloads --
 
 type HelloOKResponse struct {
-	UserID     uint64 `json:"userId"`
-	ObservedIP string `json:"observedIp"`
-	UDPAnchor  string `json:"udpAnchor"`
-	Region     string `json:"region"`
+	UserID     uint64           `json:"userId"`
+	ObservedIP string           `json:"observedIp"`
+	UDPAnchor  string           `json:"udpAnchor"`
+	Region     string           `json:"region"`
+	ICE        ICEConfiguration `json:"ice"`
+}
+
+type ICETransportServer struct {
+	Host     string `json:"host"`
+	Port     uint16 `json:"port"`
+	Username string `json:"username,omitempty"`
+	Password string `json:"password,omitempty"`
+}
+
+type ICEConfiguration struct {
+	STUN ICETransportServer   `json:"stun"`
+	TURN []ICETransportServer `json:"turn"`
 }
 
 type HelloFailResponse struct {
-	Reason string `json:"reason"`
+	Reason  string `json:"reason"`
+	Message string `json:"message,omitempty"`
 }
 
 type HeartbeatAckResponse struct {
@@ -304,9 +358,16 @@ type RoomListPayload struct {
 }
 
 type RoomSeatPayload struct {
-	UserID   uint64 `json:"userId"`
-	Username string `json:"username"`
-	Slot     int    `json:"slot"`
+	UserID     uint64 `json:"userId"`
+	Username   string `json:"username"`
+	Slot       int    `json:"slot"`
+	FrameDelay int    `json:"frameDelay"`
+	DelayAuto  bool   `json:"delayAuto"`
+	// Compatibility mirrors of the host-owned room prediction. New clients use
+	// RoomStatePayload.Prediction and PredictionAuto directly.
+	PredictionWindow int  `json:"predictionWindow"`
+	PredictionAuto   bool `json:"predictionAuto"`
+	ICESupported     bool `json:"iceSupported,omitempty"`
 }
 
 type RoomStatePayload struct {
@@ -320,8 +381,8 @@ type RoomStatePayload struct {
 	// Pacing time-sync model (0 = aggressive, 1 = smooth); host-set, applies to
 	// every seat. Discrete choice, so no Auto flag.
 	Pacing int `json:"pacing"`
-	// Whether each value is host-Auto-driven, so non-hosts can mirror the
-	// host's "Auto (N f)" / "Default" labels rather than showing a bare number.
+	// DelayAuto is retained for older clients. PredictionAuto describes the
+	// host-owned room prediction selection (Default versus an explicit value).
 	DelayAuto         bool              `json:"delayAuto"`
 	PredictionAuto    bool              `json:"predictionAuto"`
 	LiveReplayEnabled bool              `json:"liveReplayEnabled"`
@@ -355,17 +416,26 @@ type PingProbeIncomingPayload struct {
 }
 
 type MatchPeer struct {
-	UserID     uint64 `json:"userId"`
-	Username   string `json:"username"`
-	PublicIP   string `json:"publicIp"`
-	PublicPort uint16 `json:"publicPort"`
-	LocalIP    string `json:"localIp,omitempty"`
-	Slot       int    `json:"slot"`
+	UserID       uint64 `json:"userId"`
+	Username     string `json:"username"`
+	PublicIP     string `json:"publicIp"`
+	PublicPort   uint16 `json:"publicPort"`
+	LocalIP      string `json:"localIp,omitempty"`
+	Slot         int    `json:"slot"`
+	ICESupported bool   `json:"iceSupported,omitempty"`
 }
 
 type MatchBeginPayload struct {
 	MatchID uint64      `json:"matchId"`
 	Peers   []MatchPeer `json:"peers"`
+}
+
+type ICESignalPayload struct {
+	FromUserID uint64 `json:"fromUserId"`
+	RoomID     uint64 `json:"roomId"`
+	Kind       string `json:"kind"`
+	Value      string `json:"value,omitempty"`
+	Generation uint32 `json:"generation"`
 }
 
 type MatchPeerLeftPayload struct {

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jay-day/rmgk-lobby/internal/moderation"
+	"github.com/jay-day/rmgk-lobby/internal/protocol"
 	"github.com/jay-day/rmgk-lobby/internal/ratelimit"
 	"github.com/jay-day/rmgk-lobby/internal/state"
 	"github.com/jay-day/rmgk-lobby/internal/udp"
@@ -25,6 +26,12 @@ func main() {
 		udpAddr       = flag.String("udp-addr", ":6364", "UDP anchor listen address")
 		udpPublicAddr = flag.String("udp-public-addr", "127.0.0.1:6364", "Public host:port of the UDP anchor advertised to clients")
 		logJSON       = flag.Bool("log-json", false, "Emit logs as JSON")
+		stunHost      = flag.String("stun-host", "216.128.157.98", "STUN host advertised for ICE")
+		stunPort      = flag.Int("stun-port", 3478, "STUN port advertised for ICE")
+		turnHost      = flag.String("turn-host", "", "Optional TURN host (disabled when empty)")
+		turnPort      = flag.Int("turn-port", 3478, "Optional TURN port")
+		turnUsername  = flag.String("turn-username", "", "Optional TURN username")
+		turnPassword  = flag.String("turn-password", "", "Optional TURN password")
 	)
 	flag.Parse()
 
@@ -57,8 +64,25 @@ func main() {
 	banPath := envOr("RMGK_BANLIST_PATH", "bans.json")
 	mod := moderation.NewManager(moderation.NewFilter(terms), admins, banPath)
 	slog.Info("moderation ready", "blocklist_terms", mod.FilterSize(), "admins", mod.AdminCount(), "banlist", banPath)
+	if *stunHost == "" || *stunPort < 1 || *stunPort > 65535 {
+		slog.Error("invalid STUN configuration", "host", *stunHost, "port", *stunPort)
+		os.Exit(1)
+	}
+	if *turnHost != "" && (*turnPort < 1 || *turnPort > 65535) {
+		slog.Error("invalid TURN port", "port", *turnPort)
+		os.Exit(1)
+	}
 
-	hub := ws.NewHub(gameState, *udpPublicAddr, mod)
+	iceConfig := protocol.ICEConfiguration{
+		STUN: protocol.ICETransportServer{Host: *stunHost, Port: uint16(*stunPort)},
+	}
+	if *turnHost != "" {
+		iceConfig.TURN = append(iceConfig.TURN, protocol.ICETransportServer{
+			Host: *turnHost, Port: uint16(*turnPort),
+			Username: *turnUsername, Password: *turnPassword,
+		})
+	}
+	hub := ws.NewHub(gameState, *udpPublicAddr, iceConfig, mod)
 
 	udpListenAddr, err := net.ResolveUDPAddr("udp", *udpAddr)
 	if err != nil {

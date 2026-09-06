@@ -14,7 +14,7 @@ const (
 	roomNameMaxLen = 48
 	minDelay       = 0
 	maxDelay       = 9
-	minPrediction  = 0
+	minPrediction  = 1
 	maxPrediction  = 9
 	minPacing      = 0 // 0 = aggressive/symmetric (engine default)
 	maxPacing      = 1 // 1 = smooth/asymmetric
@@ -154,10 +154,10 @@ func (h *Hub) handleRoomJoin(c *Client, env protocol.Envelope) {
 		return
 	}
 
-	// A kicked player can't rejoin the same room for a short cooldown.
-	const kickRejoinCooldown = 30 * time.Second
-	if room.KickCoolingDown(c.user.ID, kickRejoinCooldown) {
-		c.sendRoomJoinFail(env.ID, protocol.ReasonKickedRecently)
+	// A kick is permanent for this room object. Destroying the room destroys the
+	// ban list, so the same user may join a newly created room normally.
+	if room.WasKicked(c.user.ID, c.user.Username) {
+		c.sendRoomJoinFail(env.ID, protocol.ReasonKickedFromRoom)
 		return
 	}
 
@@ -203,12 +203,9 @@ func (h *Hub) handleRoomJoin(c *Client, env protocol.Envelope) {
 	h.introduceRoomPeers(room, c.user)
 }
 
-// introduceRoomPeers cross-introduces `joiner` with every other player seated
-// in `room`, so both ends fire a probe within one RTT and the NAT mappings open
-// together — the same simultaneous-open n02/NATLinker does on JOIN. Server
-// initiated, so it deliberately skips the per-client introduce cooldown that
-// guards the client-requested path; joining a room is not a spammable action
-// (rate limited upstream by room join itself).
+// introduceRoomPeers keeps the legacy UDP-anchor introduction available when
+// either side is an older client. Two ICE-capable clients negotiate through
+// ICE_SIGNAL instead and must not activate the custom punch path.
 func (h *Hub) introduceRoomPeers(room *state.Room, joiner *state.User) {
 	if room == nil || joiner == nil {
 		return
@@ -216,6 +213,9 @@ func (h *Hub) introduceRoomPeers(room *state.Room, joiner *state.User) {
 	for _, seat := range room.Players {
 		peer := seat.User
 		if peer == nil || peer.ID == joiner.ID {
+			continue
+		}
+		if peer.ICESupported && joiner.ICESupported {
 			continue
 		}
 		h.introduceTo(peer, joiner)
@@ -252,11 +252,8 @@ func (h *Hub) handleRoomStart(c *Client, env protocol.Envelope) {
 	h.startMatchInRoom(room, c.user.Username)
 }
 
-// handleRoomUpdateSettings lets the host tune the room's rollback delay /
-// prediction while it's still waiting. Quick Match relies on this: the host's
-// client resolves Auto delay from the measured peer ping during the warmup and
-// pushes the concrete value here, so every seated client (and the match itself)
-// uses it. Validates: caller is host, room is waiting.
+// handleRoomUpdateSettings remains for older host-controlled clients. The
+// host's delay is mirrored into its own seat; prediction and pacing are shared.
 func (h *Hub) handleRoomUpdateSettings(c *Client, env protocol.Envelope) {
 	var req protocol.RoomUpdateSettingsRequest
 	if err := json.Unmarshal(env.Data, &req); err != nil {
@@ -291,16 +288,115 @@ func (h *Hub) handleRoomUpdateSettings(c *Client, env protocol.Envelope) {
 		req.Pacing = maxPacing
 	}
 
-	if room.Delay == req.Delay && room.Prediction == req.Prediction &&
+	seatChanged := room.SetPlayerDelay(c.user.ID, req.Delay, req.DelayAuto)
+	sharedUnchanged := room.Delay == req.Delay && room.Prediction == req.Prediction &&
 		room.Pacing == req.Pacing &&
-		room.DelayAuto == req.DelayAuto && room.PredictionAuto == req.PredictionAuto {
+		room.DelayAuto == req.DelayAuto && room.PredictionAuto == req.PredictionAuto
+	if sharedUnchanged && !seatChanged {
 		return // no change — skip the rebroadcast
 	}
-	room.SetRollbackSettings(req.Delay, req.Prediction, req.Pacing, req.DelayAuto, req.PredictionAuto)
+	if !sharedUnchanged {
+		room.SetRollbackSettings(req.Delay, req.Prediction, req.Pacing, req.DelayAuto, req.PredictionAuto)
+	}
 	slog.Info("room settings updated", "room", room.ID,
 		"delay", req.Delay, "pred", req.Prediction, "pacing", req.Pacing,
 		"delayAuto", req.DelayAuto, "predAuto", req.PredictionAuto, "by", c.user.Username)
 
+	h.broadcastRoomState(room)
+}
+
+// handleRoomUpdateDelay stores the caller's independently selected input delay.
+// Unlike shared legacy settings, this is available to every seated player.
+func (h *Hub) handleRoomUpdateDelay(c *Client, env protocol.Envelope) {
+	var req protocol.RoomUpdateDelayRequest
+	if err := json.Unmarshal(env.Data, &req); err != nil {
+		return
+	}
+	room := c.user.CurrentRoom
+	if room == nil || room.State != state.RoomStateWaiting {
+		return
+	}
+	if req.Delay < minDelay {
+		req.Delay = minDelay
+	} else if req.Delay > maxDelay {
+		req.Delay = maxDelay
+	}
+	if !room.SetPlayerDelay(c.user.ID, req.Delay, req.DelayAuto) {
+		return
+	}
+	slog.Info("player frame delay updated", "room", room.ID, "delay", req.Delay,
+		"delayAuto", req.DelayAuto, "by", c.user.Username)
+	h.broadcastRoomState(room)
+}
+
+// handleRoomUpdatePlayerSettings is retained for compatibility with clients
+// that sent delay and prediction together. Delay remains per-player; prediction
+// is accepted only from the host and becomes the room-wide value.
+func (h *Hub) handleRoomUpdatePlayerSettings(c *Client, env protocol.Envelope) {
+	var req protocol.RoomUpdatePlayerSettingsRequest
+	if err := json.Unmarshal(env.Data, &req); err != nil {
+		return
+	}
+	room := c.user.CurrentRoom
+	if room == nil || room.State != state.RoomStateWaiting {
+		return
+	}
+	if req.Delay < minDelay {
+		req.Delay = minDelay
+	} else if req.Delay > maxDelay {
+		req.Delay = maxDelay
+	}
+	delayChanged := room.SetPlayerDelay(c.user.ID, req.Delay, req.DelayAuto)
+	predictionChanged := false
+	if room.Host != nil && room.Host.ID == c.user.ID {
+		if req.Prediction < minPrediction {
+			req.Prediction = minPrediction
+		} else if req.Prediction > maxPrediction {
+			req.Prediction = maxPrediction
+		}
+		predictionChanged = room.SetPrediction(req.Prediction, req.PredictionAuto)
+	}
+	if !delayChanged && !predictionChanged {
+		return
+	}
+	slog.Info("player frame delay updated via compatibility message", "room", room.ID,
+		"delay", req.Delay, "delayAuto", req.DelayAuto,
+		"roomPredictionChanged", predictionChanged, "by", c.user.Username)
+	h.broadcastRoomState(room)
+}
+
+// handleRoomUpdatePrediction stores the room-wide prediction window. The
+// authorization check lives here so a modified non-host client cannot change it.
+func (h *Hub) handleRoomUpdatePrediction(c *Client, env protocol.Envelope) {
+	var req protocol.RoomUpdatePredictionRequest
+	if err := json.Unmarshal(env.Data, &req); err != nil {
+		return
+	}
+	room := c.user.CurrentRoom
+	if room == nil {
+		return
+	}
+	if room.Host == nil || room.Host.ID != c.user.ID {
+		slog.Debug("ROOM_UPDATE_PREDICTION rejected: not host",
+			"user", c.user.Username, "room", room.ID)
+		return
+	}
+	if room.State != state.RoomStateWaiting {
+		slog.Debug("ROOM_UPDATE_PREDICTION rejected: not waiting",
+			"room", room.ID, "state", room.State)
+		return
+	}
+	if req.Prediction < minPrediction {
+		req.Prediction = minPrediction
+	} else if req.Prediction > maxPrediction {
+		req.Prediction = maxPrediction
+	}
+	if !room.SetPrediction(req.Prediction, req.PredictionAuto) {
+		return
+	}
+	slog.Info("room prediction updated", "room", room.ID,
+		"prediction", req.Prediction, "predictionAuto", req.PredictionAuto,
+		"by", c.user.Username)
 	h.broadcastRoomState(room)
 }
 
@@ -389,7 +485,7 @@ func (h *Hub) handleRoomKick(c *Client, env protocol.Envelope) {
 		return
 	}
 	slog.Info("room kick", "host", c.user.Username, "target", target.Username, "room", room.ID)
-	room.MarkKicked(target.ID) // start their rejoin cooldown
+	room.MarkKicked(target.ID, target.Username)
 	h.removeUserFromRoom(target, room, "kicked")
 }
 
@@ -415,12 +511,13 @@ func (h *Hub) startMatchInRoom(room *state.Room, initiator string) {
 
 		ip, port := seat.User.GetUDPEndpoint()
 		peers = append(peers, protocol.MatchPeer{
-			UserID:     seat.User.ID,
-			Username:   seat.User.Username,
-			PublicIP:   ip,
-			PublicPort: port,
-			LocalIP:    seat.User.LocalIP,
-			Slot:       seat.Slot,
+			UserID:       seat.User.ID,
+			Username:     seat.User.Username,
+			PublicIP:     ip,
+			PublicPort:   port,
+			LocalIP:      seat.User.LocalIP,
+			Slot:         seat.Slot,
+			ICESupported: seat.User.ICESupported,
 		})
 	}
 
@@ -816,9 +913,14 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 			continue
 		}
 		out.Players = append(out.Players, protocol.RoomSeatPayload{
-			UserID:   seat.User.ID,
-			Username: seat.User.Username,
-			Slot:     seat.Slot,
+			UserID:           seat.User.ID,
+			Username:         seat.User.Username,
+			Slot:             seat.Slot,
+			FrameDelay:       seat.FrameDelay,
+			DelayAuto:        seat.DelayAuto,
+			PredictionWindow: r.Prediction,
+			PredictionAuto:   r.PredictionAuto,
+			ICESupported:     seat.User.ICESupported,
 		})
 	}
 	return out

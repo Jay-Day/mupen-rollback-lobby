@@ -37,6 +37,7 @@ type Hub struct {
 	state *state.State
 
 	udpPublicAddr string // host:port advertised to clients in HELLO_OK
+	iceConfig     protocol.ICEConfiguration
 
 	mu      sync.Mutex
 	clients map[uint64]*Client // keyed by user id
@@ -50,10 +51,11 @@ type Hub struct {
 	mod        *moderation.Manager
 }
 
-func NewHub(s *state.State, udpPublicAddr string, mod *moderation.Manager) *Hub {
+func NewHub(s *state.State, udpPublicAddr string, iceConfig protocol.ICEConfiguration, mod *moderation.Manager) *Hub {
 	h := &Hub{
 		state:         s,
 		udpPublicAddr: udpPublicAddr,
+		iceConfig:     iceConfig,
 		clients:       make(map[uint64]*Client),
 		register:      make(chan *Client, 32),
 		unregister:    make(chan *Client, 32),
@@ -253,6 +255,13 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		c.sendFail(protocol.TypeHelloFail, env.ID, protocol.ReasonInvalidPayload)
 		return err
 	}
+	if !isSupportedClientVersion(req.ClientVersion) {
+		c.sendFailMessage(protocol.TypeHelloFail, env.ID, protocol.ReasonVersionMismatch,
+			minimumClientMessage)
+		slog.Info("out-of-date client rejected", "ip", c.ip,
+			"version", clampString(req.ClientVersion, 64))
+		return errUnsupportedClientVersion
+	}
 
 	if !isValidUsername(req.Username) {
 		c.sendFail(protocol.TypeHelloFail, env.ID, protocol.ReasonInvalidPayload)
@@ -285,6 +294,7 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		ClientVersion: clampString(req.ClientVersion, 32),
 		Connection:    clampString(req.Connection, 16),
 		Anonymous:     req.Anonymous,
+		ICESupported:  req.ICESupported,
 		JoinedAt:      time.Now(),
 		LastSeen:      time.Now(),
 		Send:          c.send,
@@ -304,6 +314,7 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		ObservedIP: c.ip,
 		UDPAnchor:  h.udpPublicAddr,
 		Region:     user.Region,
+		ICE:        h.iceConfig,
 	}
 	c.sendEnvelope(protocol.TypeHelloOK, env.ID, resp)
 
@@ -338,6 +349,12 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleRoomStart(c, env)
 	case protocol.TypeRoomUpdateSettings:
 		h.handleRoomUpdateSettings(c, env)
+	case protocol.TypeRoomUpdateDelay:
+		h.handleRoomUpdateDelay(c, env)
+	case protocol.TypeRoomUpdatePlayerSettings:
+		h.handleRoomUpdatePlayerSettings(c, env)
+	case protocol.TypeRoomUpdatePrediction:
+		h.handleRoomUpdatePrediction(c, env)
 	case protocol.TypeRoomUpdateLiveReplay:
 		h.handleRoomUpdateLiveReplay(c, env)
 	case protocol.TypeRoomSwapSlots:
@@ -354,6 +371,8 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleQuickMatchJoin(c, env)
 	case protocol.TypeQuickMatchCancel:
 		h.handleQuickMatchCancel(c, env)
+	case protocol.TypeICESignal:
+		h.handleICESignal(c, env)
 	case protocol.TypeBroadcastBegin:
 		h.handleBroadcastBegin(c, env)
 	case protocol.TypeBroadcastData:
@@ -373,6 +392,66 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 	default:
 		slog.Debug("unknown message", "type", env.Type, "user", c.user.ID)
 	}
+}
+
+// handleICESignal relays one ICE description/candidate between two users in
+// the same room. Authentication supplies FromUserID; clients cannot spoof it
+// or use this endpoint to signal arbitrary lobby users.
+func (h *Hub) handleICESignal(c *Client, env protocol.Envelope) {
+	var req protocol.ICESignalRequest
+	if err := json.Unmarshal(env.Data, &req); err != nil {
+		return
+	}
+	room := c.user.CurrentRoom
+	if room == nil || room.ID != req.RoomID || req.TargetUserID == 0 ||
+		req.TargetUserID == c.user.ID || !c.user.ICESupported {
+		return
+	}
+	if !validICESignalRequest(req) {
+		return
+	}
+
+	target := h.state.GetUser(req.TargetUserID)
+	if target == nil || target.CurrentRoom != room || !target.ICESupported {
+		return
+	}
+	h.mu.Lock()
+	targetClient := h.clients[target.ID]
+	h.mu.Unlock()
+	if targetClient == nil {
+		return
+	}
+	targetClient.sendEnvelope(protocol.TypeICESignal, env.ID, protocol.ICESignalPayload{
+		FromUserID: c.user.ID,
+		RoomID:     room.ID,
+		Kind:       req.Kind,
+		Value:      req.Value,
+		Generation: req.Generation,
+	})
+}
+
+func validICESignalRequest(req protocol.ICESignalRequest) bool {
+	switch req.Kind {
+	case "description":
+		if len(req.Value) == 0 || len(req.Value) > 4096 {
+			return false
+		}
+	case "candidate":
+		if len(req.Value) == 0 || len(req.Value) > 512 {
+			return false
+		}
+	case "gathering_done":
+		if req.Value != "" {
+			return false
+		}
+	case "restart":
+		if req.Generation == 0 || req.Value != "" {
+			return false
+		}
+	default:
+		return false
+	}
+	return true
 }
 
 // handlePingProbeRequest looks up the target user's last-known public UDP

@@ -82,3 +82,66 @@ func TestAddPlayerFillsAllSlotsAfterChurn(t *testing.T) {
 		t.Fatalf("expected 4 distinct slots, got %d (%v)", len(slots), slots)
 	}
 }
+
+func TestPlayerDelayIsIndependentAndPredictionIsRoomOwned(t *testing.T) {
+	r := &Room{MaxPlayers: 2, Delay: 2, DelayAuto: true, Prediction: 7, PredictionAuto: true}
+	for i := uint64(1); i <= 2; i++ {
+		if err := r.AddPlayer(newTestUser(i, "")); err != nil {
+			t.Fatalf("AddPlayer %d: %v", i, err)
+		}
+	}
+	for _, seat := range r.Players {
+		if seat.FrameDelay != 2 || !seat.DelayAuto {
+			t.Fatalf("initial delay for user %d = (%d, %v)",
+				seat.User.ID, seat.FrameDelay, seat.DelayAuto)
+		}
+	}
+
+	if !r.SetPlayerDelay(1, 1, false) {
+		t.Fatal("SetPlayerDelay should report the first player's change")
+	}
+	if !r.SetPlayerDelay(2, 5, true) {
+		t.Fatal("SetPlayerDelay should report the second player's change")
+	}
+	if r.Players[0].FrameDelay != 1 || r.Players[0].DelayAuto {
+		t.Fatalf("player 1 delay was not stored independently")
+	}
+	if r.Players[1].FrameDelay != 5 || !r.Players[1].DelayAuto {
+		t.Fatalf("player 2 delay was not stored independently")
+	}
+	if r.SetPlayerDelay(2, 5, true) {
+		t.Fatal("unchanged delay should not report a mutation")
+	}
+	if !r.SetPrediction(9, false) {
+		t.Fatal("SetPrediction should report the room change")
+	}
+	if r.Prediction != 9 || r.PredictionAuto {
+		t.Fatalf("room prediction = (%d, %v), want (9, false)",
+			r.Prediction, r.PredictionAuto)
+	}
+	if r.SetPrediction(9, false) {
+		t.Fatal("unchanged room prediction should not report a mutation")
+	}
+}
+
+func TestKickedUserIsBarredForRoomLifetime(t *testing.T) {
+	room := &Room{MaxPlayers: 2}
+	const userID = uint64(42)
+	const username = "KickedPlayer"
+	if room.WasKicked(userID, username) {
+		t.Fatal("new room unexpectedly reports user as kicked")
+	}
+
+	room.MarkKicked(userID, username)
+	if !room.WasKicked(userID, username) {
+		t.Fatal("kicked user should remain barred from the room")
+	}
+	if !room.WasKicked(99, "kickedplayer") {
+		t.Fatal("kicked username should remain barred after reconnect")
+	}
+
+	replacementRoom := &Room{MaxPlayers: 2}
+	if replacementRoom.WasKicked(userID, username) {
+		t.Fatal("kick should not carry into a different room")
+	}
+}

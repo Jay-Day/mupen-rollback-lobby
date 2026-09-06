@@ -14,7 +14,7 @@ import (
 )
 
 var (
-	usernameRegexp     = regexp.MustCompile(`^[A-Za-z0-9_\-\.]{3,16}$`)
+	usernameRegexp     = regexp.MustCompile(`^[A-Za-z0-9_\-\.]{2,20}$`)
 	errInvalidUsername = errors.New("invalid username")
 )
 
@@ -218,7 +218,31 @@ func (c *Client) sendEnvelope(msgType, id string, data any) {
 }
 
 func (c *Client) sendFail(msgType, id, reason string) {
-	c.sendEnvelope(msgType, id, protocol.HelloFailResponse{Reason: reason})
+	c.writeFail(msgType, id, protocol.HelloFailResponse{Reason: reason})
+}
+
+func (c *Client) sendFailMessage(msgType, id, reason, message string) {
+	c.writeFail(msgType, id, protocol.HelloFailResponse{
+		Reason:  reason,
+		Message: message,
+	})
+}
+
+// writeFail writes handshake failures synchronously. readLoop returns as soon
+// as HELLO is rejected, so queueing this on the normal asynchronous writer can
+// race the connection close and leave the user with no useful explanation.
+func (c *Client) writeFail(msgType, id string, response protocol.HelloFailResponse) {
+	payload, err := json.Marshal(response)
+	if err != nil {
+		return
+	}
+	env, err := json.Marshal(protocol.Envelope{Type: msgType, ID: id, Data: payload})
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), writeWait)
+	defer cancel()
+	_ = c.conn.Write(ctx, websocket.MessageText, env)
 }
 
 func isValidUsername(s string) bool {

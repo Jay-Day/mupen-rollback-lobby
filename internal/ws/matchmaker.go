@@ -20,8 +20,8 @@ const (
 	qmDefaultMaxPlayers = 2
 
 	// Warmup window between pairing and auto-start. Long enough for both clients
-	// to render the in-room view, probe each other's ping, and for the host's
-	// Auto delay to resolve from that ping and push ROOM_UPDATE_SETTINGS.
+	// to render the in-room view, probe each other, and publish their local
+	// rollback settings.
 	qmWarmup = 5 * time.Second
 )
 
@@ -259,8 +259,8 @@ func (h *Hub) quickMatchAttempt(searcher *state.User) {
 		Delay:      qmDefaultDelay,
 		Prediction: qmDefaultPrediction,
 		Pacing:     qmDefaultPacing,
-		// Quick Match is auto-tuned: the host resolves delay from ping during
-		// the warmup, so open on Auto for everyone (label matches the host).
+		// Quick Match opens on Auto delay and Default prediction for both seats;
+		// each client publishes its resolved local pair during warmup.
 		DelayAuto:      true,
 		PredictionAuto: true,
 		Visibility:     state.VisibilityInviteOnly,
@@ -304,7 +304,7 @@ func (h *Hub) quickMatchAttempt(searcher *state.User) {
 
 	// Don't start instantly. Give both clients a short warmup in the in-room
 	// view: seats + live peer ping render, and the host's Auto delay resolves
-	// from that ping and pushes ROOM_UPDATE_SETTINGS before the match locks in.
+	// from that ping and pushes ROOM_UPDATE_DELAY before the match locks in.
 	// The match then auto-starts with the tuned delay.
 	for _, u := range []*state.User{hostUser, joinerUser} {
 		h.broadcastPresenceUpdated(u)
