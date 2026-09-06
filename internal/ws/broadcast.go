@@ -735,6 +735,12 @@ func (h *Hub) handleBroadcastBegin(c *Client, env protocol.Envelope) {
 	}
 	if h.broadcasts.begin(match.ID, match.RoomID, c.user.ID, participantIDs) {
 		slog.Info("broadcast begin", "match", match.ID, "by", c.user.Username)
+		// Older hosts do not publish the pre-match room setting. Once their
+		// broadcast actually starts, reconcile it so newer room members never
+		// display an unchecked Live Replay box for an active stream.
+		if room.SetLiveReplayEnabled(true) {
+			h.broadcastRoomState(room)
+		}
 		h.broadcasts.notifyViewerCount(match.ID)
 		h.broadcastRoomList() // flag the room as broadcasting
 	}

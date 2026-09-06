@@ -12,23 +12,24 @@ type Envelope struct {
 
 // Client → Server message types
 const (
-	TypeHello              = "HELLO"
-	TypeHeartbeat          = "HEARTBEAT"
-	TypeChatSend           = "CHAT_SEND"
-	TypeChatHistory        = "CHAT_HISTORY"
-	TypeRoomCreate         = "ROOM_CREATE"
-	TypeRoomJoin           = "ROOM_JOIN"
-	TypeRoomLeave          = "ROOM_LEAVE"
-	TypeRoomKick           = "ROOM_KICK"
-	TypeRoomStart          = "ROOM_START"
-	TypeRoomUpdateSettings = "ROOM_UPDATE_SETTINGS"
-	TypeRoomSwapSlots      = "ROOM_SWAP_SLOTS"
-	TypePingProbeRequest   = "PING_PROBE_REQUEST"
-	TypeMatchConnected     = "MATCH_CONNECTED"
-	TypeMatchPunchFailed   = "MATCH_PUNCH_FAILED"
-	TypeMatchFinished      = "MATCH_FINISHED"
-	TypeQuickMatchJoin     = "QUICK_MATCH_JOIN"
-	TypeQuickMatchCancel   = "QUICK_MATCH_CANCEL"
+	TypeHello                = "HELLO"
+	TypeHeartbeat            = "HEARTBEAT"
+	TypeChatSend             = "CHAT_SEND"
+	TypeChatHistory          = "CHAT_HISTORY"
+	TypeRoomCreate           = "ROOM_CREATE"
+	TypeRoomJoin             = "ROOM_JOIN"
+	TypeRoomLeave            = "ROOM_LEAVE"
+	TypeRoomKick             = "ROOM_KICK"
+	TypeRoomStart            = "ROOM_START"
+	TypeRoomUpdateSettings   = "ROOM_UPDATE_SETTINGS"
+	TypeRoomUpdateLiveReplay = "ROOM_UPDATE_LIVE_REPLAY"
+	TypeRoomSwapSlots        = "ROOM_SWAP_SLOTS"
+	TypePingProbeRequest     = "PING_PROBE_REQUEST"
+	TypeMatchConnected       = "MATCH_CONNECTED"
+	TypeMatchPunchFailed     = "MATCH_PUNCH_FAILED"
+	TypeMatchFinished        = "MATCH_FINISHED"
+	TypeQuickMatchJoin       = "QUICK_MATCH_JOIN"
+	TypeQuickMatchCancel     = "QUICK_MATCH_CANCEL"
 
 	// Spectating: one player streams the match's .krec up via BROADCAST_*; other
 	// users pull it back down via SPECTATE_*. krec bytes ride as base64 strings
@@ -196,6 +197,13 @@ type RoomUpdateSettingsRequest struct {
 	PredictionAuto bool `json:"predictionAuto"`
 }
 
+// RoomUpdateLiveReplayRequest changes whether the host intends to stream the
+// next match. Host-only and waiting-room-only; the server rebroadcasts the
+// authoritative choice in ROOM_STATE so every seated player can see it.
+type RoomUpdateLiveReplayRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
 type PingProbeRequestPayload struct {
 	TargetUserID uint64 `json:"targetUserId"`
 }
@@ -314,10 +322,11 @@ type RoomStatePayload struct {
 	Pacing int `json:"pacing"`
 	// Whether each value is host-Auto-driven, so non-hosts can mirror the
 	// host's "Auto (N f)" / "Default" labels rather than showing a bare number.
-	DelayAuto      bool              `json:"delayAuto"`
-	PredictionAuto bool              `json:"predictionAuto"`
-	Players        []RoomSeatPayload `json:"players"`
-	State          string            `json:"state"`
+	DelayAuto         bool              `json:"delayAuto"`
+	PredictionAuto    bool              `json:"predictionAuto"`
+	LiveReplayEnabled bool              `json:"liveReplayEnabled"`
+	Players           []RoomSeatPayload `json:"players"`
+	State             string            `json:"state"`
 }
 
 type RoomJoinFailPayload struct {

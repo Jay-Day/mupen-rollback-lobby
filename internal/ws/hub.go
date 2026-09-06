@@ -338,6 +338,8 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleRoomStart(c, env)
 	case protocol.TypeRoomUpdateSettings:
 		h.handleRoomUpdateSettings(c, env)
+	case protocol.TypeRoomUpdateLiveReplay:
+		h.handleRoomUpdateLiveReplay(c, env)
 	case protocol.TypeRoomSwapSlots:
 		h.handleRoomSwapSlots(c, env)
 	case protocol.TypePingProbeRequest:

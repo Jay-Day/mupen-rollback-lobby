@@ -304,6 +304,33 @@ func (h *Hub) handleRoomUpdateSettings(c *Client, env protocol.Envelope) {
 	h.broadcastRoomState(room)
 }
 
+// handleRoomUpdateLiveReplay publishes the host's pre-match streaming choice
+// to every seated player. The actual BROADCAST_BEGIN remains separately
+// host-validated when the match starts.
+func (h *Hub) handleRoomUpdateLiveReplay(c *Client, env protocol.Envelope) {
+	var req protocol.RoomUpdateLiveReplayRequest
+	if err := json.Unmarshal(env.Data, &req); err != nil {
+		return
+	}
+	room := c.user.CurrentRoom
+	if room == nil {
+		return
+	}
+	if room.Host == nil || room.Host.ID != c.user.ID {
+		slog.Debug("ROOM_UPDATE_LIVE_REPLAY rejected: not host", "user", c.user.Username, "room", room.ID)
+		return
+	}
+	if room.State != state.RoomStateWaiting {
+		slog.Debug("ROOM_UPDATE_LIVE_REPLAY rejected: not waiting", "room", room.ID, "state", room.State)
+		return
+	}
+	if !room.SetLiveReplayEnabled(req.Enabled) {
+		return
+	}
+	slog.Info("room live replay updated", "room", room.ID, "enabled", req.Enabled, "by", c.user.Username)
+	h.broadcastRoomState(room)
+}
+
 // handleRoomSwapSlots lets the host re-order players by exchanging two seats
 // (P1-P4). Host-only and only while the room is waiting. Either slot may be
 // empty (the occupied player just moves to it). Rebroadcasts ROOM_STATE.
@@ -765,14 +792,15 @@ func (h *Hub) broadcastToRoom(room *state.Room, msgType string, data any) {
 
 func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 	out := protocol.RoomStatePayload{
-		ID:             r.ID,
-		Name:           r.Name,
-		MaxPlayers:     r.MaxPlayers,
-		Delay:          r.Delay,
-		Prediction:     r.Prediction,
-		Pacing:         r.Pacing,
-		DelayAuto:      r.DelayAuto,
-		PredictionAuto: r.PredictionAuto,
+		ID:                r.ID,
+		Name:              r.Name,
+		MaxPlayers:        r.MaxPlayers,
+		Delay:             r.Delay,
+		Prediction:        r.Prediction,
+		Pacing:            r.Pacing,
+		DelayAuto:         r.DelayAuto,
+		PredictionAuto:    r.PredictionAuto,
+		LiveReplayEnabled: r.LiveReplayEnabled,
 		Rom: protocol.RomInfo{
 			Name:   r.RomName,
 			MD5:    r.RomMD5,
