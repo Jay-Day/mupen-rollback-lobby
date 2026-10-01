@@ -25,7 +25,15 @@ import (
 // case is left to human moderators (mute/kick/ban).
 type Filter struct {
 	terms map[string]struct{} // normalized, de-leeted, run-collapsed terms
+	// embedded holds the subset of terms long enough to be matched as
+	// substrings inside a single token (see CheckName). Short terms stay
+	// whole-word only because they appear inside too many innocent words.
+	embedded []string
 }
+
+// minEmbeddedLen is the minimum canonical length a term needs before it is
+// also matched as a substring of a username token.
+const minEmbeddedLen = 5
 
 // leet maps common substitution characters back to their letter.
 var leet = map[rune]rune{
@@ -92,6 +100,11 @@ func NewFilter(terms []string) *Filter {
 			f.terms[key] = struct{}{}
 		}
 	}
+	for key := range f.terms {
+		if len(key) >= minEmbeddedLen {
+			f.embedded = append(f.embedded, key)
+		}
+	}
 	return f
 }
 
@@ -127,6 +140,30 @@ func (f *Filter) Check(msg string) (string, bool) {
 		tok := collapseRuns(w)
 		if f.match(tok) {
 			return tok, true
+		}
+	}
+	return "", false
+}
+
+// CheckName applies the chat filter to a username and additionally scans each
+// token for embedded long terms. Usernames are a single run of characters, so
+// the whole-word rule alone lets "unclefaggot" through even though "faggot" is
+// blocked. Only terms of minEmbeddedLen+ letters are matched this way; short
+// ones ("fag", "spic", "coon") remain whole-word to keep names like "Stefagio"
+// or "Raccoon" allowed. The returned string is for server-side logging only.
+func (f *Filter) CheckName(name string) (string, bool) {
+	if f == nil || len(f.terms) == 0 {
+		return "", false
+	}
+	if tok, hit := f.Check(name); hit {
+		return tok, true
+	}
+	for _, w := range strings.Fields(normalize(name)) {
+		tok := collapseRuns(w)
+		for _, term := range f.embedded {
+			if strings.Contains(tok, term) {
+				return term, true
+			}
 		}
 	}
 	return "", false

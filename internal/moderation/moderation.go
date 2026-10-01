@@ -54,6 +54,11 @@ func (m *Manager) FilterMessage(msg string) (string, bool) {
 	return m.filter.Check(msg)
 }
 
+// FilterName is the stricter username variant (also catches embedded slurs).
+func (m *Manager) FilterName(name string) (string, bool) {
+	return m.filter.CheckName(name)
+}
+
 func (m *Manager) AuthenticateAdmin(password string) (string, bool) {
 	return m.admins.Authenticate(password)
 }

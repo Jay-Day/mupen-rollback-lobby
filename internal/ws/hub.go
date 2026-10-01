@@ -267,10 +267,11 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		c.sendFail(protocol.TypeHelloFail, env.ID, protocol.ReasonInvalidPayload)
 		return errInvalidUsername
 	}
-	// Usernames are broadcast to the whole lobby — hold them to the same
-	// hate-speech filter as chat.
+	// Usernames are broadcast to the whole lobby. Hold them to the chat
+	// hate-speech filter plus an embedded-term scan: a name is a single token,
+	// so whole-word matching alone lets "unclefaggot" through.
 	if h.mod != nil {
-		if term, hit := h.mod.FilterMessage(req.Username); hit {
+		if term, hit := h.mod.FilterName(req.Username); hit {
 			c.sendFail(protocol.TypeHelloFail, env.ID, protocol.ReasonInvalidPayload)
 			slog.Info("username blocked by filter", "ip", c.ip, "term", term)
 			return errInvalidUsername
