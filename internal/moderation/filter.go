@@ -94,14 +94,21 @@ func canon(word string) string {
 // NewFilter builds a Filter from raw blocklist terms (one slur per entry).
 func NewFilter(terms []string) *Filter {
 	f := &Filter{terms: make(map[string]struct{})}
+	forced := map[string]struct{}{}
 	for _, t := range terms {
-		key := canon(t)
-		if key != "" {
-			f.terms[key] = struct{}{}
+		// A leading '*' marks a short term that must also match inside names.
+		force := strings.HasPrefix(t, "*")
+		key := canon(strings.TrimPrefix(t, "*"))
+		if key == "" {
+			continue
+		}
+		f.terms[key] = struct{}{}
+		if force {
+			forced[key] = struct{}{}
 		}
 	}
 	for key := range f.terms {
-		if len(key) >= minEmbeddedLen {
+		if _, ok := forced[key]; ok || len(key) >= minEmbeddedLen {
 			f.embedded = append(f.embedded, key)
 		}
 	}

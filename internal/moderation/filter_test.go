@@ -63,6 +63,9 @@ func TestCheckNameBlocksEmbedded(t *testing.T) {
 	f := defaultFilter()
 	blocked := []string{
 		"unclefaggot",
+		"ultra_fag",
+		"ultrafag", // short term forced embedded via '*' in blocklist
+		"f4g_lord",
 		"UncleFaggot",
 		"uncle_f4ggot", // leet inside a name
 		"xXniggerXx",
@@ -80,7 +83,6 @@ func TestCheckNameBlocksEmbedded(t *testing.T) {
 func TestCheckNameAllowsShortEmbedded(t *testing.T) {
 	f := defaultFilter()
 	allowed := []string{
-		"Stefagio",      // contains "fag" but short terms are whole-word only
 		"Spicy_Raccoon", // "spic"/"coon" fragments
 		"supaniceguy",
 		"texas_radio",

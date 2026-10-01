@@ -62,7 +62,7 @@ yid
 gyppo
 
 # --- anti-LGBTQ / homophobic ---
-fag
+*fag
 fagg
 faggot
 faggit
