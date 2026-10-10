@@ -145,7 +145,7 @@ func TestRoomLiveReplayChoiceIsSharedAndHostOnly(t *testing.T) {
 			}
 		}
 		update(guest, !enabled)
-		if room.LiveReplayEnabled() != enabled || len(host.Send) != 0 || len(guest.Send) != 0 {
+		if room.LiveReplayEnabled != enabled || len(host.Send) != 0 || len(guest.Send) != 0 {
 			t.Fatal("guest changed or broadcast the live replay choice")
 		}
 		// Joining players receive the same choice in their initial snapshot.
@@ -154,7 +154,7 @@ func TestRoomLiveReplayChoiceIsSharedAndHostOnly(t *testing.T) {
 	for _, phase := range []state.RoomState{state.RoomStateStarting, state.RoomStateInGame} {
 		room.SetState(phase)
 		update(host, true)
-		if room.LiveReplayEnabled() || len(host.Send) != 0 || len(guest.Send) != 0 {
+		if room.LiveReplayEnabled || len(host.Send) != 0 || len(guest.Send) != 0 {
 			t.Fatalf("host changed live replay during %s", phase)
 		}
 	}

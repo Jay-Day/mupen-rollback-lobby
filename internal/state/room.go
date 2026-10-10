@@ -45,9 +45,9 @@ type Room struct {
 	// Legacy compatibility flags for clients that still render shared settings.
 	DelayAuto         bool
 	PredictionAuto    bool
+	LiveReplayEnabled bool // host's room-wide choice for streaming the next match
 	Visibility        Visibility
 	Password          string
-	liveReplayEnabled bool
 
 	Players    []*RoomSeat
 	Spectators []*User
@@ -162,24 +162,6 @@ func (r *Room) SetPrediction(prediction int, predictionAuto bool) bool {
 	return true
 }
 
-// SetLiveReplay accepts changes only from the host while the room is waiting.
-func (r *Room) SetLiveReplay(userID uint64, enabled bool) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.Host == nil || r.Host.ID != userID || r.State != RoomStateWaiting ||
-		r.liveReplayEnabled == enabled {
-		return false
-	}
-	r.liveReplayEnabled = enabled
-	return true
-}
-
-func (r *Room) LiveReplayEnabled() bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.liveReplayEnabled
-}
-
 // SetRollbackSettings updates the legacy shared settings message. Delay is
 // mirrored only for older clients; prediction and pacing remain room-wide.
 func (r *Room) SetRollbackSettings(delay, prediction, pacing int, delayAuto, predictionAuto bool) {
@@ -190,6 +172,18 @@ func (r *Room) SetRollbackSettings(delay, prediction, pacing int, delayAuto, pre
 	r.Pacing = pacing
 	r.DelayAuto = delayAuto
 	r.PredictionAuto = predictionAuto
+}
+
+// SetLiveReplayEnabled updates the host's room-wide streaming choice and
+// reports whether it changed. The caller is responsible for host/state checks.
+func (r *Room) SetLiveReplayEnabled(enabled bool) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.LiveReplayEnabled == enabled {
+		return false
+	}
+	r.LiveReplayEnabled = enabled
+	return true
 }
 
 // SwapSlots exchanges the slot numbers of whoever occupies slotA and slotB. If

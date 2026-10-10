@@ -229,7 +229,9 @@ type RoomUpdatePredictionRequest struct {
 	PredictionAuto bool `json:"predictionAuto"`
 }
 
-// RoomUpdateLiveReplayRequest publishes the host's live replay choice.
+// RoomUpdateLiveReplayRequest changes whether the host intends to stream the
+// next match. Host-only and waiting-room-only; the server rebroadcasts the
+// authoritative choice in ROOM_STATE so every seated player can see it.
 type RoomUpdateLiveReplayRequest struct {
 	Enabled bool `json:"enabled"`
 }

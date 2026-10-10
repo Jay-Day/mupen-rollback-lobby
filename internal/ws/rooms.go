@@ -400,15 +400,30 @@ func (h *Hub) handleRoomUpdatePrediction(c *Client, env protocol.Envelope) {
 	h.broadcastRoomState(room)
 }
 
+// handleRoomUpdateLiveReplay publishes the host's pre-match streaming choice
+// to every seated player. The actual BROADCAST_BEGIN remains separately
+// host-validated when the match starts.
 func (h *Hub) handleRoomUpdateLiveReplay(c *Client, env protocol.Envelope) {
 	var req protocol.RoomUpdateLiveReplayRequest
 	if err := json.Unmarshal(env.Data, &req); err != nil {
 		return
 	}
 	room := c.user.CurrentRoom
-	if room == nil || !room.SetLiveReplay(c.user.ID, req.Enabled) {
+	if room == nil {
 		return
 	}
+	if room.Host == nil || room.Host.ID != c.user.ID {
+		slog.Debug("ROOM_UPDATE_LIVE_REPLAY rejected: not host", "user", c.user.Username, "room", room.ID)
+		return
+	}
+	if room.State != state.RoomStateWaiting {
+		slog.Debug("ROOM_UPDATE_LIVE_REPLAY rejected: not waiting", "room", room.ID, "state", room.State)
+		return
+	}
+	if !room.SetLiveReplayEnabled(req.Enabled) {
+		return
+	}
+	slog.Info("room live replay updated", "room", room.ID, "enabled", req.Enabled, "by", c.user.Username)
 	h.broadcastRoomState(room)
 }
 
@@ -887,7 +902,7 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 		Pacing:            r.Pacing,
 		DelayAuto:         r.DelayAuto,
 		PredictionAuto:    r.PredictionAuto,
-		LiveReplayEnabled: r.LiveReplayEnabled(),
+		LiveReplayEnabled: r.LiveReplayEnabled,
 		Rom: protocol.RomInfo{
 			Name:   r.RomName,
 			MD5:    r.RomMD5,
