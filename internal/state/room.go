@@ -43,10 +43,11 @@ type Room struct {
 	// model. No Auto concept — it's a discrete choice, not ping-derived.
 	Pacing int
 	// Legacy compatibility flags for clients that still render shared settings.
-	DelayAuto      bool
-	PredictionAuto bool
-	Visibility     Visibility
-	Password       string
+	DelayAuto         bool
+	PredictionAuto    bool
+	Visibility        Visibility
+	Password          string
+	liveReplayEnabled bool
 
 	Players    []*RoomSeat
 	Spectators []*User
@@ -159,6 +160,24 @@ func (r *Room) SetPrediction(prediction int, predictionAuto bool) bool {
 	r.Prediction = prediction
 	r.PredictionAuto = predictionAuto
 	return true
+}
+
+// SetLiveReplay accepts changes only from the host while the room is waiting.
+func (r *Room) SetLiveReplay(userID uint64, enabled bool) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.Host == nil || r.Host.ID != userID || r.State != RoomStateWaiting ||
+		r.liveReplayEnabled == enabled {
+		return false
+	}
+	r.liveReplayEnabled = enabled
+	return true
+}
+
+func (r *Room) LiveReplayEnabled() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.liveReplayEnabled
 }
 
 // SetRollbackSettings updates the legacy shared settings message. Delay is

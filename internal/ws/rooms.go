@@ -400,6 +400,18 @@ func (h *Hub) handleRoomUpdatePrediction(c *Client, env protocol.Envelope) {
 	h.broadcastRoomState(room)
 }
 
+func (h *Hub) handleRoomUpdateLiveReplay(c *Client, env protocol.Envelope) {
+	var req protocol.RoomUpdateLiveReplayRequest
+	if err := json.Unmarshal(env.Data, &req); err != nil {
+		return
+	}
+	room := c.user.CurrentRoom
+	if room == nil || !room.SetLiveReplay(c.user.ID, req.Enabled) {
+		return
+	}
+	h.broadcastRoomState(room)
+}
+
 // handleRoomSwapSlots lets the host re-order players by exchanging two seats
 // (P1-P4). Host-only and only while the room is waiting. Either slot may be
 // empty (the occupied player just moves to it). Rebroadcasts ROOM_STATE.
@@ -802,7 +814,7 @@ func (h *Hub) buildRoomListPayload() protocol.RoomListPayload {
 		if r.Host != nil {
 			hostName = r.Host.Username
 		}
-		matchID, broadcasting := h.broadcasts.roomBroadcast(id)
+		matchID, broadcasting, viewerCount := h.broadcasts.roomBroadcast(id)
 		payload.Rooms = append(payload.Rooms, protocol.RoomSummary{
 			ID:       id,
 			Name:     r.Name,
@@ -821,16 +833,21 @@ func (h *Hub) buildRoomListPayload() protocol.RoomListPayload {
 			StartedAt:    r.StartedAtUnixMs(),
 			Broadcasting: broadcasting,
 			MatchID:      matchID,
+			ViewerCount:  viewerCount,
 		})
 	}
 	return payload
 }
 
 func (h *Hub) broadcastRoomList() {
+	h.roomListMu.Lock()
+	defer h.roomListMu.Unlock()
 	h.broadcastToAll(protocol.TypeRoomList, h.buildRoomListPayload(), 0)
 }
 
 func (h *Hub) sendRoomListTo(c *Client) {
+	h.roomListMu.Lock()
+	defer h.roomListMu.Unlock()
 	c.sendEnvelope(protocol.TypeRoomList, "", h.buildRoomListPayload())
 }
 
@@ -862,14 +879,15 @@ func (h *Hub) broadcastToRoom(room *state.Room, msgType string, data any) {
 
 func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 	out := protocol.RoomStatePayload{
-		ID:             r.ID,
-		Name:           r.Name,
-		MaxPlayers:     r.MaxPlayers,
-		Delay:          r.Delay,
-		Prediction:     r.Prediction,
-		Pacing:         r.Pacing,
-		DelayAuto:      r.DelayAuto,
-		PredictionAuto: r.PredictionAuto,
+		ID:                r.ID,
+		Name:              r.Name,
+		MaxPlayers:        r.MaxPlayers,
+		Delay:             r.Delay,
+		Prediction:        r.Prediction,
+		Pacing:            r.Pacing,
+		DelayAuto:         r.DelayAuto,
+		PredictionAuto:    r.PredictionAuto,
+		LiveReplayEnabled: r.LiveReplayEnabled(),
 		Rom: protocol.RomInfo{
 			Name:   r.RomName,
 			MD5:    r.RomMD5,

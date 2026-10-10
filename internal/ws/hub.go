@@ -42,6 +42,10 @@ type Hub struct {
 	mu      sync.Mutex
 	clients map[uint64]*Client // keyed by user id
 
+	// Orders room-list snapshots and viewer counts through enqueue. Acquire
+	// before broadcast locks, and never while holding mu.
+	roomListMu sync.Mutex
+
 	register   chan *Client
 	unregister chan *Client
 
@@ -355,6 +359,8 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleRoomUpdatePlayerSettings(c, env)
 	case protocol.TypeRoomUpdatePrediction:
 		h.handleRoomUpdatePrediction(c, env)
+	case protocol.TypeRoomUpdateLiveReplay:
+		h.handleRoomUpdateLiveReplay(c, env)
 	case protocol.TypeRoomSwapSlots:
 		h.handleRoomSwapSlots(c, env)
 	case protocol.TypePingProbeRequest:

@@ -25,6 +25,7 @@ const (
 	TypeRoomUpdateDelay          = "ROOM_UPDATE_DELAY"
 	TypeRoomUpdatePlayerSettings = "ROOM_UPDATE_PLAYER_SETTINGS"
 	TypeRoomUpdatePrediction     = "ROOM_UPDATE_PREDICTION"
+	TypeRoomUpdateLiveReplay     = "ROOM_UPDATE_LIVE_REPLAY"
 	TypeRoomSwapSlots            = "ROOM_SWAP_SLOTS"
 	TypePingProbeRequest         = "PING_PROBE_REQUEST"
 	TypeMatchConnected           = "MATCH_CONNECTED"
@@ -228,6 +229,11 @@ type RoomUpdatePredictionRequest struct {
 	PredictionAuto bool `json:"predictionAuto"`
 }
 
+// RoomUpdateLiveReplayRequest publishes the host's live replay choice.
+type RoomUpdateLiveReplayRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
 type PingProbeRequestPayload struct {
 	TargetUserID uint64 `json:"targetUserId"`
 }
@@ -343,6 +349,7 @@ type RoomSummary struct {
 	StartedAt    int64    `json:"startedAt,omitempty"`    // match start, unix ms (0 until in-game)
 	Broadcasting bool     `json:"broadcasting,omitempty"` // a player is streaming this match for spectators
 	MatchID      uint64   `json:"matchId,omitempty"`      // current match id (set while in-game), for SPECTATE_START
+	ViewerCount  int      `json:"viewerCount,omitempty"`  // live replay audience; omitted at zero
 }
 
 type RoomListPayload struct {
@@ -375,10 +382,11 @@ type RoomStatePayload struct {
 	Pacing int `json:"pacing"`
 	// DelayAuto is retained for older clients. PredictionAuto describes the
 	// host-owned room prediction selection (Default versus an explicit value).
-	DelayAuto      bool              `json:"delayAuto"`
-	PredictionAuto bool              `json:"predictionAuto"`
-	Players        []RoomSeatPayload `json:"players"`
-	State          string            `json:"state"`
+	DelayAuto         bool              `json:"delayAuto"`
+	PredictionAuto    bool              `json:"predictionAuto"`
+	LiveReplayEnabled bool              `json:"liveReplayEnabled"`
+	Players           []RoomSeatPayload `json:"players"`
+	State             string            `json:"state"`
 }
 
 type RoomJoinFailPayload struct {
@@ -450,7 +458,8 @@ type QuickMatchStatusPayload struct {
 // server-owned logical offset so receivers can reject gaps and duplicates.
 
 type BroadcastBeginRequest struct {
-	MatchID uint64 `json:"matchId"`
+	MatchID  uint64 `json:"matchId"`
+	Manifest string `json:"manifest,omitempty"` // base64 player prematch manifest
 }
 
 type BroadcastDataRequest struct {
@@ -472,7 +481,8 @@ type SpectateStopRequest struct {
 }
 
 type SpectateBeginPayload struct {
-	MatchID uint64 `json:"matchId"`
+	MatchID  uint64 `json:"matchId"`
+	Manifest string `json:"manifest,omitempty"` // same manifest, before keyframe/input data
 }
 
 type SpectateDataPayload struct {

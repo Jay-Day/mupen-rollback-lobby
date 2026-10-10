@@ -91,6 +91,75 @@ func TestRoomPredictionUpdateIsHostOnly(t *testing.T) {
 	}
 }
 
+func TestRoomLiveReplayChoiceIsSharedAndHostOnly(t *testing.T) {
+	hostMessages := make(chan []byte, 4)
+	guestMessages := make(chan []byte, 4)
+	host := &state.User{ID: 1, Username: "host", Send: hostMessages}
+	guest := &state.User{ID: 2, Username: "guest", Send: guestMessages}
+	room := &state.Room{
+		ID: 10, Host: host, MaxPlayers: 2, State: state.RoomStateWaiting,
+	}
+	for _, user := range []*state.User{host, guest} {
+		if err := room.AddPlayer(user); err != nil {
+			t.Fatalf("AddPlayer: %v", err)
+		}
+		user.CurrentRoom = room
+	}
+	h := &Hub{}
+	update := func(user *state.User, enabled bool) {
+		data, err := json.Marshal(protocol.RoomUpdateLiveReplayRequest{Enabled: enabled})
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.dispatch(&Client{user: user}, protocol.Envelope{
+			Type: protocol.TypeRoomUpdateLiveReplay, Data: data,
+		})
+	}
+	checkState := func(data []byte, enabled bool) {
+		t.Helper()
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(data, &fields); err != nil {
+			t.Fatal(err)
+		}
+		value, present := fields["liveReplayEnabled"]
+		var got bool
+		if !present || json.Unmarshal(value, &got) != nil || got != enabled {
+			t.Fatalf("liveReplayEnabled = %s (present %v), want %v", value, present, enabled)
+		}
+	}
+	for _, enabled := range []bool{true, false} {
+		update(host, enabled)
+		for name, messages := range map[string]chan []byte{"host": hostMessages, "guest": guestMessages} {
+			select {
+			case data := <-messages:
+				var env protocol.Envelope
+				if err := json.Unmarshal(data, &env); err != nil {
+					t.Fatal(err)
+				}
+				if env.Type != protocol.TypeRoomState {
+					t.Fatalf("message = %s, want ROOM_STATE", env.Type)
+				}
+				checkState(env.Data, enabled)
+			default:
+				t.Fatalf("%s did not receive room state", name)
+			}
+		}
+		update(guest, !enabled)
+		if room.LiveReplayEnabled() != enabled || len(host.Send) != 0 || len(guest.Send) != 0 {
+			t.Fatal("guest changed or broadcast the live replay choice")
+		}
+		// Joining players receive the same choice in their initial snapshot.
+		checkState(mustMarshal(roomStatePayload(room)), enabled)
+	}
+	for _, phase := range []state.RoomState{state.RoomStateStarting, state.RoomStateInGame} {
+		room.SetState(phase)
+		update(host, true)
+		if room.LiveReplayEnabled() || len(host.Send) != 0 || len(guest.Send) != 0 {
+			t.Fatalf("host changed live replay during %s", phase)
+		}
+	}
+}
+
 func TestCompatibilityPlayerSettingsCannotChangePrediction(t *testing.T) {
 	guest := &state.User{ID: 2, Username: "guest"}
 	room := &state.Room{

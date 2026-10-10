@@ -23,6 +23,7 @@ type broadcast struct {
 	roomID         uint64
 	broadcasterID  uint64
 	participantIDs []uint64
+	manifest       string // immutable base64 prematch settings from the host
 	path           string
 
 	mu         sync.Mutex
@@ -113,24 +114,37 @@ func newBroadcastManager(hub *Hub) *broadcastManager {
 	}
 }
 
-// roomBroadcast reports whether the given room's current match is being
-// broadcast and, if so, the match id (so the room list can flag it and tell
-// spectators what to SPECTATE_START).
-func (m *broadcastManager) roomBroadcast(roomID uint64) (matchID uint64, ok bool) {
+// roomBroadcast reports the current broadcast and audience size for room lists.
+func (m *broadcastManager) roomBroadcast(roomID uint64) (matchID uint64, ok bool, viewerCount int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, b := range m.byMatch {
 		if b.roomID == roomID {
-			return b.matchID, true
+			b.mu.Lock()
+			count := len(b.spectators)
+			b.mu.Unlock()
+			return b.matchID, true, count
 		}
 	}
-	return 0, false
+	return 0, false, 0
 }
 
 // begin registers a new broadcast and opens its spool file. Returns false if
 // the match is already being broadcast (first broadcaster wins) or the file
 // can't be opened.
-func (m *broadcastManager) begin(matchID, roomID, broadcasterID uint64, participantIDs []uint64) bool {
+func (m *broadcastManager) begin(matchID, roomID, broadcasterID uint64, participantIDs []uint64, manifest string) bool {
+	// Keep the base64 manifest plus its envelope below the 1 MiB WebSocket limit.
+	// Empty is allowed for older broadcasters; new viewers reject missing settings.
+	const maxManifestBytes = 512 * 1024
+	if len(manifest) > base64.StdEncoding.EncodedLen(maxManifestBytes) {
+		return false
+	}
+	if manifest != "" {
+		decoded, err := base64.StdEncoding.DecodeString(manifest)
+		if err != nil || len(decoded) > maxManifestBytes {
+			return false
+		}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, exists := m.byMatch[matchID]; exists {
@@ -147,6 +161,7 @@ func (m *broadcastManager) begin(matchID, roomID, broadcasterID uint64, particip
 		roomID:         roomID,
 		broadcasterID:  broadcasterID,
 		participantIDs: append([]uint64(nil), participantIDs...),
+		manifest:       manifest,
 		path:           path,
 		file:           f,
 		spectators:     make(map[uint64]*broadcastSpectator),
@@ -348,42 +363,15 @@ func stopBroadcastSpectator(sc *broadcastSpectator) {
 	close(sc.done)
 }
 
-// notifyViewerCountLocked publishes the current authoritative audience size to
-// every match participant and active viewer. Call with b.mu held so membership
-// mutations and their notifications retain the same order.
-func (m *broadcastManager) notifyViewerCountLocked(b *broadcast) {
+// notifyViewerCount snapshots and publishes the latest audience size in the
+// same order as room lists. Call without broadcast locks: membership may change
+// while waiting to publish, so read the count only after acquiring roomListMu.
+func (m *broadcastManager) notifyViewerCount(matchID uint64) {
 	if m.hub == nil {
 		return
 	}
-	payload := protocol.BroadcastViewerCountPayload{
-		MatchID:     b.matchID,
-		ViewerCount: len(b.spectators),
-	}
-	notified := make(map[uint64]struct{}, len(b.participantIDs)+len(b.spectators)+1)
-	for _, userID := range b.participantIDs {
-		if _, exists := notified[userID]; exists {
-			continue
-		}
-		notified[userID] = struct{}{}
-		if participant := m.hub.getClient(userID); participant != nil {
-			participant.sendEnvelope(protocol.TypeBroadcastViewerCount, "", payload)
-		}
-	}
-	// Defensive fallback for broadcasts created without a participant snapshot.
-	if _, exists := notified[b.broadcasterID]; !exists {
-		notified[b.broadcasterID] = struct{}{}
-		if broadcaster := m.hub.getClient(b.broadcasterID); broadcaster != nil {
-			broadcaster.sendEnvelope(protocol.TypeBroadcastViewerCount, "", payload)
-		}
-	}
-	for userID, sc := range b.spectators {
-		if _, exists := notified[userID]; !exists {
-			sc.client.sendEnvelope(protocol.TypeBroadcastViewerCount, "", payload)
-		}
-	}
-}
-
-func (m *broadcastManager) notifyViewerCount(matchID uint64) {
+	m.hub.roomListMu.Lock()
+	defer m.hub.roomListMu.Unlock()
 	m.mu.Lock()
 	b := m.byMatch[matchID]
 	m.mu.Unlock()
@@ -391,8 +379,12 @@ func (m *broadcastManager) notifyViewerCount(matchID uint64) {
 		return
 	}
 	b.mu.Lock()
-	m.notifyViewerCountLocked(b)
+	payload := protocol.BroadcastViewerCountPayload{
+		MatchID:     b.matchID,
+		ViewerCount: len(b.spectators),
+	}
 	b.mu.Unlock()
+	m.hub.broadcastToAll(protocol.TypeBroadcastViewerCount, payload, 0)
 }
 
 // pumpSpectator runs one ordered producer per viewer. It reads only from the
@@ -427,14 +419,20 @@ func (m *broadcastManager) pumpSpectator(b *broadcast, userID uint64, sc *broadc
 // and enqueue happen while holding b.mu, keeping stream order atomic with
 // spectate stop/end and with replacement subscriptions from the same user.
 func (m *broadcastManager) pumpSpectatorChunk(b *broadcast, userID uint64, sc *broadcastSpectator) (bool, bool) {
+	viewersChanged := false
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	defer func() {
+		b.mu.Unlock()
+		if viewersChanged {
+			m.notifyViewerCount(b.matchID)
+		}
+	}()
 	if b.closed || sc.stopped || b.spectators[userID] != sc {
 		return false, false
 	}
 	if !sc.beginSent {
 		if !sc.client.trySendEnvelopeReserved(protocol.TypeSpectateBegin, "",
-			protocol.SpectateBeginPayload{MatchID: b.matchID}, spectateQueueReserve) {
+			protocol.SpectateBeginPayload{MatchID: b.matchID, Manifest: b.manifest}, spectateQueueReserve) {
 			return false, true
 		}
 		sc.beginSent = true
@@ -494,7 +492,7 @@ func (m *broadcastManager) pumpSpectatorChunk(b *broadcast, userID uint64, sc *b
 		sc.client.sendEnvelope(protocol.TypeSpectateEnd, "", protocol.SpectateEndPayload{
 			MatchID: b.matchID, Reason: "stream_read_error",
 		})
-		m.notifyViewerCountLocked(b)
+		viewersChanged = true
 		return false, false
 	}
 
@@ -574,8 +572,8 @@ func (m *broadcastManager) spectateStart(c *Client, matchID uint64) {
 	}
 
 	b.spectators[c.user.ID] = sc
-	m.notifyViewerCountLocked(b)
 	b.mu.Unlock()
+	m.notifyViewerCount(matchID)
 	go m.pumpSpectator(b, c.user.ID, sc)
 	slog.Info("spectate start", "mode", mode, "match", matchID, "user", c.user.Username,
 		"history_bytes", historyBytes)
@@ -588,13 +586,17 @@ func (m *broadcastManager) spectateStop(userID, matchID uint64) {
 	if b == nil {
 		return
 	}
+	viewersChanged := false
 	b.mu.Lock()
 	if sc := b.spectators[userID]; sc != nil {
 		stopBroadcastSpectator(sc)
 		delete(b.spectators, userID)
-		m.notifyViewerCountLocked(b)
+		viewersChanged = true
 	}
 	b.mu.Unlock()
+	if viewersChanged {
+		m.notifyViewerCount(matchID)
+	}
 }
 
 // endByMatch ends a broadcast regardless of who triggered it (match is over).
@@ -652,6 +654,7 @@ func (m *broadcastManager) finish(b *broadcast, reason string) bool {
 		})
 	}
 	if m.hub != nil {
+		m.hub.roomListMu.Lock()
 		notified := make(map[uint64]struct{}, len(b.participantIDs)+1)
 		for _, userID := range b.participantIDs {
 			if _, exists := notified[userID]; exists {
@@ -669,6 +672,7 @@ func (m *broadcastManager) finish(b *broadcast, reason string) bool {
 					protocol.BroadcastViewerCountPayload{MatchID: b.matchID, ViewerCount: 0})
 			}
 		}
+		m.hub.roomListMu.Unlock()
 	}
 	slog.Info("broadcast end", "match", b.matchID, "reason", reason, "spectators", len(specs))
 	return true
@@ -694,13 +698,17 @@ func (m *broadcastManager) onUserGone(userID uint64) {
 		m.finish(b, "broadcaster_left")
 	}
 	for _, b := range others {
+		viewersChanged := false
 		b.mu.Lock()
 		if sc := b.spectators[userID]; sc != nil {
 			stopBroadcastSpectator(sc)
 			delete(b.spectators, userID)
-			m.notifyViewerCountLocked(b)
+			viewersChanged = true
 		}
 		b.mu.Unlock()
+		if viewersChanged {
+			m.notifyViewerCount(b.matchID)
+		}
 	}
 	if len(ended) > 0 {
 		m.hub.broadcastRoomList()
@@ -733,7 +741,7 @@ func (h *Hub) handleBroadcastBegin(c *Client, env protocol.Envelope) {
 			participantIDs = append(participantIDs, player.ID)
 		}
 	}
-	if h.broadcasts.begin(match.ID, match.RoomID, c.user.ID, participantIDs) {
+	if h.broadcasts.begin(match.ID, match.RoomID, c.user.ID, participantIDs, req.Manifest) {
 		slog.Info("broadcast begin", "match", match.ID, "by", c.user.Username)
 		h.broadcasts.notifyViewerCount(match.ID)
 		h.broadcastRoomList() // flag the room as broadcasting
