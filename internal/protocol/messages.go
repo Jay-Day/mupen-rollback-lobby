@@ -351,6 +351,7 @@ type RoomSummary struct {
 	StartedAt    int64    `json:"startedAt,omitempty"`    // match start, unix ms (0 until in-game)
 	Broadcasting bool     `json:"broadcasting,omitempty"` // a player is streaming this match for spectators
 	MatchID      uint64   `json:"matchId,omitempty"`      // current match id (set while in-game), for SPECTATE_START
+	ViewerCount  int      `json:"viewerCount,omitempty"`  // live replay audience; omitted at zero
 }
 
 type RoomListPayload struct {
@@ -459,7 +460,8 @@ type QuickMatchStatusPayload struct {
 // server-owned logical offset so receivers can reject gaps and duplicates.
 
 type BroadcastBeginRequest struct {
-	MatchID uint64 `json:"matchId"`
+	MatchID  uint64 `json:"matchId"`
+	Manifest string `json:"manifest,omitempty"` // base64 player prematch manifest
 }
 
 type BroadcastDataRequest struct {
@@ -481,7 +483,8 @@ type SpectateStopRequest struct {
 }
 
 type SpectateBeginPayload struct {
-	MatchID uint64 `json:"matchId"`
+	MatchID  uint64 `json:"matchId"`
+	Manifest string `json:"manifest,omitempty"` // same manifest, before keyframe/input data
 }
 
 type SpectateDataPayload struct {

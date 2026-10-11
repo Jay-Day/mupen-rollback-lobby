@@ -46,11 +46,13 @@ func TestViewerCountTracksJoinStopAndDisconnect(t *testing.T) {
 	player := &Client{user: &state.User{ID: 13, Username: "player"}, send: make(chan []byte, 16)}
 	viewer1 := &Client{user: &state.User{ID: 11, Username: "viewer-one"}, send: make(chan []byte, 16)}
 	viewer2 := &Client{user: &state.User{ID: 12, Username: "viewer-two"}, send: make(chan []byte, 16)}
+	browser := &Client{user: &state.User{ID: 14, Username: "lobby-browser"}, send: make(chan []byte, 16)}
 	h := &Hub{clients: map[uint64]*Client{
 		broadcaster.user.ID: broadcaster,
 		player.user.ID:      player,
 		viewer1.user.ID:     viewer1,
 		viewer2.user.ID:     viewer2,
+		browser.user.ID:     browser,
 	}}
 	m := &broadcastManager{
 		hub:     h,
@@ -58,33 +60,34 @@ func TestViewerCountTracksJoinStopAndDisconnect(t *testing.T) {
 		byMatch: make(map[uint64]*broadcast),
 	}
 	h.broadcasts = m
-	if !m.begin(matchID, 1, broadcaster.user.ID, []uint64{broadcaster.user.ID, player.user.ID}) {
+	if !m.begin(matchID, 1, broadcaster.user.ID, []uint64{broadcaster.user.ID, player.user.ID}, "") {
 		t.Fatal("begin broadcast")
 	}
 	t.Cleanup(func() { m.endByMatch(matchID) })
+	checkCount := func(want int) {
+		t.Helper()
+		for _, c := range []*Client{broadcaster, player, viewer1, viewer2, browser} {
+			waitViewerCount(t, c, matchID, want)
+		}
+		gotMatch, live, count := m.roomBroadcast(1)
+		if gotMatch != matchID || !live || count != want {
+			t.Fatalf("room snapshot = match %d/live %v/count %d, want count %d", gotMatch, live, count, want)
+		}
+	}
 	m.notifyViewerCount(matchID)
-	waitViewerCount(t, broadcaster, matchID, 0)
-	waitViewerCount(t, player, matchID, 0)
+	checkCount(0)
 
 	m.spectateStart(viewer1, matchID)
-	waitViewerCount(t, broadcaster, matchID, 1)
-	waitViewerCount(t, player, matchID, 1)
-	waitViewerCount(t, viewer1, matchID, 1)
+	checkCount(1)
 
 	m.spectateStart(viewer2, matchID)
-	waitViewerCount(t, broadcaster, matchID, 2)
-	waitViewerCount(t, player, matchID, 2)
-	waitViewerCount(t, viewer1, matchID, 2)
-	waitViewerCount(t, viewer2, matchID, 2)
+	checkCount(2)
 
 	m.spectateStop(viewer1.user.ID, matchID)
-	waitViewerCount(t, broadcaster, matchID, 1)
-	waitViewerCount(t, player, matchID, 1)
-	waitViewerCount(t, viewer2, matchID, 1)
+	checkCount(1)
 
 	m.onUserGone(viewer2.user.ID)
-	waitViewerCount(t, broadcaster, matchID, 0)
-	waitViewerCount(t, player, matchID, 0)
+	checkCount(0)
 
 	if !m.endByMatch(matchID) {
 		t.Fatal("end broadcast")
@@ -100,7 +103,7 @@ func TestKeyframeAssemblyAcceptsManyPacedChunks(t *testing.T) {
 	}
 	const matchID uint64 = 88
 	const broadcasterID uint64 = 99
-	if !m.begin(matchID, 1, broadcasterID, nil) {
+	if !m.begin(matchID, 1, broadcasterID, nil, "") {
 		t.Fatal("begin broadcast")
 	}
 	t.Cleanup(func() { m.endByMatch(matchID) })
@@ -131,7 +134,8 @@ func TestSpectatePumpRetriesFullQueueWithoutGap(t *testing.T) {
 	}
 	const matchID uint64 = 11
 	const broadcasterID uint64 = 22
-	if !m.begin(matchID, 1, broadcasterID, nil) {
+	manifest := base64.StdEncoding.EncodeToString([]byte("host prematch settings with selected cheat options"))
+	if !m.begin(matchID, 1, broadcasterID, nil, manifest) {
 		t.Fatal("begin broadcast")
 	}
 	b := m.byMatch[matchID]
@@ -181,6 +185,13 @@ func TestSpectatePumpRetriesFullQueueWithoutGap(t *testing.T) {
 			case protocol.TypeSpectateBegin:
 				if beginSeen {
 					t.Fatal("duplicate SPECTATE_BEGIN")
+				}
+				var payload protocol.SpectateBeginPayload
+				if err := json.Unmarshal(env.Data, &payload); err != nil {
+					t.Fatal(err)
+				}
+				if payload.MatchID != matchID || payload.Manifest != manifest {
+					t.Fatal("spectator did not receive the host manifest before input data")
 				}
 				beginSeen = true
 			case protocol.TypeSpectateData:
@@ -242,7 +253,8 @@ func TestKeyframeSpectateStreamHasContiguousLogicalOffsets(t *testing.T) {
 	}
 	const matchID uint64 = 44
 	const broadcasterID uint64 = 55
-	if !m.begin(matchID, 1, broadcasterID, nil) {
+	manifest := base64.StdEncoding.EncodeToString([]byte("host prematch settings for late spectators"))
+	if !m.begin(matchID, 1, broadcasterID, nil, manifest) {
 		t.Fatal("begin broadcast")
 	}
 	b := m.byMatch[matchID]
@@ -298,6 +310,13 @@ func TestKeyframeSpectateStreamHasContiguousLogicalOffsets(t *testing.T) {
 			}
 			switch env.Type {
 			case protocol.TypeSpectateBegin:
+				var payload protocol.SpectateBeginPayload
+				if err := json.Unmarshal(env.Data, &payload); err != nil {
+					t.Fatal(err)
+				}
+				if payload.MatchID != matchID || payload.Manifest != manifest {
+					t.Fatal("late spectator did not receive the host manifest before the keyframe")
+				}
 				beginSeen = true
 			case protocol.TypeSpectateKeyframe:
 				if !beginSeen || dataSeen {

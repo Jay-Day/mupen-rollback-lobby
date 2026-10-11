@@ -829,7 +829,7 @@ func (h *Hub) buildRoomListPayload() protocol.RoomListPayload {
 		if r.Host != nil {
 			hostName = r.Host.Username
 		}
-		matchID, broadcasting := h.broadcasts.roomBroadcast(id)
+		matchID, broadcasting, viewerCount := h.broadcasts.roomBroadcast(id)
 		payload.Rooms = append(payload.Rooms, protocol.RoomSummary{
 			ID:       id,
 			Name:     r.Name,
@@ -848,16 +848,21 @@ func (h *Hub) buildRoomListPayload() protocol.RoomListPayload {
 			StartedAt:    r.StartedAtUnixMs(),
 			Broadcasting: broadcasting,
 			MatchID:      matchID,
+			ViewerCount:  viewerCount,
 		})
 	}
 	return payload
 }
 
 func (h *Hub) broadcastRoomList() {
+	h.roomListMu.Lock()
+	defer h.roomListMu.Unlock()
 	h.broadcastToAll(protocol.TypeRoomList, h.buildRoomListPayload(), 0)
 }
 
 func (h *Hub) sendRoomListTo(c *Client) {
+	h.roomListMu.Lock()
+	defer h.roomListMu.Unlock()
 	c.sendEnvelope(protocol.TypeRoomList, "", h.buildRoomListPayload())
 }
 
