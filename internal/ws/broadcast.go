@@ -599,6 +599,35 @@ func (m *broadcastManager) spectateStop(userID, matchID uint64) {
 	}
 }
 
+// spectatorChat relays a chat line from a spectator to every viewer of the
+// broadcast they're watching, the sender included so it echoes like room chat.
+// The match's players aren't spectators, so they never receive it. A sender
+// who isn't watching anything is ignored.
+func (m *broadcastManager) spectatorChat(senderID uint64, payload protocol.ChatMsgPayload) {
+	m.mu.Lock()
+	all := make([]*broadcast, 0, len(m.byMatch))
+	for _, b := range m.byMatch {
+		all = append(all, b)
+	}
+	m.mu.Unlock()
+
+	for _, b := range all {
+		b.mu.Lock()
+		if b.closed || b.spectators[senderID] == nil {
+			b.mu.Unlock()
+			continue
+		}
+		viewers := make([]*Client, 0, len(b.spectators))
+		for _, sc := range b.spectators {
+			viewers = append(viewers, sc.client)
+		}
+		b.mu.Unlock()
+		for _, c := range viewers {
+			c.sendEnvelope(protocol.TypeChatMsg, "", payload)
+		}
+	}
+}
+
 // endByMatch ends a broadcast regardless of who triggered it (match is over).
 func (m *broadcastManager) endByMatch(matchID uint64) bool {
 	m.mu.Lock()

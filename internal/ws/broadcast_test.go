@@ -360,3 +360,92 @@ func TestKeyframeSpectateStreamHasContiguousLogicalOffsets(t *testing.T) {
 		t.Fatal("keyframe krec header/tail differs")
 	}
 }
+
+// queuedChat drains everything queued for c and returns its CHAT_MSG payloads.
+func queuedChat(t *testing.T, c *Client) []protocol.ChatMsgPayload {
+	t.Helper()
+	var out []protocol.ChatMsgPayload
+	for {
+		select {
+		case raw := <-c.send:
+			var env protocol.Envelope
+			if err := json.Unmarshal(raw, &env); err != nil {
+				t.Fatalf("decode envelope: %v", err)
+			}
+			if env.Type != protocol.TypeChatMsg {
+				continue
+			}
+			var payload protocol.ChatMsgPayload
+			if err := json.Unmarshal(env.Data, &payload); err != nil {
+				t.Fatalf("decode chat payload: %v", err)
+			}
+			out = append(out, payload)
+		default:
+			return out
+		}
+	}
+}
+
+func TestSpectatorChatReachesOnlyThatBroadcastsViewers(t *testing.T) {
+	const matchA, matchB uint64 = 1, 2
+	newClient := func(id uint64, name string) *Client {
+		return &Client{user: &state.User{ID: id, Username: name}, send: make(chan []byte, 16)}
+	}
+	host := newClient(10, "host")
+	player := newClient(13, "player")
+	viewer1 := newClient(11, "viewer-one")
+	viewer2 := newClient(12, "viewer-two")
+	otherHost := newClient(20, "other-host")
+	otherViewer := newClient(21, "other-viewer")
+	browser := newClient(14, "lobby-browser")
+	everyone := []*Client{host, player, viewer1, viewer2, otherHost, otherViewer, browser}
+
+	m := &broadcastManager{dir: t.TempDir(), byMatch: make(map[uint64]*broadcast)}
+	h := &Hub{broadcasts: m}
+	if !m.begin(matchA, 1, host.user.ID, []uint64{host.user.ID, player.user.ID}, "") ||
+		!m.begin(matchB, 2, otherHost.user.ID, []uint64{otherHost.user.ID}, "") {
+		t.Fatal("begin broadcasts")
+	}
+	t.Cleanup(func() {
+		m.endByMatch(matchA)
+		m.endByMatch(matchB)
+	})
+	m.spectateStart(viewer1, matchA)
+	m.spectateStart(viewer2, matchA)
+	m.spectateStart(otherViewer, matchB)
+
+	send := func(from *Client, message string) {
+		h.handleChatSend(from, protocol.Envelope{
+			Type: protocol.TypeChatSend,
+			Data: mustMarshal(protocol.ChatSendRequest{Channel: channelSpectate, Message: message}),
+		})
+	}
+	expect := func(want map[*Client]bool, message string) {
+		t.Helper()
+		for _, c := range everyone {
+			got := queuedChat(t, c)
+			if !want[c] {
+				if len(got) != 0 {
+					t.Fatalf("%s received spectator chat %q", c.user.Username, got[0].Message)
+				}
+				continue
+			}
+			if len(got) != 1 || got[0].Message != message || got[0].Channel != channelSpectate {
+				t.Fatalf("%s received %+v, want one %q on %q", c.user.Username, got, message, channelSpectate)
+			}
+		}
+	}
+
+	send(viewer1, "nice combo")
+	expect(map[*Client]bool{viewer1: true, viewer2: true}, "nice combo")
+
+	// Players, lobby users and viewers of another match can't post into it.
+	send(host, "from the match")
+	send(player, "from the match")
+	send(browser, "from the lobby")
+	expect(nil, "")
+
+	m.spectateStop(viewer2.user.ID, matchA)
+	send(viewer1, "anyone here?")
+	expect(map[*Client]bool{viewer1: true}, "anyone here?")
+}
