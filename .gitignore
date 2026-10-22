@@ -9,3 +9,6 @@
 .vscode/
 admins.json
 bans.json
+rmgk.db
+rmgk.db-*
+ranked.json

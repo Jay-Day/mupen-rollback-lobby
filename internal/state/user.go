@@ -38,10 +38,17 @@ type User struct {
 	Connection    string // self-reported transport medium ("wifi"/"lan"/...)
 	ICESupported  bool   // room-scoped libjuice signaling/transport support
 
+	// Set once at HELLO when the user logged into a registered account;
+	// read-only afterwards. Guests have AccountID 0.
+	AccountID    int64
+	SessionToken string // remember-me token issued at HELLO, for ACCOUNT_LOGOUT
+
 	PingToServer uint16
 
 	CurrentRoom  *Room
 	CurrentMatch *Match
+	// Live replay being watched while State is spectating (0 = none).
+	WatchingMatchID uint64
 
 	JoinedAt time.Time
 	LastSeen time.Time
@@ -61,6 +68,49 @@ func (u *User) SetState(s UserState) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	u.State = s
+}
+
+// StartWatching marks the user as spectating matchID. Only a user doing
+// nothing else becomes "spectating": a seated, searching or playing user keeps
+// that state. Reports whether the presence changed.
+func (u *User) StartWatching(matchID uint64) bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	switch u.State {
+	case UserStateIdle, UserStateBrowsing, UserStateAway, UserStateSpectating:
+	default:
+		return false
+	}
+	changed := u.State != UserStateSpectating || u.WatchingMatchID != matchID
+	u.State = UserStateSpectating
+	u.WatchingMatchID = matchID
+	return changed
+}
+
+// StopWatching ends watching matchID (watching another match is kept) and
+// returns a spectating user to idle. Reports whether the presence changed.
+func (u *User) StopWatching(matchID uint64) bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.WatchingMatchID != matchID {
+		return false
+	}
+	u.WatchingMatchID = 0
+	if u.State != UserStateSpectating {
+		return false
+	}
+	u.State = UserStateIdle
+	return true
+}
+
+// WatchingMatch returns the live replay the user is spectating, 0 if none.
+func (u *User) WatchingMatch() uint64 {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	if u.State != UserStateSpectating {
+		return 0
+	}
+	return u.WatchingMatchID
 }
 
 func (u *User) GetUDPEndpoint() (string, uint16) {
@@ -93,3 +143,6 @@ func (u *User) SetPingToServer(rtt uint16) {
 	defer u.mu.Unlock()
 	u.PingToServer = rtt
 }
+
+// Verified reports whether the user is logged into a registered account.
+func (u *User) Verified() bool { return u.AccountID != 0 }

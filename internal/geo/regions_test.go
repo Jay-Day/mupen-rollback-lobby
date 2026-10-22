@@ -53,3 +53,25 @@ func TestRefineNorthAmerica(t *testing.T) {
 		})
 	}
 }
+
+func TestEstimatedRTTAndContinents(t *testing.T) {
+	if got := EstimatedRTT(RegionUSEast, RegionEUWest); got != 90 {
+		t.Fatalf("us-east to eu-west = %d", got)
+	}
+	if EstimatedRTT(RegionOceania, RegionEUEast) != EstimatedRTT(RegionEUEast, RegionOceania) {
+		t.Fatal("estimates aren't symmetric")
+	}
+	if got := EstimatedRTT("", RegionUSEast); got != 0 {
+		t.Fatalf("unknown region = %d", got)
+	}
+	for region, want := range map[string]string{
+		RegionUSWest: "na", RegionSA: "sa", RegionEUEast: "eu", RegionAsiaSE: "asia", RegionOceania: "oc", "": "",
+	} {
+		if got := ContinentOf(region); got != want {
+			t.Fatalf("ContinentOf(%q) = %q, want %q", region, got, want)
+		}
+		if want != "" && ContinentName(want) == "" {
+			t.Fatalf("continent %q has no name", want)
+		}
+	}
+}
