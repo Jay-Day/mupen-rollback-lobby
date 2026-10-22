@@ -56,8 +56,86 @@ type Room struct {
 	CreatedAt time.Time
 	StartedAt time.Time // set when the match goes in-game; zero until then
 
+	// Ranked is non-nil while the room is ranked. Read it via GetRanked.
+	Ranked *RankedSettings
+
+	// peerPings: measured round trips (ms) reported by players, per pair
+	peerPings map[[2]uint64]int
+
 	kickedUserIDs   map[uint64]struct{} // active connection identity
 	kickedUsernames map[string]struct{} // survives reconnects with the same name
+}
+
+// RankedSettings are a ranked room's server-validated set settings.
+type RankedSettings struct {
+	LadderID         string
+	ModuleID         string
+	RulesetID        string
+	BestOf           int
+	MaxTierGap       int // 0 = any verified player
+	AllowProvisional bool
+	// TeamSize is players per side: 1 (1v1) or 2 (2v2 team battle).
+	TeamSize int
+	// MaxPing (ms) between players; 0 = any.
+	MaxPing int
+	// Teammates (team sets): users the lobby matched as teammates, a chosen
+	// or kept team of a quick match. Each pair must play on one team.
+	Teammates [][2]uint64
+}
+
+func pingPair(a, b uint64) [2]uint64 {
+	if a > b {
+		a, b = b, a
+	}
+	return [2]uint64{a, b}
+}
+
+// SetPeerPing records a measured round trip between two players.
+func (r *Room) SetPeerPing(a, b uint64, rttMs int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.peerPings == nil {
+		r.peerPings = make(map[[2]uint64]int)
+	}
+	r.peerPings[pingPair(a, b)] = rttMs
+}
+
+// PeerPing returns the last measured round trip between two players.
+func (r *Room) PeerPing(a, b uint64) (int, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	rtt, ok := r.peerPings[pingPair(a, b)]
+	return rtt, ok
+}
+
+// Players is how many players a ranked set needs.
+func (s *RankedSettings) Players() int {
+	if s.TeamSize < 1 {
+		return 2
+	}
+	return 2 * s.TeamSize
+}
+
+// GetRanked returns a copy of the ranked settings, nil when unranked.
+func (r *Room) GetRanked() *RankedSettings {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.Ranked == nil {
+		return nil
+	}
+	copy := *r.Ranked
+	return &copy
+}
+
+// SetRanked replaces the ranked settings (nil = unranked). Turning ranked on
+// sizes the room for the set: two seats for 1v1, four for 2v2.
+func (r *Room) SetRanked(settings *RankedSettings) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.Ranked = settings
+	if settings != nil {
+		r.MaxPlayers = settings.Players()
+	}
 }
 
 type RoomSeat struct {

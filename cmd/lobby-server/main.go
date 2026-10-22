@@ -9,14 +9,21 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/jay-day/rmgk-lobby/internal/accounts"
+	"github.com/jay-day/rmgk-lobby/internal/clientip"
+	"github.com/jay-day/rmgk-lobby/internal/discord"
+	"github.com/jay-day/rmgk-lobby/internal/mail"
 	"github.com/jay-day/rmgk-lobby/internal/moderation"
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
+	"github.com/jay-day/rmgk-lobby/internal/ranked"
 	"github.com/jay-day/rmgk-lobby/internal/ratelimit"
 	"github.com/jay-day/rmgk-lobby/internal/state"
 	"github.com/jay-day/rmgk-lobby/internal/udp"
+	"github.com/jay-day/rmgk-lobby/internal/web"
 	"github.com/jay-day/rmgk-lobby/internal/ws"
 )
 
@@ -84,6 +91,30 @@ func main() {
 	}
 	hub := ws.NewHub(gameState, *udpPublicAddr, iceConfig, mod)
 
+	// Accounts, ratings and set history persist in SQLite; the ranked config
+	// lists which ROMs can be played ranked. A missing ranked.json leaves
+	// accounts on and ranked rooms unavailable.
+	dbPath := envOr("RMGK_DB_PATH", "rmgk.db")
+	store, err := accounts.Open(dbPath)
+	if err != nil {
+		slog.Error("account database open failed", "path", dbPath, "err", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+	rankedPath := envOr("RMGK_RANKED_PATH", "ranked.json")
+	rankedConfig, err := ranked.Load(rankedPath)
+	if err != nil {
+		slog.Error("ranked config load failed", "path", rankedPath, "err", err)
+		os.Exit(1)
+	}
+	hub.EnableAccounts(store, rankedConfig)
+	replayDir := envOr("RMGK_REPLAY_DIR", "replays")
+	if err := hub.SetReplayDir(replayDir); err != nil {
+		slog.Error("replay directory unavailable", "path", replayDir, "err", err)
+		os.Exit(1)
+	}
+	slog.Info("accounts ready", "db", dbPath, "ranked_config", rankedPath, "ladders", len(rankedConfig.Ladders))
+
 	udpListenAddr, err := net.ResolveUDPAddr("udp", *udpAddr)
 	if err != nil {
 		slog.Error("failed to resolve UDP address", "err", err)
@@ -105,9 +136,26 @@ func main() {
 	go gate.Janitor(rootCtx)
 	go hub.Run(rootCtx)
 
+	// Behind a reverse proxy every connection comes from the proxy: list it
+	// so client addresses (bans, rate limits) come from X-Forwarded-For.
+	proxies, err := clientip.Parse(os.Getenv("RMGK_TRUSTED_PROXIES"))
+	if err != nil {
+		slog.Error("RMGK_TRUSTED_PROXIES is invalid", "err", err)
+		os.Exit(1)
+	}
+	if proxies.Proxies() > 0 {
+		slog.Info("trusting reverse proxies for client addresses", "ranges", proxies.Proxies())
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		ip := extractIP(r)
+		ip := proxies.IP(r)
+		// before the gate, so another site can't spend a visitor's budget
+		if ws.CrossSiteBrowser(r) {
+			http.Error(w, "cross-site connections are not allowed", http.StatusForbidden)
+			slog.Debug("refused cross-site websocket", "ip", ip, "origin", r.Header.Get("Origin"))
+			return
+		}
 		allowed, retryAfter := gate.Allow(ip)
 		if !allowed {
 			w.Header().Set("Retry-After", retryAfterHeader(retryAfter))
@@ -120,6 +168,38 @@ func main() {
 		defer gate.Release(ip)
 		hub.ServeWS(w, r, ip)
 	})
+	// Public rankings page and its read-only API.
+	site := web.New(store, rankedConfig, replayDir)
+	site.SetClientIP(proxies.IP)
+	// Discord sign-in (optional): an easier way into accounts that keep their passwords
+	if discordCfg, err := discord.ConfigFromEnv(); err != nil {
+		slog.Error("Discord sign-in settings are invalid", "err", err)
+		os.Exit(1)
+	} else if discordCfg != nil {
+		discordClient := discord.New(*discordCfg)
+		hub.EnableDiscord(discordClient)
+		site.EnableDiscord(discordClient)
+		slog.Info("Discord sign-in enabled", "redirects", strings.Join(discordCfg.RedirectURIs, ","))
+	}
+	// Email (optional): players can confirm an address and email themselves
+	// a password reset code instead of asking a moderator
+	if mailCfg, err := mail.ConfigFromEnv(); err != nil {
+		slog.Error("email settings are invalid", "err", err)
+		os.Exit(1)
+	} else if mailCfg != nil {
+		hub.EnableEmail(mail.New(*mailCfg))
+		site.EnableEmail(hub.RequestPasswordResetEmail)
+		slog.Info("email enabled", "host", mailCfg.Host, "port", mailCfg.Port,
+			"security", mailCfg.Security, "from", mailCfg.From.Address)
+	}
+	// admin pages: the same moderators as the lobby's /login
+	site.EnableAdmin(mod, web.AdminHooks{
+		SetResolved: hub.NotifySetResolved,
+		AccountDisabled: func(accountID int64) {
+			hub.DisconnectAccount(accountID, "This account was disabled by a moderator.")
+		},
+	})
+	site.Register(mux)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
@@ -155,14 +235,6 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
-}
-
-func extractIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
 }
 
 func retryAfterHeader(d time.Duration) string {

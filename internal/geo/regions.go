@@ -174,3 +174,80 @@ func isPublicUnicast(ip net.IP) bool {
 	}
 	return true
 }
+
+// regionOrder indexes rttMatrix; it mirrors the client's LobbyRegions.
+var regionOrder = []string{
+	RegionUSEast, RegionUSCentral, RegionUSWest, RegionSA, RegionEUWest,
+	RegionEUEast, RegionAsiaEast, RegionAsiaSE, RegionOceania,
+}
+
+// rttMatrix is the client's rough round-trip estimate (ms) between regions
+// (LobbyRegions.hpp kRttMatrix); keep the two in sync.
+var rttMatrix = [9][9]int{
+	{30, 40, 80, 140, 90, 120, 180, 220, 200},
+	{40, 30, 50, 150, 110, 140, 170, 210, 190},
+	{80, 50, 30, 170, 140, 170, 140, 180, 160},
+	{140, 150, 170, 30, 180, 210, 240, 270, 220},
+	{90, 110, 140, 180, 30, 50, 220, 200, 280},
+	{120, 140, 170, 210, 50, 30, 200, 180, 300},
+	{180, 170, 140, 240, 220, 200, 30, 60, 110},
+	{220, 210, 180, 270, 200, 180, 60, 30, 100},
+	{200, 190, 160, 220, 280, 300, 110, 100, 30},
+}
+
+func regionIndex(region string) int {
+	for i, r := range regionOrder {
+		if r == region {
+			return i
+		}
+	}
+	return -1
+}
+
+// EstimatedRTT is the rough round trip between two regions in ms, or 0 when
+// either is unknown (callers treat 0 as "no estimate").
+func EstimatedRTT(a, b string) int {
+	ia, ib := regionIndex(a), regionIndex(b)
+	if ia < 0 || ib < 0 {
+		return 0
+	}
+	return rttMatrix[ia][ib]
+}
+
+// Continent groups regions for regional rankings.
+type Continent struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// Continents are the regional rankings, in display order.
+var Continents = []Continent{
+	{"na", "North America"}, {"sa", "South America"}, {"eu", "Europe"}, {"asia", "Asia"}, {"oc", "Oceania"},
+}
+
+// ContinentOf maps a lobby region to its continent id, "" when unknown.
+func ContinentOf(region string) string {
+	switch region {
+	case RegionUSEast, RegionUSCentral, RegionUSWest:
+		return "na"
+	case RegionSA:
+		return "sa"
+	case RegionEUWest, RegionEUEast:
+		return "eu"
+	case RegionAsiaEast, RegionAsiaSE:
+		return "asia"
+	case RegionOceania:
+		return "oc"
+	}
+	return ""
+}
+
+// ContinentName is a continent's display name, "" when unknown.
+func ContinentName(id string) string {
+	for _, c := range Continents {
+		if c.ID == id {
+			return c.Name
+		}
+	}
+	return ""
+}

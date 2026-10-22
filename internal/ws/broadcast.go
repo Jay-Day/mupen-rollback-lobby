@@ -44,6 +44,11 @@ type broadcast struct {
 	kfAsmGot    int
 	kfAsmBytes  int
 	kfAsmChunks [][]byte
+
+	// Ranked write journal chunks, all kept: every spectator needs the whole
+	// journal (a keyframe joiner skips what precedes its keyframe itself).
+	journal      [][]byte
+	journalBytes int
 }
 
 // broadcastSpectator owns an ordered cursor into the broadcast spool. Logical
@@ -64,6 +69,7 @@ type broadcastSpectator struct {
 	keyframeFrame int
 	keyframeData  []byte
 	keyframeChunk int
+	journalSent   int // journal chunks delivered
 	beginSent     bool
 	stopped       bool // protected by broadcast.mu
 }
@@ -83,6 +89,12 @@ const (
 // an hours-long 4-player match is a few MB — so hitting this means a hostile or
 // runaway broadcaster, and the broadcast is ended rather than filling the disk.
 const maxSpoolBytes = 64 << 20
+
+// Write journal limits. A ranked set's journal is a few hundred KB at most.
+const (
+	maxJournalChunkBytes = 512 << 10
+	maxJournalBytes      = 16 << 20
+)
 
 // History is paced through the ordinary client send queue. Smaller chunks cap
 // queued replay memory, while the reserve prevents a large catch-up from
@@ -224,6 +236,40 @@ func (m *broadcastManager) data(senderID, matchID uint64, b64 string, frame int)
 	b.mu.Unlock()
 }
 
+// journal appends a write journal chunk and wakes the spectators' pumps,
+// which deliver journal chunks ahead of further krec data. Only the
+// registered broadcaster may write.
+func (m *broadcastManager) journal(senderID, matchID uint64, b64 string) {
+	m.mu.Lock()
+	b := m.byMatch[matchID]
+	m.mu.Unlock()
+	if b == nil {
+		return
+	}
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil || len(raw) == 0 || len(raw) > maxJournalChunkBytes {
+		return
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed || b.broadcasterID != senderID {
+		return
+	}
+	if b.journalBytes+len(raw) > maxJournalBytes {
+		slog.Warn("broadcast: journal size limit hit, dropping chunk", "match", matchID)
+		return
+	}
+	b.journal = append(b.journal, raw)
+	b.journalBytes += len(raw)
+	for _, sc := range b.spectators {
+		select {
+		case sc.wake <- struct{}{}:
+		default:
+		}
+	}
+}
+
 // keyframe reassembles a chunked savestate keyframe uploaded by the broadcaster
 // and, once complete, commits it as the latest keyframe (frame + bytes). Only the
 // registered broadcaster may write.
@@ -355,6 +401,17 @@ func krecFrameOffset(data []byte, frame int) int64 {
 	return -1
 }
 
+// stopWatching returns a spectator's presence to idle once they no longer
+// watch matchID. Call without broadcast locks.
+func (m *broadcastManager) stopWatching(userID, matchID uint64) {
+	if m.hub == nil {
+		return
+	}
+	if c := m.hub.getClient(userID); c != nil && c.user.StopWatching(matchID) {
+		m.hub.broadcastPresenceUpdated(c.user)
+	}
+}
+
 func stopBroadcastSpectator(sc *broadcastSpectator) {
 	if sc == nil || sc.stopped {
 		return
@@ -425,6 +482,7 @@ func (m *broadcastManager) pumpSpectatorChunk(b *broadcast, userID uint64, sc *b
 		b.mu.Unlock()
 		if viewersChanged {
 			m.notifyViewerCount(b.matchID)
+			m.stopWatching(userID, b.matchID)
 		}
 	}()
 	if b.closed || sc.stopped || b.spectators[userID] != sc {
@@ -461,6 +519,21 @@ func (m *broadcastManager) pumpSpectatorChunk(b *broadcast, userID uint64, sc *b
 			return true, true
 		}
 		sc.keyframeData = nil
+	}
+
+	// Journal chunks go first: they must reach the spectator before the
+	// inputs of the frames they apply to.
+	if sc.journalSent < len(b.journal) {
+		if !sc.client.trySendEnvelopeReserved(protocol.TypeSpectateJournal, "",
+			protocol.SpectateJournalPayload{
+				MatchID: b.matchID,
+				Seq:     sc.journalSent,
+				Data:    base64.StdEncoding.EncodeToString(b.journal[sc.journalSent]),
+			}, spectateQueueReserve) {
+			return false, true
+		}
+		sc.journalSent++
+		return true, true
 	}
 
 	// A keyframe stream first reproduces the krec header, then jumps its spool
@@ -574,6 +647,9 @@ func (m *broadcastManager) spectateStart(c *Client, matchID uint64) {
 	b.spectators[c.user.ID] = sc
 	b.mu.Unlock()
 	m.notifyViewerCount(matchID)
+	if m.hub != nil && c.user.StartWatching(matchID) {
+		m.hub.broadcastPresenceUpdated(c.user)
+	}
 	go m.pumpSpectator(b, c.user.ID, sc)
 	slog.Info("spectate start", "mode", mode, "match", matchID, "user", c.user.Username,
 		"history_bytes", historyBytes)
@@ -597,6 +673,7 @@ func (m *broadcastManager) spectateStop(userID, matchID uint64) {
 	if viewersChanged {
 		m.notifyViewerCount(matchID)
 	}
+	m.stopWatching(userID, matchID)
 }
 
 // spectatorChat relays a chat line from a spectator to every viewer of the
@@ -703,6 +780,9 @@ func (m *broadcastManager) finish(b *broadcast, reason string) bool {
 		}
 		m.hub.roomListMu.Unlock()
 	}
+	for userID := range specs {
+		m.stopWatching(userID, b.matchID)
+	}
 	slog.Info("broadcast end", "match", b.matchID, "reason", reason, "spectators", len(specs))
 	return true
 }
@@ -797,6 +877,14 @@ func (h *Hub) handleBroadcastKeyframe(c *Client, env protocol.Envelope) {
 		return
 	}
 	h.broadcasts.keyframe(c.user.ID, req.MatchID, req.Frame, req.ChunkIndex, req.ChunkCount, req.Data)
+}
+
+func (h *Hub) handleBroadcastJournal(c *Client, env protocol.Envelope) {
+	var req protocol.BroadcastJournalRequest
+	if err := json.Unmarshal(env.Data, &req); err != nil {
+		return
+	}
+	h.broadcasts.journal(c.user.ID, req.MatchID, req.Data)
 }
 
 func (h *Hub) handleBroadcastEnd(c *Client, env protocol.Envelope) {

@@ -11,9 +11,13 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/jay-day/rmgk-lobby/internal/accounts"
+	"github.com/jay-day/rmgk-lobby/internal/discord"
 	"github.com/jay-day/rmgk-lobby/internal/geo"
+	"github.com/jay-day/rmgk-lobby/internal/mail"
 	"github.com/jay-day/rmgk-lobby/internal/moderation"
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
+	"github.com/jay-day/rmgk-lobby/internal/ranked"
 	"github.com/jay-day/rmgk-lobby/internal/state"
 )
 
@@ -53,6 +57,24 @@ type Hub struct {
 	matchmaker *matchmaker
 	broadcasts *broadcastManager
 	mod        *moderation.Manager
+
+	// Accounts and ranked play (nil = guest-only lobby). See EnableAccounts.
+	accounts     *accounts.Store
+	rankedConfig *ranked.Config
+	bootID       string // distinguishes match ids across restarts in set history
+	authFailures attemptLimiter
+	// Discord sign-in, nil when not configured
+	discord        *discord.Client
+	discordTickets discordTickets
+	registrations  attemptLimiter
+	rankedSets     rankedSets
+	replayDir      string // "" = replay uploads disabled, see SetReplayDir
+	replays        replayUploads
+
+	// Account email, nil when SMTP isn't configured. emailSends limits
+	// confirmation and reset emails (keyed by account and by IP).
+	mailer     mail.Sender
+	emailSends attemptLimiter
 }
 
 func NewHub(s *state.State, udpPublicAddr string, iceConfig protocol.ICEConfiguration, mod *moderation.Manager) *Hub {
@@ -117,6 +139,7 @@ func (h *Hub) cleanupClient(c *Client) {
 
 	// Drop from matchmaker queue if present.
 	h.matchmaker.remove(uid)
+	h.quickMatchSplitFrom(uid)
 
 	// End any broadcast this user was running and drop them from spectator sets.
 	h.broadcasts.onUserGone(uid)
@@ -213,10 +236,10 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request, ip string) {
 		return
 	}
 
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		// TODO: tighten OriginPatterns before production.
-		InsecureSkipVerify: true,
-	})
+	// Native clients send no Origin; a browser always does, so a page on
+	// another site can't connect (main.go refuses those before the connect
+	// gate too).
+	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		slog.Debug("ws accept failed", "err", err, "ip", ip)
 		return
@@ -267,18 +290,36 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		return errUnsupportedClientVersion
 	}
 
-	if !isValidUsername(req.Username) {
+	// a Discord sign-in learns the name from the linked account
+	discordLogin := req.Auth != nil && req.Auth.Mode == "discord"
+	if !discordLogin && !isValidUsername(req.Username) {
 		c.sendFail(protocol.TypeHelloFail, env.ID, protocol.ReasonInvalidPayload)
 		return errInvalidUsername
 	}
 	// Usernames are broadcast to the whole lobby — hold them to the same
 	// hate-speech filter as chat.
-	if h.mod != nil {
+	if h.mod != nil && !discordLogin {
 		if term, hit := h.mod.FilterMessage(req.Username); hit {
 			c.sendFail(protocol.TypeHelloFail, env.ID, protocol.ReasonInvalidPayload)
 			slog.Info("username blocked by filter", "ip", c.ip, "term", term)
 			return errInvalidUsername
 		}
+	}
+
+	auth := h.authenticateHello(c, &req)
+	if auth.reason != "" {
+		c.writeFail(protocol.TypeHelloFail, env.ID, protocol.HelloFailResponse{
+			Reason: auth.reason, Message: auth.message, Ticket: auth.ticket, DiscordName: auth.discordName,
+			RetryAfter: auth.retryAfter,
+		})
+		return errHelloRejected
+	}
+	username := req.Username
+	var accountID int64
+	if auth.account != nil {
+		username = auth.account.Username
+		accountID = auth.account.ID
+		h.releaseUsernameFor(username, accountID)
 	}
 
 	// Resolve a coarse region bucket from the client's public IP, then split
@@ -289,7 +330,7 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 
 	user := &state.User{
 		ID:            h.state.NextUserID(),
-		Username:      req.Username,
+		Username:      username,
 		State:         state.UserStateIdle,
 		PublicIP:      c.ip,
 		LocalIP:       req.LocalIP,
@@ -299,6 +340,8 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		Connection:    clampString(req.Connection, 16),
 		Anonymous:     req.Anonymous,
 		ICESupported:  req.ICESupported,
+		AccountID:     accountID,
+		SessionToken:  auth.token,
 		JoinedAt:      time.Now(),
 		LastSeen:      time.Now(),
 		Send:          c.send,
@@ -311,7 +354,8 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 
 	c.user = user
 	h.register <- c
-	slog.Info("hello accepted", "user", user.Username, "id", user.ID, "ip", c.ip, "total_users", h.state.UserCount())
+	slog.Info("hello accepted", "user", user.Username, "id", user.ID, "ip", c.ip,
+		"verified", user.Verified(), "total_users", h.state.UserCount())
 
 	resp := protocol.HelloOKResponse{
 		UserID:     user.ID,
@@ -319,6 +363,11 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		UDPAnchor:  h.udpPublicAddr,
 		Region:     user.Region,
 		ICE:        h.iceConfig,
+		Username:   user.Username,
+		Ladders:    h.ladderInfo(),
+	}
+	if user.Verified() {
+		resp.Account = h.accountInfo(user)
 	}
 	c.sendEnvelope(protocol.TypeHelloOK, env.ID, resp)
 
@@ -363,6 +412,28 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleRoomUpdateLiveReplay(c, env)
 	case protocol.TypeRoomSwapSlots:
 		h.handleRoomSwapSlots(c, env)
+	case protocol.TypeRoomUpdateRanked:
+		h.handleRoomUpdateRanked(c, env)
+	case protocol.TypeMatchResult:
+		h.handleMatchResult(c, env)
+	case protocol.TypeAccountLogout:
+		h.handleAccountLogout(c, env)
+	case protocol.TypeAccountLinkDiscord:
+		h.handleAccountLinkDiscord(c, env)
+	case protocol.TypeAccountUnlinkDiscord:
+		h.handleAccountUnlinkDiscord(c, env)
+	case protocol.TypeAccountChangePassword:
+		h.handleAccountChangePassword(c, env)
+	case protocol.TypeAccountSetEmail:
+		h.handleAccountSetEmail(c, env)
+	case protocol.TypeAccountConfirmEmail:
+		h.handleAccountConfirmEmail(c, env)
+	case protocol.TypeAccountRemoveEmail:
+		h.handleAccountRemoveEmail(c, env)
+	case protocol.TypeReplayOffer:
+		h.handleReplayOffer(c, env)
+	case protocol.TypeReplayChunk:
+		h.handleReplayChunk(c, env)
 	case protocol.TypePingProbeRequest:
 		h.handlePingProbeRequest(c, env)
 	case protocol.TypeMatchConnected:
@@ -375,6 +446,14 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleQuickMatchJoin(c, env)
 	case protocol.TypeQuickMatchCancel:
 		h.handleQuickMatchCancel(c, env)
+	case protocol.TypeQuickMatchRematch:
+		h.handleQuickMatchRematch(c, env)
+	case protocol.TypeQuickMatchSession:
+		h.handleQuickMatchSession(c, env)
+	case protocol.TypeQuickMatchTeammate:
+		h.handleQuickMatchTeammate(c, env)
+	case protocol.TypeRoomPeerPing:
+		h.handleRoomPeerPing(c, env)
 	case protocol.TypeICESignal:
 		h.handleICESignal(c, env)
 	case protocol.TypeBroadcastBegin:
@@ -383,6 +462,8 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleBroadcastData(c, env)
 	case protocol.TypeBroadcastKeyframe:
 		h.handleBroadcastKeyframe(c, env)
+	case protocol.TypeBroadcastJournal:
+		h.handleBroadcastJournal(c, env)
 	case protocol.TypeBroadcastEnd:
 		h.handleBroadcastEnd(c, env)
 	case protocol.TypeSpectateStart:
@@ -685,6 +766,7 @@ func (h *Hub) presenceUserFromState(u *state.User) protocol.PresenceUser {
 		ClientVersion: u.ClientVersion,
 		Connection:    u.Connection,
 		PingToServer:  u.PingToServer,
+		Verified:      u.Verified(),
 	}
 	// Withholding happens here, at the single choke point every presence
 	// message flows through, so no other broadcast path can leak the country.
@@ -704,5 +786,7 @@ func (h *Hub) presenceUserFromState(u *state.User) protocol.PresenceUser {
 			pu.SearchingRom = rom.Name
 		}
 	}
+	// and the match a spectator watches (clients name it from the room list)
+	pu.WatchingMatchID = u.WatchingMatch()
 	return pu
 }
