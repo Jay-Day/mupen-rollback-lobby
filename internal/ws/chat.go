@@ -10,6 +10,7 @@ import (
 const (
 	channelLobby      = "lobby"
 	channelRoom       = "room"
+	channelSpectate   = "spectate" // viewers of one live replay; never reaches its players
 	lobbyHistorySize  = 50
 	maxChatMessageLen = 500
 )
@@ -57,7 +58,7 @@ func truncateMessage(s string) string {
 // validChannel reports whether a channel name is accepted right now.
 // PM channels will be added later.
 func validChannel(c string) bool {
-	return c == channelLobby || c == channelRoom
+	return c == channelLobby || c == channelRoom || c == channelSpectate
 }
 
 func nowMs() int64 {

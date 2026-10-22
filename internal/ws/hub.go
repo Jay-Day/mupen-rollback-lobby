@@ -654,6 +654,9 @@ func (h *Hub) handleChatSend(c *Client, env protocol.Envelope) {
 			return
 		}
 		h.broadcastToRoom(room, protocol.TypeChatMsg, payload)
+	case channelSpectate:
+		// Only to the viewers of the live replay the sender is watching.
+		h.broadcasts.spectatorChat(c.user.ID, payload)
 	}
 }
 
