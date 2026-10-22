@@ -27,12 +27,48 @@ const (
 	TypeRoomUpdatePrediction     = "ROOM_UPDATE_PREDICTION"
 	TypeRoomUpdateLiveReplay     = "ROOM_UPDATE_LIVE_REPLAY"
 	TypeRoomSwapSlots            = "ROOM_SWAP_SLOTS"
-	TypePingProbeRequest         = "PING_PROBE_REQUEST"
-	TypeMatchConnected           = "MATCH_CONNECTED"
-	TypeMatchPunchFailed         = "MATCH_PUNCH_FAILED"
-	TypeMatchFinished            = "MATCH_FINISHED"
-	TypeQuickMatchJoin           = "QUICK_MATCH_JOIN"
-	TypeQuickMatchCancel         = "QUICK_MATCH_CANCEL"
+	// Host-only, waiting-room-only: turn ranked on/off and pick its settings.
+	TypeRoomUpdateRanked = "ROOM_UPDATE_RANKED"
+	TypePingProbeRequest = "PING_PROBE_REQUEST"
+	TypeMatchConnected   = "MATCH_CONNECTED"
+	TypeMatchPunchFailed = "MATCH_PUNCH_FAILED"
+	TypeMatchFinished    = "MATCH_FINISHED"
+	// Each ranked player reports the finished set; the server rates it once
+	// every report agrees.
+	TypeMatchResult = "MATCH_RESULT"
+	// Revokes the remember-me token the client logged in with.
+	TypeAccountLogout = "ACCOUNT_LOGOUT"
+	// Changes the logged-in account's password; every saved login of the
+	// account is revoked and this connection gets a new session token.
+	TypeAccountChangePassword = "ACCOUNT_CHANGE_PASSWORD"
+	// Link the logged-in account to a Discord account (DiscordCodeRequest),
+	// or unlink it; answered with ACCOUNT_DISCORD / ACCOUNT_DISCORD_FAIL.
+	TypeAccountLinkDiscord   = "ACCOUNT_LINK_DISCORD"
+	TypeAccountUnlinkDiscord = "ACCOUNT_UNLINK_DISCORD"
+	// Account email, only when the server can send email: ACCOUNT_SET_EMAIL
+	// emails a code to a new address, ACCOUNT_CONFIRM_EMAIL with that code
+	// makes it the account's address, ACCOUNT_REMOVE_EMAIL forgets it.
+	// Answered with ACCOUNT_EMAIL_CODE_SENT, ACCOUNT_EMAIL or ACCOUNT_EMAIL_FAIL.
+	TypeAccountSetEmail     = "ACCOUNT_SET_EMAIL"
+	TypeAccountConfirmEmail = "ACCOUNT_CONFIRM_EMAIL"
+	TypeAccountRemoveEmail  = "ACCOUNT_REMOVE_EMAIL"
+	// Ranked replays: a player offers the set's .krec (size + hash); only
+	// the first offer is accepted, then its bytes follow in chunks.
+	TypeReplayOffer      = "REPLAY_OFFER"
+	TypeReplayChunk      = "REPLAY_CHUNK"
+	TypeQuickMatchJoin   = "QUICK_MATCH_JOIN"
+	TypeQuickMatchCancel = "QUICK_MATCH_CANCEL"
+	// Answer to QUICK_MATCH_REMATCH_OFFER (QuickMatchRematchRequest).
+	TypeQuickMatchRematch = "QUICK_MATCH_REMATCH"
+	// Turns a ranked session's "keep searching" on or off, e.g. "stop after
+	// this set" (QuickMatchSessionRequest).
+	TypeQuickMatchSession = "QUICK_MATCH_SESSION"
+	// Turns a 2v2 session's "keep my teammate" on or off
+	// (QuickMatchTeammateRequest).
+	TypeQuickMatchTeammate = "QUICK_MATCH_TEAMMATE"
+	// A client's measured ping to another player in its room
+	// (RoomPeerPingRequest), for ranked max-ping checks.
+	TypeRoomPeerPing = "ROOM_PEER_PING"
 	// ICE signaling is relayed over the authenticated lobby WebSocket. The
 	// server never sees gameplay datagrams and is not a TURN relay.
 	TypeICESignal = "ICE_SIGNAL"
@@ -55,8 +91,12 @@ const (
 	// fast-forward only the short tail (bounded catch-up, independent of match length).
 	// Sent in chunks to stay under the server's per-message read limit.
 	TypeBroadcastKeyframe = "BROADCAST_KEYFRAME"
-	TypeSpectateStart     = "SPECTATE_START" // spectator: begin watching a match
-	TypeSpectateStop      = "SPECTATE_STOP"  // spectator: stop watching
+	// Ranked matches: the game module's memory write journal (opaque bytes,
+	// see the RMG-K ranked host). Spectators apply it alongside the krec
+	// inputs, or their replay drifts from the match.
+	TypeBroadcastJournal = "BROADCAST_JOURNAL"
+	TypeSpectateStart    = "SPECTATE_START" // spectator: begin watching a match
+	TypeSpectateStop     = "SPECTATE_STOP"  // spectator: stop watching
 
 	// Moderation (client → server).
 	TypeAdminAuth = "ADMIN_AUTH" // claim moderator role with a password
@@ -93,6 +133,27 @@ const (
 	// players and the joiner; MATCH_ADMIT_FAIL answers a refused MATCH_ADMIT.
 	TypeMatchAdmitBegin = "MATCH_ADMIT_BEGIN"
 	TypeMatchAdmitFail  = "MATCH_ADMIT_FAIL"
+	// A continuous ranked search found only previous opponents after waiting
+	// (QuickMatchRematchOfferPayload); answer with QUICK_MATCH_REMATCH.
+	TypeQuickMatchRematchOffer = "QUICK_MATCH_REMATCH_OFFER"
+	// Outcome of a ranked set (rated, voided or disputed) with rating changes.
+	TypeRankedResult = "RANKED_RESULT"
+	// ACCOUNT_CHANGE_PASSWORD outcome.
+	TypeAccountPasswordChanged = "ACCOUNT_PASSWORD_CHANGED"
+	// The account's Discord link after a link or unlink (DiscordAccountInfo).
+	TypeAccountDiscord      = "ACCOUNT_DISCORD"
+	TypeAccountDiscordFail  = "ACCOUNT_DISCORD_FAIL"
+	TypeAccountPasswordFail = "ACCOUNT_PASSWORD_FAIL"
+	// Account email: a code went to the pending address (AccountEmailInfo
+	// with that address); the account's address after a confirm or a remove
+	// (AccountEmailInfo); or a failure (AccountPasswordFailPayload).
+	TypeAccountEmailCodeSent = "ACCOUNT_EMAIL_CODE_SENT"
+	TypeAccountEmail         = "ACCOUNT_EMAIL"
+	TypeAccountEmailFail     = "ACCOUNT_EMAIL_FAIL"
+	// Replay upload flow (see REPLAY_OFFER).
+	TypeReplayAccept  = "REPLAY_ACCEPT"
+	TypeReplayDecline = "REPLAY_DECLINE"
+	TypeReplayStored  = "REPLAY_STORED"
 
 	// Spectating (server → spectator).
 	TypeSpectateBegin = "SPECTATE_BEGIN" // ack: stream is starting; history follows
@@ -100,8 +161,11 @@ const (
 	// Savestate keyframe sent to a joining spectator (chunked) before the krec
 	// tail, so it can restore to the keyframe's frame and fast-forward only the tail.
 	TypeSpectateKeyframe = "SPECTATE_KEYFRAME"
-	TypeSpectateEnd      = "SPECTATE_END"  // stream ended (match over / broadcaster left)
-	TypeSpectateFail     = "SPECTATE_FAIL" // request rejected (not broadcasting, ended)
+	// Write journal chunks, in order and complete from the match start, sent
+	// ahead of the krec data they apply to (see BROADCAST_JOURNAL).
+	TypeSpectateJournal = "SPECTATE_JOURNAL"
+	TypeSpectateEnd     = "SPECTATE_END"  // stream ended (match over / broadcaster left)
+	TypeSpectateFail    = "SPECTATE_FAIL" // request rejected (not broadcasting, ended)
 	// Sent to every match participant and active spectator whenever the audience changes.
 	TypeBroadcastViewerCount = "BROADCAST_VIEWER_COUNT"
 
@@ -132,6 +196,28 @@ const (
 	ReasonAdmitBusy           = "admit_busy"
 	ReasonNotWaiting          = "not_waiting"
 	ReasonJoinerLeft          = "joiner_left"
+
+	// Accounts
+	ReasonAuthFailed          = "auth_failed"          // wrong username/password or expired token
+	ReasonUsernameRegistered  = "username_registered"  // guest tried a registered name
+	ReasonWeakPassword        = "weak_password"        // registration password too short/long
+	ReasonTooManyAttempts     = "too_many_attempts"    // auth rate limit
+	ReasonAccountsUnavailable = "accounts_unavailable" // server has no account store
+	ReasonDiscordUnavailable  = "discord_unavailable"  // server has no Discord app configured
+	ReasonDiscordFailed       = "discord_failed"       // the Discord code exchange or lookup failed
+	ReasonDiscordUnlinked     = "discord_unlinked"     // no account linked yet: link with a password (ticket)
+	ReasonDiscordInUse        = "discord_in_use"       // that Discord account is linked to another account
+	ReasonTicketExpired       = "ticket_expired"       // the Discord link ticket expired or was used
+	ReasonEmailUnavailable    = "email_unavailable"    // server has no email (SMTP) configured
+	ReasonInvalidEmail        = "invalid_email"        // not a plain address like name@example.com
+	ReasonEmailFailed         = "email_failed"         // the email couldn't be sent
+
+	// Ranked rooms
+	ReasonRankedUnavailable = "ranked_unavailable" // ROM not on a ladder / ranked not configured
+	ReasonNotVerified       = "not_verified"       // ranked needs a logged-in account
+	ReasonSkillMismatch     = "skill_mismatch"     // outside the room's skill filter
+	ReasonTooFar            = "too_far"            // estimated ping above the room's max ping
+	ReasonRankedSeats       = "ranked_seats"       // ranked sets are 1v1
 )
 
 // -- Request payloads --
@@ -158,6 +244,84 @@ type HelloRequest struct {
 	// Advertises support for joining a running match (MATCH_ADMIT_*). A match
 	// only sizes itself for late joiners when every seated player sets it.
 	LateJoin bool `json:"lateJoin,omitempty"`
+	// Optional account authentication; guests omit it.
+	Auth *HelloAuth `json:"auth,omitempty"`
+	// Ranked game modules the client has installed.
+	RankedModules []RankedModuleInfo `json:"rankedModules,omitempty"`
+}
+
+// HelloAuth authenticates the HELLO username. Mode is "login" or "register"
+// (with Password), or "token" (with a remember-me Token from HELLO_OK; the
+// username is then taken from the account).
+// HelloAuth authenticates a HELLO. Mode is "login", "register", "token" or
+// "reset" (sets Password with a moderator-issued ResetCode).
+type HelloAuth struct {
+	Mode      string `json:"mode"`
+	Password  string `json:"password,omitempty"`
+	Token     string `json:"token,omitempty"`
+	ResetCode string `json:"resetCode,omitempty"`
+	// mode "discord": the authorization code from Discord's redirect, the
+	// PKCE verifier and the loopback redirect it was sent to.
+	Code         string `json:"code,omitempty"`
+	CodeVerifier string `json:"codeVerifier,omitempty"`
+	RedirectURI  string `json:"redirectUri,omitempty"`
+	// modes "discord_link" (log in) and "discord_register" (create an
+	// account): the ticket from a discord_unlinked failure, with
+	// the account's username (HELLO username) and password.
+	Ticket string `json:"ticket,omitempty"`
+}
+
+// DiscordCodeRequest is ACCOUNT_LINK_DISCORD: a Discord authorization code
+// for the logged-in account.
+type DiscordCodeRequest struct {
+	Code         string `json:"code"`
+	CodeVerifier string `json:"codeVerifier"`
+	RedirectURI  string `json:"redirectUri"`
+}
+
+// DiscordAccountInfo is the logged-in account's Discord link (only ever sent
+// to that account).
+type DiscordAccountInfo struct {
+	Linked   bool   `json:"linked"`
+	Username string `json:"username,omitempty"`
+	Name     string `json:"name,omitempty"`
+}
+
+type AccountChangePasswordRequest struct {
+	CurrentPassword string `json:"currentPassword"`
+	NewPassword     string `json:"newPassword"`
+}
+
+// AccountPasswordChangedPayload carries the connection's new session token.
+type AccountPasswordChangedPayload struct {
+	SessionToken string `json:"sessionToken"`
+}
+
+type AccountPasswordFailPayload struct {
+	Reason  string `json:"reason"`
+	Message string `json:"message"`
+}
+
+// AccountSetEmailRequest is ACCOUNT_SET_EMAIL: the address to confirm.
+type AccountSetEmailRequest struct {
+	Email string `json:"email"`
+}
+
+// AccountConfirmEmailRequest is ACCOUNT_CONFIRM_EMAIL: the code emailed to
+// the new address.
+type AccountConfirmEmailRequest struct {
+	Code string `json:"code"`
+}
+
+// AccountEmailInfo is an account's email address, only ever sent to that
+// account. Address is "" when it has none.
+type AccountEmailInfo struct {
+	Address string `json:"address"`
+}
+
+type RankedModuleInfo struct {
+	ID      string `json:"id"`
+	Version string `json:"version"`
 }
 
 type HeartbeatRequest struct {
@@ -186,6 +350,28 @@ type RoomCreateRequest struct {
 	Pacing     int     `json:"pacing,omitempty"`
 	Visibility string  `json:"visibility,omitempty"`
 	Password   string  `json:"password,omitempty"`
+	// Optional: create the room as ranked.
+	Ranked *RankedRoomRequest `json:"ranked,omitempty"`
+}
+
+// RankedRoomRequest is used by ROOM_CREATE and ROOM_UPDATE_RANKED. Zero
+// values pick the ladder defaults.
+type RankedRoomRequest struct {
+	Enabled bool `json:"enabled"`
+	// LadderID picks the ladder (e.g. the 2v2 one) among the ROM's ladders;
+	// empty = the ROM's 1v1 ladder.
+	LadderID  string `json:"ladderId,omitempty"`
+	RulesetID string `json:"rulesetId,omitempty"`
+	BestOf    int    `json:"bestOf,omitempty"`
+	// MaxPing (ms) limits the ping between players: joiners are checked by
+	// region estimate, the start by measured ping. 0 = any.
+	MaxPing int `json:"maxPing,omitempty"`
+	// MaxTierGap limits joiners to within this many tiers of the host;
+	// 0 = anyone verified may join.
+	MaxTierGap int `json:"maxTierGap,omitempty"`
+	// AllowProvisional lets players still in placement join regardless of the
+	// tier gap. Defaults to true when omitted.
+	AllowProvisional *bool `json:"allowProvisional,omitempty"`
 }
 
 type RomInfo struct {
@@ -258,6 +444,80 @@ type PingProbeRequestPayload struct {
 	TargetUserID uint64 `json:"targetUserId"`
 }
 
+// MatchResultRequest is one ranked player's report of the finished set.
+// Slots are 1-indexed controller ports, as in MATCH_BEGIN.
+type MatchResultRequest struct {
+	MatchID    uint64 `json:"matchId"`
+	WinnerSlot int    `json:"winnerSlot"`
+	Score      []int  `json:"score"` // games won (a team's, in team sets), index 0 = slot 1
+	// Team sets: each slot's team (index 0 = slot 1): 1 for the team with
+	// the lowest slot, 2 for the other. WinnerTeam is 1 or 2.
+	Teams      []int             `json:"teams,omitempty"`
+	WinnerTeam int               `json:"winnerTeam,omitempty"`
+	Games      []MatchResultGame `json:"games"`
+	// Voided games (resets, wrong rules...) that were replayed.
+	VoidedGames int `json:"voidedGames,omitempty"`
+	// Ruleset hash the client's module computed; must match between players.
+	RulesetHash string `json:"rulesetHash"`
+	// "ok", or why the client distrusts its own result (e.g. a desync).
+	Integrity string `json:"integrity"`
+	// What the set was played with; a replay needs the same module version.
+	RulesetID     string `json:"rulesetId,omitempty"`
+	ModuleVersion string `json:"moduleVersion,omitempty"`
+	RomMD5        string `json:"romMd5,omitempty"`
+}
+
+// ReplayBookmark marks a position in a replay. Record is the 0-based index
+// of the .krec input record to resume from.
+type ReplayBookmark struct {
+	Record int    `json:"record"`
+	Label  string `json:"label"`
+	Kind   string `json:"kind"`           // "game_start", "game_end" or "user"
+	Game   int    `json:"game,omitempty"` // 1-based game number for game marks
+}
+
+type ReplayOfferRequest struct {
+	SetID     int64            `json:"setId"`
+	Size      int              `json:"size"`
+	SHA256    string           `json:"sha256"`
+	Bookmarks []ReplayBookmark `json:"bookmarks,omitempty"`
+}
+
+type ReplayChunkRequest struct {
+	SetID int64  `json:"setId"`
+	Index int    `json:"index"`
+	Count int    `json:"count"`
+	Data  string `json:"data"` // base64
+}
+
+type ReplayAcceptPayload struct {
+	SetID     int64 `json:"setId"`
+	ChunkSize int   `json:"chunkSize"` // raw bytes per chunk before base64
+}
+
+type ReplayDeclinePayload struct {
+	SetID  int64  `json:"setId"`
+	Reason string `json:"reason"` // "exists", "in_progress", "not_participant", "invalid", "unavailable", "failed"
+}
+
+type ReplayStoredPayload struct {
+	SetID int64 `json:"setId"`
+}
+
+type MatchResultGame struct {
+	Game       int                 `json:"game"`
+	WinnerSlot int                 `json:"winnerSlot"`
+	WinnerTeam int                 `json:"winnerTeam,omitempty"` // team sets
+	Stage      int                 `json:"stage"`
+	Players    []MatchResultPlayer `json:"players"`
+}
+
+type MatchResultPlayer struct {
+	Slot       int `json:"slot"`
+	Character  int `json:"character"`
+	StocksLeft int `json:"stocksLeft"`
+}
+
 type MatchPeerEventRequest struct {
 	MatchID    uint64 `json:"matchId"`
 	PeerUserID uint64 `json:"peerUserId,omitempty"`
@@ -277,6 +537,42 @@ type ICESignalRequest struct {
 // the auto-created room can be resolved by name on both clients.
 type QuickMatchJoinRequest struct {
 	Rom RomInfo `json:"rom"`
+	// Ranked queues for a ranked set (Enabled must be set). Searchers pair
+	// only with ranked searchers on the same ladder, roster and set length
+	// whose skill filters (MaxTierGap, AllowProvisional) accept each other.
+	Ranked *RankedRoomRequest `json:"ranked,omitempty"`
+	// Continuous keeps the search going: after each set (ranked) or match
+	// (casual: once a player closes the game) the lobby closes the room and
+	// searches again with the same settings, avoiding the previous opponent.
+	Continuous bool `json:"continuous,omitempty"`
+	// Teammate (2v2): the player wanted as teammate. The search waits until
+	// that player searches for the same set wanting this one back, then the
+	// two are matched as a team. Empty = a random teammate.
+	Teammate string `json:"teammate,omitempty"`
+	// KeepTeammate (2v2 sessions, with Teammate): after each set, search
+	// again together with that set's teammate when they keep the team too.
+	// Ignored without Teammate; QUICK_MATCH_TEAMMATE sets it in the room.
+	KeepTeammate bool `json:"keepTeammate,omitempty"`
+}
+
+// QuickMatchRematchRequest answers a rematch offer: play the previous
+// opponent, or keep searching for someone new.
+type QuickMatchRematchRequest struct {
+	Accept bool `json:"accept"`
+}
+
+// QuickMatchSessionRequest turns "keep searching after each set" on or off
+// for the current search or quick-match room.
+type QuickMatchSessionRequest struct {
+	Continuous bool `json:"continuous"`
+}
+
+// QuickMatchTeammateRequest turns "keep my teammate" on or off for the
+// current 2v2 search or quick-match room. Turned on between sets, it keeps
+// the last set's team when the teammate keeps it too; turned off, the team
+// splits and both search on their own.
+type QuickMatchTeammateRequest struct {
+	Keep bool `json:"keep"`
 }
 
 // -- Response payloads --
@@ -287,6 +583,54 @@ type HelloOKResponse struct {
 	UDPAnchor  string           `json:"udpAnchor"`
 	Region     string           `json:"region"`
 	ICE        ICEConfiguration `json:"ice"`
+	// Username as registered (canonical casing) when authenticated; clients
+	// should display this instead of what they typed.
+	Username string `json:"username,omitempty"`
+	// Present when the HELLO authenticated an account.
+	Account *AccountInfo `json:"account,omitempty"`
+	// Ranked ladders this server runs, so clients know which ROMs qualify.
+	Ladders []LadderInfo `json:"ladders,omitempty"`
+}
+
+type AccountInfo struct {
+	AccountID int64 `json:"accountId"`
+	// Remember-me token for HELLO auth mode "token". Valid for 30 days of
+	// inactivity; store it instead of the password.
+	SessionToken string           `json:"sessionToken"`
+	Standings    []LadderStanding `json:"standings"`
+	// The account's Discord link, nil when none.
+	Discord *DiscordAccountInfo `json:"discord,omitempty"`
+	// The account's email address. Present only when the server can send
+	// email, so clients show the email options only then.
+	Email *AccountEmailInfo `json:"email,omitempty"`
+}
+
+// LadderStanding is an account's public standing on one ladder.
+// LadderStanding is an account's standing on one roster (ruleset) of a
+// ladder; each roster is rated separately.
+type LadderStanding struct {
+	Ladder      string `json:"ladder"`
+	Ruleset     string `json:"ruleset"`
+	Rating      int    `json:"rating"`
+	Deviation   int    `json:"deviation"`
+	Tier        string `json:"tier"`
+	TierIndex   int    `json:"tierIndex"`
+	Provisional bool   `json:"provisional"`
+	SetsPlayed  int    `json:"setsPlayed"`
+}
+
+type LadderInfo struct {
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	ModuleID string   `json:"moduleId"`
+	Rulesets []string `json:"rulesets"`
+	// Display names by ruleset id; ids without one display as themselves.
+	RulesetNames map[string]string `json:"rulesetNames,omitempty"`
+	BestOf       []int             `json:"bestOf"`
+	RomMD5s      []string          `json:"romMd5s"`
+	Tiers        []string          `json:"tiers"`
+	// TeamSize is players per side: 1 (1v1) or 2 (2v2 team battles).
+	TeamSize int `json:"teamSize"`
 }
 
 type ICETransportServer struct {
@@ -304,6 +648,13 @@ type ICEConfiguration struct {
 type HelloFailResponse struct {
 	Reason  string `json:"reason"`
 	Message string `json:"message,omitempty"`
+	// discord_unlinked: a ticket to link this Discord account with a
+	// password (mode "discord_link"), and the Discord name it belongs to.
+	Ticket      string `json:"ticket,omitempty"`
+	DiscordName string `json:"discordName,omitempty"`
+	// too_many_attempts: seconds until a login from this address is
+	// accepted again.
+	RetryAfter int `json:"retryAfter,omitempty"`
 }
 
 type HeartbeatAckResponse struct {
@@ -338,7 +689,9 @@ type PresenceUser struct {
 	PingToServer    uint16 `json:"pingToServer"`
 	CurrentRoomID   uint64 `json:"currentRoomId,omitempty"`
 	CurrentRoomName string `json:"currentRoomName,omitempty"`
-	SearchingRom    string `json:"searchingRom,omitempty"` // ROM name while state == searching
+	SearchingRom    string `json:"searchingRom,omitempty"`    // ROM name while state == searching
+	WatchingMatchID uint64 `json:"watchingMatchId,omitempty"` // live replay watched while state == spectating
+	Verified        bool   `json:"verified,omitempty"`        // logged into a registered account
 }
 
 type PresenceFullPayload struct {
@@ -373,6 +726,8 @@ type RoomSummary struct {
 	// LateJoin marks an in-game room with a free seat that a late-join capable
 	// client may enter; the host can then add them to the running match.
 	LateJoin bool `json:"lateJoin,omitempty"`
+	Ranked       bool     `json:"ranked,omitempty"`
+	Ladder       string   `json:"ladder,omitempty"` // ladder id while ranked
 }
 
 type RoomListPayload struct {
@@ -397,6 +752,9 @@ type RoomSeatPayload struct {
 	// LateJoin mirrors the client's capability so the host's UI can tell
 	// whether it can add this member to a running match.
 	LateJoin bool `json:"lateJoin,omitempty"`
+	Verified         bool `json:"verified,omitempty"`
+	// Standing on the ROM's ladder, for verified players when the ROM has one.
+	Standing *LadderStanding `json:"standing,omitempty"`
 }
 
 type RoomStatePayload struct {
@@ -429,6 +787,28 @@ type RoomStatePayload struct {
 	// CanStartAlone tells the host ROOM_START works with nobody else seated.
 	// Older servers refuse it, so clients need this to offer the option.
 	CanStartAlone bool `json:"canStartAlone,omitempty"`
+	// Present while the room is ranked.
+	Ranked *RankedRoomState `json:"ranked,omitempty"`
+}
+
+type RankedRoomState struct {
+	Ladder           string `json:"ladder"`
+	LadderName       string `json:"ladderName"`
+	ModuleID         string `json:"moduleId"`
+	RulesetID        string `json:"rulesetId"`
+	RulesetName      string `json:"rulesetName"`
+	BestOf           int    `json:"bestOf"`
+	MaxTierGap       int    `json:"maxTierGap"`
+	AllowProvisional bool   `json:"allowProvisional"`
+	TeamSize         int    `json:"teamSize"`
+	MaxPing          int    `json:"maxPing,omitempty"`
+}
+
+// RoomPeerPingRequest reports the sender's measured round trip to another
+// player in the same room.
+type RoomPeerPingRequest struct {
+	UserID uint64 `json:"userId"`
+	RTTMs  int    `json:"rttMs"`
 }
 
 type RoomJoinFailPayload struct {
@@ -477,6 +857,9 @@ type MatchBeginPayload struct {
 	// empty seat is an idle controller someone can take over mid-match. Zero
 	// keeps the older sizing (the highest occupied seat).
 	Seats int `json:"seats,omitempty"`
+	// Present for ranked matches: clients start the ranked module with these
+	// settings and send MATCH_RESULT when the set ends.
+	Ranked *RankedMatchInfo `json:"ranked,omitempty"`
 }
 
 // MatchAdmitRequest is the host asking to add a waiting room member to the
@@ -532,6 +915,47 @@ type MatchAdmitSignalPayload struct {
 	Data       string `json:"data,omitempty"`
 }
 
+type RankedMatchInfo struct {
+	Ladder    string              `json:"ladder"`
+	ModuleID  string              `json:"moduleId"`
+	RulesetID string              `json:"rulesetId"`
+	BestOf    int                 `json:"bestOf"`
+	TeamSize  int                 `json:"teamSize"`
+	Players   []RankedMatchPlayer `json:"players"`
+}
+
+type RankedMatchPlayer struct {
+	Slot     int             `json:"slot"`
+	UserID   uint64          `json:"userId"`
+	Username string          `json:"username"`
+	Standing *LadderStanding `json:"standing,omitempty"`
+	// Team (team sets): the team this player must play on, 1 or 2 (team 1
+	// holds the lowest slot), when the lobby matched teammates (a chosen or
+	// kept team). 0 = the players pick teams in the game.
+	Team int `json:"team,omitempty"`
+}
+
+// RankedResultPayload tells ranked players how their set was recorded.
+// Status is "rated", "voided" or "disputed"; only rated sets move ratings.
+type RankedResultPayload struct {
+	MatchID uint64 `json:"matchId"`
+	// Recorded set id (0 if recording failed); used to offer the replay.
+	SetID      int64                `json:"setId,omitempty"`
+	Status     string               `json:"status"`
+	Reason     string               `json:"reason,omitempty"`
+	WinnerSlot int                  `json:"winnerSlot,omitempty"`
+	WinnerTeam int                  `json:"winnerTeam,omitempty"` // team sets
+	Players    []RankedResultPlayer `json:"players"`
+}
+
+type RankedResultPlayer struct {
+	Slot     int            `json:"slot"`
+	Team     int            `json:"team,omitempty"`
+	Username string         `json:"username"`
+	Before   LadderStanding `json:"before"`
+	After    LadderStanding `json:"after"`
+}
+
 type ICESignalPayload struct {
 	FromUserID uint64 `json:"fromUserId"`
 	RoomID     uint64 `json:"roomId"`
@@ -553,7 +977,27 @@ type MatchPeerLeftPayload struct {
 
 type QuickMatchStatusPayload struct {
 	Searching bool `json:"searching"`
-	QueueSize int  `json:"queueSize"`
+	// QueueSize counts the searchers in the same pool (same ROM, and for a
+	// ranked search the same ladder, roster and set length), including you.
+	QueueSize int `json:"queueSize"`
+	// Ranked is set when the search is (or was) a ranked one.
+	Ranked bool `json:"ranked,omitempty"`
+	// Continuous: the session searches again after each set or match. Stays
+	// set while in a quick-match room; false once the session ends.
+	Continuous bool `json:"continuous,omitempty"`
+	// KeepTeammate: the session keeps its teammate after each 2v2 set.
+	KeepTeammate bool `json:"keepTeammate,omitempty"`
+	// Teammate: the kept teammate this search (or the next one) goes with;
+	// empty when searching on your own.
+	Teammate string `json:"teammate,omitempty"`
+	// WaitingFor: the wanted teammate (QuickMatchJoinRequest.Teammate) who
+	// hasn't searched with this player as theirs yet.
+	WaitingFor string `json:"waitingFor,omitempty"`
+}
+
+// QuickMatchRematchOfferPayload: only previous opponents are available.
+type QuickMatchRematchOfferPayload struct {
+	Opponents []string `json:"opponents"`
 }
 
 // -- Broadcast / spectate payloads --
@@ -621,6 +1065,20 @@ type BroadcastKeyframeRequest struct {
 	ChunkIndex int    `json:"chunkIndex"`
 	ChunkCount int    `json:"chunkCount"`
 	Data       string `json:"data"` // base64 savestate slice
+}
+
+// BroadcastJournalRequest carries the next chunk of a ranked match's write
+// journal. Chunks are appended in order and never reordered or merged.
+type BroadcastJournalRequest struct {
+	MatchID uint64 `json:"matchId"`
+	Data    string `json:"data"` // base64
+}
+
+// SpectateJournalPayload delivers journal chunk Seq (0-based, contiguous).
+type SpectateJournalPayload struct {
+	MatchID uint64 `json:"matchId"`
+	Seq     int    `json:"seq"`
+	Data    string `json:"data"` // base64
 }
 
 // SpectateKeyframePayload delivers the latest keyframe (chunked) to a joining
