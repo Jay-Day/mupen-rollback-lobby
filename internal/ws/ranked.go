@@ -16,8 +16,6 @@ import (
 	"github.com/jay-day/rmgk-lobby/internal/state"
 )
 
-const maxRankedTierGap = 20
-
 // After the first MATCH_RESULT of a set, how long the other players have to
 // send theirs before the set is voided. A variable so tests can shorten it.
 var rankedResultTimeout = 60 * time.Second
@@ -71,20 +69,6 @@ func (h *Hub) resolveRankedSettings(romMD5 string, req *protocol.RankedRoomReque
 	if !ok {
 		return nil, protocol.ReasonInvalidPayload, "Unknown ranked ruleset."
 	}
-	bestOf, ok := ladder.SetLength(req.BestOf)
-	if !ok {
-		return nil, protocol.ReasonInvalidPayload, fmt.Sprintf("Best of %d isn't allowed on this ladder.", req.BestOf)
-	}
-	gap := req.MaxTierGap
-	if gap < 0 {
-		gap = 0
-	} else if gap > maxRankedTierGap {
-		gap = maxRankedTierGap
-	}
-	allowProvisional := true
-	if req.AllowProvisional != nil {
-		allowProvisional = *req.AllowProvisional
-	}
 	maxPing := req.MaxPing
 	if maxPing < 0 {
 		maxPing = 0
@@ -92,14 +76,12 @@ func (h *Hub) resolveRankedSettings(romMD5 string, req *protocol.RankedRoomReque
 		maxPing = maxRankedPing
 	}
 	return &state.RankedSettings{
-		LadderID:         ladder.ID,
-		ModuleID:         ladder.ModuleID,
-		RulesetID:        ruleset,
-		BestOf:           bestOf,
-		MaxTierGap:       gap,
-		AllowProvisional: allowProvisional,
-		TeamSize:         ladder.TeamSize,
-		MaxPing:          maxPing,
+		LadderID:  ladder.ID,
+		ModuleID:  ladder.ModuleID,
+		RulesetID: ruleset,
+		BestOf:    int(ladder.BestOf),
+		TeamSize:  ladder.TeamSize,
+		MaxPing:   maxPing,
 	}, "", ""
 }
 
@@ -107,7 +89,7 @@ func (h *Hub) resolveRankedSettings(romMD5 string, req *protocol.RankedRoomReque
 const maxRankedPing = 500
 
 // rankedEligibility reports why u can't play in a ranked room hosted by host
-// ("" when eligible). The host is always within its own skill filter.
+// ("" when eligible). The host always can.
 func (h *Hub) rankedEligibility(u *state.User, settings *state.RankedSettings, host *state.User) (string, string) {
 	if !u.Verified() {
 		return protocol.ReasonNotVerified, u.Username + " needs to log into an account to play ranked."
@@ -118,21 +100,6 @@ func (h *Hub) rankedEligibility(u *state.User, settings *state.RankedSettings, h
 	if estimate := geo.EstimatedRTT(u.Region, host.Region); settings.MaxPing > 0 && estimate > settings.MaxPing {
 		return protocol.ReasonTooFar, fmt.Sprintf("%s is too far away for this room (about %d ms; it allows %d ms).",
 			u.Username, estimate, settings.MaxPing)
-	}
-	if settings.MaxTierGap == 0 {
-		return "", ""
-	}
-	mine := h.standing(u.AccountID, settings.LadderID, settings.RulesetID)
-	hosts := h.standing(host.AccountID, settings.LadderID, settings.RulesetID)
-	if mine == nil || hosts == nil {
-		return protocol.ReasonRankedUnavailable, "Ratings are temporarily unavailable."
-	}
-	if settings.AllowProvisional && (mine.Provisional || hosts.Provisional) {
-		return "", ""
-	}
-	if gap := mine.TierIndex - hosts.TierIndex; gap > settings.MaxTierGap || -gap > settings.MaxTierGap {
-		return protocol.ReasonSkillMismatch, fmt.Sprintf("%s (%s) is outside this room's skill range.",
-			u.Username, mine.Tier)
 	}
 	return "", ""
 }

@@ -33,7 +33,7 @@ func TestRankedQuickMatchPairsSameSettings(t *testing.T) {
 	a, b := f.connect("alice", true), f.connect("bob", true)
 	casual := f.connect("carol", true)
 
-	f.quickMatch(a, &protocol.RankedRoomRequest{Enabled: true, BestOf: 3})
+	f.quickMatch(a, &protocol.RankedRoomRequest{Enabled: true})
 	if status, _ := lastQuickMatchStatus(t, a); !status.Searching || !status.Ranked || status.QueueSize != 1 {
 		t.Fatalf("status = %+v", status)
 	}
@@ -46,7 +46,7 @@ func TestRankedQuickMatchPairsSameSettings(t *testing.T) {
 		t.Fatalf("casual status = %+v", status)
 	}
 
-	f.quickMatch(b, &protocol.RankedRoomRequest{Enabled: true, BestOf: 3})
+	f.quickMatch(b, &protocol.RankedRoomRequest{Enabled: true})
 	room := a.user.CurrentRoom
 	if room == nil || b.user.CurrentRoom != room {
 		t.Fatal("ranked searchers with the same settings didn't pair")
@@ -71,23 +71,28 @@ func TestRankedQuickMatchPairsSameSettings(t *testing.T) {
 	}
 }
 
-func TestRankedQuickMatchNeedsSameSet(t *testing.T) {
+// Rosters split the queue. Set length and skill aren't choices, so an older
+// client's request for another length or a tier range still pairs, and the
+// set gets the ladder's length.
+func TestRankedQuickMatchNeedsSameRoster(t *testing.T) {
 	f := newRankedFixture(t)
 	a, b, c := f.connect("alice", true), f.connect("bob", true), f.connect("carol", true)
 
-	f.quickMatch(a, &protocol.RankedRoomRequest{Enabled: true, BestOf: 3})
-	f.quickMatch(b, &protocol.RankedRoomRequest{Enabled: true, BestOf: 5})
-	f.quickMatch(c, &protocol.RankedRoomRequest{Enabled: true, BestOf: 3, RulesetID: "remix-1v1-remix"})
-	for _, p := range []*Client{a, b, c} {
-		if p.user.CurrentRoom != nil {
-			t.Fatalf("%s paired across set lengths or rosters", p.user.Username)
-		}
+	f.quickMatch(a, &protocol.RankedRoomRequest{Enabled: true})
+	f.quickMatch(c, &protocol.RankedRoomRequest{Enabled: true, RulesetID: "remix-1v1-remix"})
+	if a.user.CurrentRoom != nil || c.user.CurrentRoom != nil {
+		t.Fatal("searchers paired across rosters")
 	}
-	// Bo5 searcher finds a Bo5 one
-	d := f.connect("dave", true)
-	f.quickMatch(d, &protocol.RankedRoomRequest{Enabled: true, BestOf: 5})
-	if d.user.CurrentRoom == nil || d.user.CurrentRoom != b.user.CurrentRoom {
-		t.Fatal("Bo5 searchers didn't pair")
+	f.hub.handleQuickMatchJoin(b, envelope(t, map[string]any{
+		"rom":    protocol.RomInfo{Name: "Remix", MD5: testRomMD5},
+		"ranked": map[string]any{"enabled": true, "bestOf": 5, "maxTierGap": 1, "allowProvisional": false},
+	}))
+	room := b.user.CurrentRoom
+	if room == nil || room != a.user.CurrentRoom {
+		t.Fatal("searchers on the same roster didn't pair")
+	}
+	if settings := room.GetRanked(); settings.BestOf != 3 {
+		t.Fatalf("set length = %d, want the ladder's 3", settings.BestOf)
 	}
 }
 
@@ -104,9 +109,11 @@ func TestRankedQuickMatchRequiresAccount(t *testing.T) {
 	}
 }
 
-func TestRankedQuickMatchSkillFilters(t *testing.T) {
+// Any two players pair, however far apart their tiers and whether or not
+// they're still in placement.
+func TestRankedQuickMatchIgnoresSkill(t *testing.T) {
 	f := newRankedFixture(t)
-	strong, weak := f.connect("strong", true), f.connect("weak", true)
+	strong, weak, newbie := f.connect("strong", true), f.connect("weak", true), f.connect("newbie", true)
 	seed := func(c *Client, r float64) {
 		if err := f.store.SeedRating(c.user.AccountID, "remix", "remix-1v1-vanilla",
 			rating.Rating{Rating: r, Deviation: 60, Volatility: 0.06}); err != nil {
@@ -120,59 +127,29 @@ func TestRankedQuickMatchSkillFilters(t *testing.T) {
 	if s1.TierIndex-s2.TierIndex < 2 || s1.Provisional || s2.Provisional {
 		t.Fatalf("seeded standings %+v / %+v aren't two settled tiers apart", s1, s2)
 	}
-	gap := s1.TierIndex - s2.TierIndex
 
-	// the weak player takes anyone, but the strong one only within one tier
-	f.quickMatch(weak, &protocol.RankedRoomRequest{Enabled: true})
-	f.quickMatch(strong, &protocol.RankedRoomRequest{Enabled: true, MaxTierGap: 1})
-	if weak.user.CurrentRoom != nil {
-		t.Fatal("paired although the strong player's range excludes the weak one")
-	}
-	f.hub.handleQuickMatchCancel(strong, protocol.Envelope{})
-	f.hub.handleQuickMatchCancel(weak, protocol.Envelope{})
-
-	// and the other way round
 	f.quickMatch(strong, &protocol.RankedRoomRequest{Enabled: true})
-	f.quickMatch(weak, &protocol.RankedRoomRequest{Enabled: true, MaxTierGap: 1})
-	if weak.user.CurrentRoom != nil {
-		t.Fatal("paired although the weak player's range excludes the strong one")
-	}
-	f.hub.handleQuickMatchCancel(weak, protocol.Envelope{})
-
-	// both ranges wide enough
-	f.quickMatch(weak, &protocol.RankedRoomRequest{Enabled: true, MaxTierGap: gap})
+	f.quickMatch(weak, &protocol.RankedRoomRequest{Enabled: true})
 	if weak.user.CurrentRoom == nil || weak.user.CurrentRoom != strong.user.CurrentRoom {
-		t.Fatal("players within each other's range didn't pair")
+		t.Fatal("players two tiers apart didn't pair")
 	}
 	if problem := f.hub.rankedStartCheck(weak.user.CurrentRoom, weak.user.CurrentRoom.GetRanked()); problem != "" {
 		t.Fatalf("start check: %s", problem)
 	}
-}
 
-func TestRankedQuickMatchPlacementPlayers(t *testing.T) {
-	f := newRankedFixture(t)
-	vet, newbie := f.connect("vet", true), f.connect("newbie", true)
-	if err := f.store.SeedRating(vet.user.AccountID, "remix", "remix-1v1-vanilla",
-		rating.Rating{Rating: 1850, Deviation: 60, Volatility: 0.06}); err != nil {
-		t.Fatal(err)
-	}
-	no := false
-	f.quickMatch(vet, &protocol.RankedRoomRequest{Enabled: true, MaxTierGap: 1, AllowProvisional: &no})
+	vet := f.connect("vet", true)
+	seed(vet, 1850)
+	f.quickMatch(vet, &protocol.RankedRoomRequest{Enabled: true})
 	f.quickMatch(newbie, &protocol.RankedRoomRequest{Enabled: true})
-	if newbie.user.CurrentRoom != nil {
-		t.Fatal("a player in placement passed a range that excludes placement players")
-	}
-	f.hub.handleQuickMatchCancel(vet, protocol.Envelope{})
-	f.quickMatch(vet, &protocol.RankedRoomRequest{Enabled: true, MaxTierGap: 1})
 	if newbie.user.CurrentRoom == nil || newbie.user.CurrentRoom != vet.user.CurrentRoom {
-		t.Fatal("a placement player was refused although placement players are allowed")
+		t.Fatal("a player in placement didn't pair with a settled one")
 	}
 }
 
 func TestRankedQuickMatchTeams(t *testing.T) {
 	f := newRankedFixtureWith(t, testTeamsConfig)
 	players := []*Client{f.connect("p1", true), f.connect("p2", true), f.connect("p3", true), f.connect("p4", true)}
-	req := &protocol.RankedRoomRequest{Enabled: true, LadderID: "remix-2v2", BestOf: 3}
+	req := &protocol.RankedRoomRequest{Enabled: true, LadderID: "remix-2v2"}
 	for _, p := range players[:3] {
 		f.quickMatch(p, req)
 	}

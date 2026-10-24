@@ -23,7 +23,7 @@ const testConfig = `{"ladders":[{"id":"remix","name":"Smash Remix 1v1","moduleId
 	"rulesetNames":{"remix-1v1-vanilla":"Vanilla roster"},
 	"rulesetDescriptions":{"remix-1v1-vanilla":"The original 12."},
 	"rulesetStages":{"remix-1v1-remix":["Dream Land","Goomba Road"]},
-	"bestOf":[3,5],"roms":[{"md5":"2B2D6B295106C54216B7FC7A2F14346E","name":"Remix"}]}]}`
+	"bestOf":3,"roms":[{"md5":"2B2D6B295106C54216B7FC7A2F14346E","name":"Remix"}]}]}`
 
 func newTestServer(t *testing.T) (*httptest.Server, *accounts.Store) {
 	t.Helper()

@@ -63,36 +63,24 @@ func (e qmEntry) waiting() bool {
 }
 
 // samePool reports whether two searchers want the same game: the same ROM,
-// and either both casual or both ranked on the same ladder, roster and set
-// length.
+// and either both casual or both ranked on the same ladder and roster. Set
+// length and skill aren't choices, so they don't split the queue.
 func (e qmEntry) samePool(o qmEntry) bool {
 	if !strings.EqualFold(e.rom.MD5, o.rom.MD5) || (e.ranked == nil) != (o.ranked == nil) {
 		return false
 	}
 	return e.ranked == nil || (e.ranked.LadderID == o.ranked.LadderID &&
-		e.ranked.RulesetID == o.ranked.RulesetID && e.ranked.BestOf == o.ranked.BestOf)
+		e.ranked.RulesetID == o.ranked.RulesetID)
 }
 
-// accepts reports whether e's skill filter lets o play, with the same rule a
+// accepts reports whether e's max ping lets o play, with the same rule a
 // ranked room applies to joiners (see rankedEligibility).
 func (e qmEntry) accepts(o qmEntry) bool {
 	if e.ranked == nil {
 		return true
 	}
-	if estimate := geo.EstimatedRTT(e.region, o.region); e.ranked.MaxPing > 0 && estimate > e.ranked.MaxPing {
-		return false
-	}
-	if e.ranked.MaxTierGap == 0 {
-		return true
-	}
-	if e.standing == nil || o.standing == nil {
-		return false
-	}
-	if e.ranked.AllowProvisional && (e.standing.Provisional || o.standing.Provisional) {
-		return true
-	}
-	gap := e.standing.TierIndex - o.standing.TierIndex
-	return gap <= e.ranked.MaxTierGap && -gap <= e.ranked.MaxTierGap
+	estimate := geo.EstimatedRTT(e.region, o.region)
+	return e.ranked.MaxPing == 0 || estimate <= e.ranked.MaxPing
 }
 
 // blocks reports whether e won't play o yet: o was e's previous opponent and
@@ -707,7 +695,7 @@ func (h *Hub) enqueueQuickMatch(c *Client, entry qmEntry, envID string) {
 	if entry.ranked != nil {
 		slog.Info("ranked quick match joined", "user", c.user.Username, "rom", entry.rom.Name,
 			"ladder", entry.ranked.LadderID, "ruleset", entry.ranked.RulesetID, "bestOf", entry.ranked.BestOf,
-			"tier", entry.standing.Tier, "maxTierGap", entry.ranked.MaxTierGap, "continuous", entry.continuous,
+			"tier", entry.standing.Tier, "continuous", entry.continuous,
 			"avoid", len(entry.avoid), "keepTeammate", entry.keepTeammate, "teammate", h.usernameOf(entry.partner),
 			"wantTeammate", entry.wantTeammate,
 			"pool", h.matchmaker.poolSize(entry))

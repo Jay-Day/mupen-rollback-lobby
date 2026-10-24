@@ -12,7 +12,7 @@ import (
 	"github.com/jay-day/rmgk-lobby/internal/state"
 )
 
-var teamSessionRequest = &protocol.RankedRoomRequest{Enabled: true, LadderID: "remix-2v2", BestOf: 3}
+var teamSessionRequest = &protocol.RankedRoomRequest{Enabled: true, LadderID: "remix-2v2"}
 
 // teamSession searches for a 2v2 session, with a random teammate unless
 // one is asked for
@@ -411,11 +411,11 @@ func TestTeammateRequestChecks(t *testing.T) {
 
 	// asking each other for different sets: both are told, nothing forms
 	f.teamSession(p1, "p2", false)
-	f.teamSearch(p2, &protocol.RankedRoomRequest{Enabled: true, LadderID: "remix-2v2", BestOf: 5}, "p1", false)
+	f.teamSearch(p2, &protocol.RankedRoomRequest{Enabled: true, LadderID: "remix-2v2", RulesetID: "remix-2v2-remix"}, "p1", false)
 	if e, _ := f.hub.matchmaker.entry(p1.user.ID); e.partner != 0 {
-		t.Fatal("teamed up across set lengths")
+		t.Fatal("teamed up across rosters")
 	}
-	want := "%s wants you as their teammate too, but you're searching for different sets (format, roster or set length). Search for the same one to play together."
+	want := "%s wants you as their teammate too, but you're searching for different sets (format or roster). Search for the same one to play together."
 	if notices := noticesIn(drainAll(p1)); !containsString(notices, strings.Replace(want, "%s", "p2", 1)) {
 		t.Fatalf("p1's notices = %v", notices)
 	}

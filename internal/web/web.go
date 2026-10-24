@@ -171,7 +171,7 @@ type ladderDTO struct {
 	ModuleID string       `json:"moduleId"`
 	Rules    []string     `json:"rules"`
 	Rulesets []rulesetDTO `json:"rulesets"`
-	BestOf   []int        `json:"bestOf"`
+	BestOf   int          `json:"bestOf"`
 	Roms     []romDTO     `json:"roms"`
 	// TeamSize: 1 for 1v1, 2 for 2v2 team battles (rated with OpenSkill)
 	TeamSize int `json:"teamSize"`
@@ -216,7 +216,7 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, l := range s.cfg.Ladders {
 		policy := l.Policy()
-		dto := ladderDTO{ID: l.ID, Name: l.Name, ModuleID: l.ModuleID, Rules: l.Rules, BestOf: l.BestOf, TeamSize: l.TeamSize,
+		dto := ladderDTO{ID: l.ID, Name: l.Name, ModuleID: l.ModuleID, Rules: l.Rules, BestOf: int(l.BestOf), TeamSize: l.TeamSize,
 			PlacementDeviation: policy.PlacementDeviation, TierDeviations: policy.TierDeviations}
 		if dto.Rules == nil {
 			dto.Rules = []string{}

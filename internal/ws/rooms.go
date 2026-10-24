@@ -1014,14 +1014,12 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 	}
 	if settings := r.Ranked; settings != nil {
 		out.Ranked = &protocol.RankedRoomState{
-			Ladder:           settings.LadderID,
-			ModuleID:         settings.ModuleID,
-			RulesetID:        settings.RulesetID,
-			BestOf:           settings.BestOf,
-			MaxTierGap:       settings.MaxTierGap,
-			AllowProvisional: settings.AllowProvisional,
-			TeamSize:         settings.TeamSize,
-			MaxPing:          settings.MaxPing,
+			Ladder:    settings.LadderID,
+			ModuleID:  settings.ModuleID,
+			RulesetID: settings.RulesetID,
+			BestOf:    settings.BestOf,
+			TeamSize:  settings.TeamSize,
+			MaxPing:   settings.MaxPing,
 		}
 	}
 	return out

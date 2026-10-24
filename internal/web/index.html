@@ -946,7 +946,7 @@ async function showRules() {
         l.rules.length ? h("ul.rules", {}, l.rules.map((r) => h("li", {}, r))) : h("p.note", {}, "Set by the game module.")),
       h("div.card", {}, h("h3", {}, "Sets"),
         h("ul.rules", {},
-          h("li", {}, "Best of " + l.bestOf.join(" or ") + " — the host picks when creating the room"),
+          h("li", {}, "Best of " + l.bestOf + ", from Quick Ranked Match or a ranked room"),
           ...(l.teamSize > 1 ? [
             h("li", {}, "Two teams of two, all four players logged in; any ports"),
             h("li", {}, "Team battle with team attack on"),
@@ -1263,13 +1263,14 @@ async function showHow() {
         "). Other builds, including PAL versions and mods like +Extra, can't play ranked."] :
         "Ranked play needs a supported game build."),
     h("li", {}, h("b", {}, "Find a match. "), "Pick the game and press ", h("i", {}, "Quick Ranked Match"),
-      ". Choose 1v1 or 2v2, the roster, the set length, which opponents you accept and the highest ping you'll play at " +
+      ". Choose 1v1 or 2v2, the roster and the highest ping you'll play at " +
       "(120 ms by default; the match is cancelled if the measured ping is higher). The set starts by itself once " +
-      "someone picks the same set and each of you is inside the other's range (2v2 waits for four players). " +
-      "With Keep searching on, the next search starts a few seconds after each set, with a new opponent; " +
-      "if only your last opponent is around after 2 minutes, you can choose to play them again."),
+      "someone else searches for the same format and roster within both of your ping limits (2v2 waits for four players). " +
+      "After each set the next search starts a few seconds later, with a new opponent; if only your last opponent " +
+      "is around after 2 minutes, you can choose to play them again. Press ", h("i", {}, "Stop Ranked Session"),
+      " when you're done."),
     h("li", {}, h("b", {}, "Or create or join a ranked room. "), "Pick the game, press ", h("i", {}, "Create Room"),
-      ", tick ", h("i", {}, "Ranked set"), ", choose 1v1 or 2v2, the set length and the roster (each has its own rankings). " +
+      ", tick ", h("i", {}, "Ranked set"), ", choose 1v1 or 2v2 and the roster (each has its own rankings). " +
       "A 2v2 room needs four players; pick teams on character select (any ports). Ranked rooms are marked ",
       h("code", {}, "[Ranked]"), " in the room list."),
     h("li", {}, h("b", {}, "Play the set. "), "The game boots straight to character select with the rules locked in. " +
@@ -1280,8 +1281,7 @@ async function showHow() {
       h("li", {}, "A game that's reset, played with a CPU, or played with a character outside the room's roster doesn't count — just replay it."),
       h("li", {}, "If either player leaves before the set is decided, the set is voided: no rating change."),
       h("li", {}, "If the two players' results disagree or the game desyncs, the set is marked disputed. A moderator reviews it " +
-        "(the replay helps) and either rates it or voids it."),
-      h("li", {}, "Hosts can limit opponents to players within a few tiers of their own."))))];
+        "(the replay helps) and either rates it or voids it."))))];
 }
 
 // ── Moderators (#/admin): disputed sets, accounts, activity log

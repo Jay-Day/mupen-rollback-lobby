@@ -337,7 +337,7 @@ func (h *Hub) ladderInfo() []protocol.LadderInfo {
 	for _, l := range h.rankedConfig.Ladders {
 		info := protocol.LadderInfo{
 			ID: l.ID, Name: l.Name, ModuleID: l.ModuleID,
-			Rulesets: l.Rulesets, RulesetNames: l.RulesetNames, BestOf: l.BestOf, Tiers: tiers,
+			Rulesets: l.Rulesets, RulesetNames: l.RulesetNames, BestOf: int(l.BestOf), Tiers: tiers,
 			TeamSize: l.TeamSize,
 		}
 		for _, rom := range l.Roms {

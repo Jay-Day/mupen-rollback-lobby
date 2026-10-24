@@ -70,12 +70,10 @@ type Room struct {
 
 // RankedSettings are a ranked room's server-validated set settings.
 type RankedSettings struct {
-	LadderID         string
-	ModuleID         string
-	RulesetID        string
-	BestOf           int
-	MaxTierGap       int // 0 = any verified player
-	AllowProvisional bool
+	LadderID  string
+	ModuleID  string
+	RulesetID string
+	BestOf    int
 	// TeamSize is players per side: 1 (1v1) or 2 (2v2 team battle).
 	TeamSize int
 	// MaxPing (ms) between players; 0 = any.

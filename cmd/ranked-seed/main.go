@@ -380,7 +380,7 @@ func main() {
 
 // playSet plays one set between a and b on roster r from their hidden skill.
 func playSet(rng *rand.Rand, ladder ranked.Ladder, r roster, a, b *player, match uint64) accounts.SetRecord {
-	bestOf := ladder.BestOf[rng.Intn(len(ladder.BestOf))]
+	bestOf := int(ladder.BestOf)
 	need := bestOf/2 + 1
 	// per-game chance from the skill gap, a set is first to `need`
 	pGame := 1 / (1 + math.Pow(10, (b.skill[r.id]-a.skill[r.id])/400))
@@ -483,7 +483,7 @@ func storeReplay(store *accounts.Store, dir string, setID int64, games int, a, b
 // playTeamSet plays a 2v2 set on random ports from the players' hidden team
 // skill: a game goes to a team with the Elo chance of its average skill.
 func playTeamSet(rng *rand.Rand, ladder ranked.Ladder, r roster, sides [2][2]*player, match uint64) accounts.SetRecord {
-	bestOf := ladder.BestOf[rng.Intn(len(ladder.BestOf))]
+	bestOf := int(ladder.BestOf)
 	need := bestOf/2 + 1
 	avg := func(t [2]*player) float64 { return (t[0].skill[r.id] + t[1].skill[r.id]) / 2 }
 	pGame := 1 / (1 + math.Pow(10, (avg(sides[1])-avg(sides[0]))/400))

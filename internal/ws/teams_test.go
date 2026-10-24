@@ -12,7 +12,7 @@ const testTeamsConfig = `{"ladders":[
 	{"id":"remix","name":"Smash Remix 1v1","moduleId":"smashremix","rulesets":["remix-1v1-vanilla"],
 	 "roms":[{"md5":"` + testRomMD5 + `"}]},
 	{"id":"remix-2v2","name":"Smash Remix 2v2","moduleId":"smashremix","teamSize":2,
-	 "rulesets":["remix-2v2-vanilla","remix-2v2-remix"],"bestOf":[3,5],"roms":[{"md5":"` + testRomMD5 + `"}]}]}`
+	 "rulesets":["remix-2v2-vanilla","remix-2v2-remix"],"bestOf":3,"roms":[{"md5":"` + testRomMD5 + `"}]}]}`
 
 // startTeamMatch seats four players in a 2v2 ranked room and starts it.
 func startTeamMatch(t *testing.T, f *rankedFixture) ([]*Client, uint64) {

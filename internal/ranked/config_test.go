@@ -9,7 +9,7 @@ import (
 const sample = `{
   "ladders": [{
     "id": "smashremix-1v1", "name": "Smash Remix 1v1", "moduleId": "smashremix",
-    "rulesets": ["remix-1v1-standard"], "bestOf": [3, 5],
+    "rulesets": ["remix-1v1-standard"], "bestOf": 5,
     "roms": [{"md5": "2b2d6b295106c54216b7fc7a2f14346e", "name": "Smash Remix 2.0.1"}]
   }]
 }`
@@ -32,14 +32,30 @@ func TestParse(t *testing.T) {
 	if _, ok := l.Ruleset("anything-goes"); ok {
 		t.Fatal("unknown ruleset accepted")
 	}
-	if n, ok := l.SetLength(0); !ok || n != 3 {
-		t.Fatalf("default bestOf = %d", n)
-	}
-	if _, ok := l.SetLength(7); ok {
-		t.Fatal("bestOf 7 accepted")
+	if l.BestOf != 5 {
+		t.Fatalf("bestOf = %d", l.BestOf)
 	}
 	if len(c.Tiers.Bands) == 0 {
 		t.Fatal("default tiers missing")
+	}
+}
+
+// Set lengths used to be the host's choice from a list; such a config keeps
+// loading with its first (default) length.
+func TestParseSetLength(t *testing.T) {
+	for config, want := range map[string]SetLength{
+		`{"ladders":[{"id":"x","moduleId":"m","rulesets":["r"]}]}`:                3,
+		`{"ladders":[{"id":"x","moduleId":"m","rulesets":["r"],"bestOf":[3,5]}]}`: 3,
+		`{"ladders":[{"id":"x","moduleId":"m","rulesets":["r"],"bestOf":[5]}]}`:   5,
+		`{"ladders":[{"id":"x","moduleId":"m","rulesets":["r"],"bestOf":[]}]}`:    3,
+	} {
+		c, err := Parse([]byte(config))
+		if err != nil {
+			t.Fatalf("Parse(%s): %v", config, err)
+		}
+		if got := c.Ladders[0].BestOf; got != want {
+			t.Errorf("Parse(%s): bestOf = %d, want %d", config, got, want)
+		}
 	}
 }
 
@@ -52,7 +68,9 @@ func TestParseAcceptsByteOrderMark(t *testing.T) {
 func TestParseRejectsBadConfig(t *testing.T) {
 	bad := []string{
 		`{"ladders":[{"id":"x","moduleId":"m","rulesets":[]}]}`,
-		`{"ladders":[{"id":"x","moduleId":"m","rulesets":["r"],"bestOf":[2]}]}`,
+		`{"ladders":[{"id":"x","moduleId":"m","rulesets":["r"],"bestOf":2}]}`,
+		`{"ladders":[{"id":"x","moduleId":"m","rulesets":["r"],"bestOf":[2,3]}]}`,
+		`{"ladders":[{"id":"x","moduleId":"m","rulesets":["r"],"bestOf":"3"}]}`,
 		`{"ladders":[{"id":"x","moduleId":"m","rulesets":["r"],"roms":[{"md5":"abc"}]}]}`,
 		`{"ladders":[{"id":"x","moduleId":"m","rulesets":["r"]},{"id":"x","moduleId":"m","rulesets":["r"]}]}`,
 		`{"ladders":[{"id":"x","moduleId":"m","rulesets":["r"],"rulesetStages":{"other":["Dream Land"]}}]}`,

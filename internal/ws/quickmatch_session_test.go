@@ -64,7 +64,7 @@ func roomLeftReasons(msgs []protocol.Envelope) []string {
 	return out
 }
 
-var sessionRequest = &protocol.RankedRoomRequest{Enabled: true, BestOf: 3}
+var sessionRequest = &protocol.RankedRoomRequest{Enabled: true}
 
 func (f *rankedFixture) session(c *Client) {
 	f.t.Helper()

@@ -27,10 +27,7 @@
         "remix-1v1-vanilla": ["Dream Land"],
         "remix-1v1-remix": ["Dream Land", "Goomba Road", "Pokémon Stadium 2", "Pokémon Stadium"]
       },
-      "bestOf": [
-        3,
-        5
-      ],
+      "bestOf": 3,
       "roms": [
         {
           "md5": "2B2D6B295106C54216B7FC7A2F14346E",
@@ -68,10 +65,7 @@
         "remix-2v2-vanilla": ["Dream Land"],
         "remix-2v2-remix": ["Dream Land", "Goomba Road", "Pokémon Stadium 2", "Pokémon Stadium"]
       },
-      "bestOf": [
-        3,
-        5
-      ],
+      "bestOf": 3,
       "roms": [
         {
           "md5": "2B2D6B295106C54216B7FC7A2F14346E",

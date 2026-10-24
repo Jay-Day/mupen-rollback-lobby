@@ -215,7 +215,6 @@ const (
 	// Ranked rooms
 	ReasonRankedUnavailable = "ranked_unavailable" // ROM not on a ladder / ranked not configured
 	ReasonNotVerified       = "not_verified"       // ranked needs a logged-in account
-	ReasonSkillMismatch     = "skill_mismatch"     // outside the room's skill filter
 	ReasonTooFar            = "too_far"            // estimated ping above the room's max ping
 	ReasonRankedSeats       = "ranked_seats"       // ranked sets are 1v1
 )
@@ -355,23 +354,18 @@ type RoomCreateRequest struct {
 }
 
 // RankedRoomRequest is used by ROOM_CREATE and ROOM_UPDATE_RANKED. Zero
-// values pick the ladder defaults.
+// values pick the ladder defaults. Every set on a ladder has the ladder's
+// length and is open to any logged-in player, so a ranked queue isn't split
+// by preferences.
 type RankedRoomRequest struct {
 	Enabled bool `json:"enabled"`
 	// LadderID picks the ladder (e.g. the 2v2 one) among the ROM's ladders;
 	// empty = the ROM's 1v1 ladder.
 	LadderID  string `json:"ladderId,omitempty"`
 	RulesetID string `json:"rulesetId,omitempty"`
-	BestOf    int    `json:"bestOf,omitempty"`
 	// MaxPing (ms) limits the ping between players: joiners are checked by
 	// region estimate, the start by measured ping. 0 = any.
 	MaxPing int `json:"maxPing,omitempty"`
-	// MaxTierGap limits joiners to within this many tiers of the host;
-	// 0 = anyone verified may join.
-	MaxTierGap int `json:"maxTierGap,omitempty"`
-	// AllowProvisional lets players still in placement join regardless of the
-	// tier gap. Defaults to true when omitted.
-	AllowProvisional *bool `json:"allowProvisional,omitempty"`
 }
 
 type RomInfo struct {
@@ -538,8 +532,8 @@ type ICESignalRequest struct {
 type QuickMatchJoinRequest struct {
 	Rom RomInfo `json:"rom"`
 	// Ranked queues for a ranked set (Enabled must be set). Searchers pair
-	// only with ranked searchers on the same ladder, roster and set length
-	// whose skill filters (MaxTierGap, AllowProvisional) accept each other.
+	// only with ranked searchers on the same ladder and roster whose max pings
+	// accept each other.
 	Ranked *RankedRoomRequest `json:"ranked,omitempty"`
 	// Continuous keeps the search going: after each set (ranked) or match
 	// (casual: once a player closes the game) the lobby closes the room and
@@ -626,9 +620,10 @@ type LadderInfo struct {
 	Rulesets []string `json:"rulesets"`
 	// Display names by ruleset id; ids without one display as themselves.
 	RulesetNames map[string]string `json:"rulesetNames,omitempty"`
-	BestOf       []int             `json:"bestOf"`
-	RomMD5s      []string          `json:"romMd5s"`
-	Tiers        []string          `json:"tiers"`
+	// BestOf is the length of every set on the ladder.
+	BestOf  int      `json:"bestOf"`
+	RomMD5s []string `json:"romMd5s"`
+	Tiers   []string `json:"tiers"`
 	// TeamSize is players per side: 1 (1v1) or 2 (2v2 team battles).
 	TeamSize int `json:"teamSize"`
 }
@@ -792,16 +787,14 @@ type RoomStatePayload struct {
 }
 
 type RankedRoomState struct {
-	Ladder           string `json:"ladder"`
-	LadderName       string `json:"ladderName"`
-	ModuleID         string `json:"moduleId"`
-	RulesetID        string `json:"rulesetId"`
-	RulesetName      string `json:"rulesetName"`
-	BestOf           int    `json:"bestOf"`
-	MaxTierGap       int    `json:"maxTierGap"`
-	AllowProvisional bool   `json:"allowProvisional"`
-	TeamSize         int    `json:"teamSize"`
-	MaxPing          int    `json:"maxPing,omitempty"`
+	Ladder      string `json:"ladder"`
+	LadderName  string `json:"ladderName"`
+	ModuleID    string `json:"moduleId"`
+	RulesetID   string `json:"rulesetId"`
+	RulesetName string `json:"rulesetName"`
+	BestOf      int    `json:"bestOf"`
+	TeamSize    int    `json:"teamSize"`
+	MaxPing     int    `json:"maxPing,omitempty"`
 }
 
 // RoomPeerPingRequest reports the sender's measured round trip to another
@@ -978,7 +971,7 @@ type MatchPeerLeftPayload struct {
 type QuickMatchStatusPayload struct {
 	Searching bool `json:"searching"`
 	// QueueSize counts the searchers in the same pool (same ROM, and for a
-	// ranked search the same ladder, roster and set length), including you.
+	// ranked search the same ladder and roster), including you.
 	QueueSize int `json:"queueSize"`
 	// Ranked is set when the search is (or was) a ranked one.
 	Ranked bool `json:"ranked,omitempty"`

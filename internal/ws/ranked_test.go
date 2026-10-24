@@ -18,7 +18,7 @@ import (
 const testRomMD5 = "2B2D6B295106C54216B7FC7A2F14346E"
 
 const testRankedConfig = `{"ladders":[{"id":"remix","name":"Smash Remix 1v1","moduleId":"smashremix",
-	"rulesets":["remix-1v1-vanilla","remix-1v1-remix"],"bestOf":[3,5],
+	"rulesets":["remix-1v1-vanilla","remix-1v1-remix"],"bestOf":3,
 	"rulesetNames":{"remix-1v1-vanilla":"Vanilla roster","remix-1v1-remix":"Remix roster"},
 	"roms":[{"md5":"` + testRomMD5 + `","name":"Remix"}]}]}`
 
@@ -159,12 +159,12 @@ func TestRankedRoomEligibility(t *testing.T) {
 	}
 
 	host := f.connect("host", true)
-	room := f.createRankedRoom(host, &protocol.RankedRoomRequest{Enabled: true, BestOf: 5})
+	room := f.createRankedRoom(host, &protocol.RankedRoomRequest{Enabled: true})
 	if room == nil {
 		t.Fatal("verified host could not create a ranked room")
 	}
 	settings := room.GetRanked()
-	if settings == nil || settings.BestOf != 5 || settings.LadderID != "remix" || room.MaxPlayers != 2 {
+	if settings == nil || settings.BestOf != 3 || settings.LadderID != "remix" || room.MaxPlayers != 2 {
 		t.Fatalf("ranked settings = %+v, max %d", settings, room.MaxPlayers)
 	}
 	if rs := f.hub.roomState(room); rs.Ranked == nil || rs.Ranked.LadderName != "Smash Remix 1v1" ||
@@ -205,37 +205,30 @@ func TestRankedRoomEligibility(t *testing.T) {
 	}
 }
 
-func TestRankedSkillFilter(t *testing.T) {
+// Ranked rooms are open to every logged-in player, whatever their tier.
+func TestRankedRoomOpenToAnySkill(t *testing.T) {
 	f := newRankedFixture(t)
 	host := f.connect("veteran", true)
 	newbie := f.connect("newbie", true)
 
-	// make the host a settled Diamond player on the vanilla roster only
+	// a settled Diamond host and a player still in placement
 	strong := rating.Rating{Rating: 1800, Deviation: 60, Volatility: 0.06}
 	if err := f.store.SeedRating(host.user.AccountID, "remix", "remix-1v1-vanilla", strong); err != nil {
 		t.Fatal(err)
 	}
-
-	no := false
-	room := f.createRankedRoom(host, &protocol.RankedRoomRequest{Enabled: true, MaxTierGap: 1, AllowProvisional: &no})
-	f.hub.handleRoomJoin(newbie, envelope(t, protocol.RoomJoinRequest{RoomID: room.ID}))
-	if newbie.user.CurrentRoom != nil {
-		t.Fatal("provisional Bronze player passed a 1-tier filter with provisional disallowed")
+	// an older client may still send a tier range; it's ignored
+	f.hub.handleRoomCreate(host, envelope(t, map[string]any{
+		"name": "ranked", "rom": protocol.RomInfo{Name: "Remix", MD5: testRomMD5},
+		"maxPlayers": 2, "delay": 2, "prediction": 7,
+		"ranked": map[string]any{"enabled": true, "maxTierGap": 1, "allowProvisional": false},
+	}))
+	room := host.user.CurrentRoom
+	if room == nil || room.GetRanked() == nil {
+		t.Fatal("the host could not create a ranked room")
 	}
-
-	// the remix roster is rated separately: there both are new, so they match
-	f.hub.handleRoomUpdateRanked(host, envelope(t, protocol.RankedRoomRequest{Enabled: true, MaxTierGap: 1,
-		AllowProvisional: &no, RulesetID: "remix-1v1-remix"}))
 	f.hub.handleRoomJoin(newbie, envelope(t, protocol.RoomJoinRequest{RoomID: room.ID}))
 	if newbie.user.CurrentRoom != room {
-		t.Fatal("the host's vanilla rating filtered a remix-roster room")
-	}
-	f.hub.handleRoomLeave(newbie, protocol.Envelope{})
-
-	f.hub.handleRoomUpdateRanked(host, envelope(t, protocol.RankedRoomRequest{Enabled: true, MaxTierGap: 1}))
-	f.hub.handleRoomJoin(newbie, envelope(t, protocol.RoomJoinRequest{RoomID: room.ID}))
-	if newbie.user.CurrentRoom != room {
-		t.Fatal("provisional player rejected although provisional players are allowed")
+		t.Fatal("a player in placement couldn't join a settled player's ranked room")
 	}
 }
 

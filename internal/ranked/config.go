@@ -42,9 +42,9 @@ type Ladder struct {
 	// Rules lists the match rules every ruleset on the ladder shares, for
 	// the rankings page (e.g. "4 stock, 8 minutes").
 	Rules []string `json:"rules,omitempty"`
-	// BestOf lists allowed set lengths; the first is the default.
-	BestOf []int `json:"bestOf"`
-	Roms   []Rom `json:"roms"`
+	// BestOf is the length of every set on the ladder (default 3).
+	BestOf SetLength `json:"bestOf"`
+	Roms   []Rom     `json:"roms"`
 	// TeamSize is players per side: 1 for 1v1 (the default), 2 for 2v2
 	// team battles. Team ladders are rated with OpenSkill.
 	TeamSize int `json:"teamSize,omitempty"`
@@ -53,6 +53,27 @@ type Ladder struct {
 	// TierDeviations × ±. Defaults: 110 and 2 for 1v1, 175 and 1 for teams.
 	PlacementDeviation float64 `json:"placementDeviation,omitempty"`
 	TierDeviations     float64 `json:"tierDeviations,omitempty"`
+}
+
+// SetLength is a set's length in games (best of N). Configs from when the
+// host picked the length list several; the first, the old default, is used.
+type SetLength int
+
+func (n *SetLength) UnmarshalJSON(data []byte) error {
+	var list []int
+	if err := json.Unmarshal(data, &list); err == nil {
+		*n = 0
+		if len(list) > 0 {
+			*n = SetLength(list[0])
+		}
+		return nil
+	}
+	var v int
+	if err := json.Unmarshal(data, &v); err != nil {
+		return fmt.Errorf("bestOf must be a number: %w", err)
+	}
+	*n = SetLength(v)
+	return nil
 }
 
 // Policy is the ladder's placement and tier rule.
@@ -136,8 +157,8 @@ func Parse(data []byte) (*Config, error) {
 				return nil, fmt.Errorf("ladder %q: rulesetStages names unknown ruleset %q", l.ID, id)
 			}
 		}
-		if len(l.BestOf) == 0 {
-			l.BestOf = []int{3}
+		if l.BestOf == 0 {
+			l.BestOf = 3
 		}
 		if l.TeamSize == 0 {
 			l.TeamSize = 1
@@ -145,10 +166,8 @@ func Parse(data []byte) (*Config, error) {
 		if l.TeamSize != 1 && l.TeamSize != 2 {
 			return nil, fmt.Errorf("ladder %q: teamSize %d must be 1 or 2", l.ID, l.TeamSize)
 		}
-		for _, n := range l.BestOf {
-			if n < 1 || n%2 == 0 {
-				return nil, fmt.Errorf("ladder %q: bestOf %d must be a positive odd number", l.ID, n)
-			}
+		if l.BestOf < 1 || l.BestOf%2 == 0 {
+			return nil, fmt.Errorf("ladder %q: bestOf %d must be a positive odd number", l.ID, l.BestOf)
 		}
 		for _, rom := range l.Roms {
 			md5 := strings.ToUpper(strings.TrimSpace(rom.MD5))
@@ -229,17 +248,4 @@ func (l *Ladder) RulesetName(id string) string {
 		return name
 	}
 	return id
-}
-
-// SetLength returns the requested best-of if allowed (0 = default).
-func (l *Ladder) SetLength(bestOf int) (int, bool) {
-	if bestOf == 0 {
-		return l.BestOf[0], true
-	}
-	for _, n := range l.BestOf {
-		if n == bestOf {
-			return n, true
-		}
-	}
-	return 0, false
 }

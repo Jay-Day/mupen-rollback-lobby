@@ -205,8 +205,8 @@ func (h *Hub) quickMatchTeammateRequests(c *Client, r teammateRequests) {
 		}
 	}
 	if r.otherSet != 0 {
-		message := "%s wants you as their teammate too, but you're searching for different sets (format, " +
-			"roster or set length). Search for the same one to play together."
+		message := "%s wants you as their teammate too, but you're searching for different sets (format " +
+			"or roster). Search for the same one to play together."
 		c.notice("warn", fmt.Sprintf(message, h.usernameOf(r.otherSet)))
 		if oc := h.getClient(r.otherSet); oc != nil {
 			oc.notice("warn", fmt.Sprintf(message, c.user.Username))
