@@ -303,7 +303,8 @@ func (h *Hub) quickMatchRoomLeft(u *state.User, room *state.Room, left qmLeave, 
 				h.sendQuickMatchStatus(c, "", qmEntry{ranked: search.ranked}, false)
 			}
 		}
-		if dissolved {
+		// a set still being judged moves the others on when it ends
+		if dissolved && !h.rankedSetPendingFor(u.ID) {
 			h.matchmaker.takeRoom(room.ID)
 		}
 	}

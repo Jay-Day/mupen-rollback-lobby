@@ -250,10 +250,11 @@ func TestRankedSessionQuitterLeavesSession(t *testing.T) {
 	a, b := f.connect("alice", true), f.connect("bob", true)
 	f.session(a)
 	f.session(b)
-	f.startQuickMatch(a.user.CurrentRoom)
+	matchID := f.startQuickMatch(a.user.CurrentRoom)
 	drainAll(b)
-	// alice (the host) quits mid-set: the set is voided, bob searches again
+	// alice (the host) quits in game 1: the set is voided, bob searches again
 	f.hub.handleRoomLeave(a, protocol.Envelope{})
+	f.abandon(b, matchID, 1, nil, nil)
 	if res := rankedResultFor(t, b); res.Status != "voided" {
 		t.Fatalf("result = %+v", res)
 	}

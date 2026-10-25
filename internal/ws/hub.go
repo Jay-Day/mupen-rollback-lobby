@@ -424,6 +424,10 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleRoomUpdateRanked(c, env)
 	case protocol.TypeMatchResult:
 		h.handleMatchResult(c, env)
+	case protocol.TypeMatchProgress:
+		h.handleMatchProgress(c, env)
+	case protocol.TypeMatchAbandoned:
+		h.handleMatchAbandoned(c, env)
 	case protocol.TypeAccountLogout:
 		h.handleAccountLogout(c, env)
 	case protocol.TypeAccountLinkDiscord:

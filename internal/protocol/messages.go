@@ -36,6 +36,12 @@ const (
 	// Each ranked player reports the finished set; the server rates it once
 	// every report agrees.
 	TypeMatchResult = "MATCH_RESULT"
+	// Each ranked player reports the games counted so far, after every game,
+	// so a set someone leaves can be judged on games both sides confirmed.
+	TypeMatchProgress = "MATCH_PROGRESS"
+	// When a ranked player leaves mid-set, the others report the set as of
+	// that moment (see judgeLeftSet).
+	TypeMatchAbandoned = "MATCH_ABANDONED"
 	// Revokes the remember-me token the client logged in with.
 	TypeAccountLogout = "ACCOUNT_LOGOUT"
 	// Changes the logged-in account's password; every saved login of the
@@ -512,6 +518,45 @@ type MatchResultPlayer struct {
 	StocksLeft int `json:"stocksLeft"`
 }
 
+// MatchProgressRequest is MATCH_PROGRESS: the games counted so far.
+type MatchProgressRequest struct {
+	MatchID uint64            `json:"matchId"`
+	Games   []MatchResultGame `json:"games"`
+}
+
+// MatchAbandonedRequest is MATCH_ABANDONED: the set as of the frame LeftSlot
+// left it, from a player who stayed.
+type MatchAbandonedRequest struct {
+	MatchID  uint64            `json:"matchId"`
+	LeftSlot int               `json:"leftSlot"`
+	Games    []MatchResultGame `json:"games"`
+	// The game under way when they left; nil when the module can't tell.
+	Live          *MatchLiveGame `json:"live,omitempty"`
+	VoidedGames   int            `json:"voidedGames,omitempty"`
+	RulesetHash   string         `json:"rulesetHash"`
+	Integrity     string         `json:"integrity"`
+	RulesetID     string         `json:"rulesetId,omitempty"`
+	ModuleVersion string         `json:"moduleVersion,omitempty"`
+	RomMD5        string         `json:"romMd5,omitempty"`
+}
+
+// MatchLiveGame is the game a player left during.
+type MatchLiveGame struct {
+	Game int `json:"game"`
+	// InGame: a game that counts was under way (from its countdown); false
+	// between games, when nobody leads.
+	InGame bool `json:"inGame"`
+	// Team sets: each slot's team (index 0 = slot 1), as in MatchResultRequest.
+	Teams   []int             `json:"teams,omitempty"`
+	Players []MatchLivePlayer `json:"players"`
+}
+
+type MatchLivePlayer struct {
+	Slot    int `json:"slot"`
+	Stocks  int `json:"stocks"` // stocks left
+	Percent int `json:"percent"`
+}
+
 type MatchPeerEventRequest struct {
 	MatchID    uint64 `json:"matchId"`
 	PeerUserID uint64 `json:"peerUserId,omitempty"`
@@ -939,6 +984,8 @@ type RankedResultPayload struct {
 	WinnerSlot int                  `json:"winnerSlot,omitempty"`
 	WinnerTeam int                  `json:"winnerTeam,omitempty"` // team sets
 	Players    []RankedResultPlayer `json:"players"`
+	// The player who left mid-set, when that decided it (forfeit or void).
+	LeftUsername string `json:"leftUsername,omitempty"`
 }
 
 type RankedResultPlayer struct {

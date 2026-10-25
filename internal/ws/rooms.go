@@ -778,7 +778,7 @@ func (h *Hub) broadcastMatchPeerLeft(room *state.Room, departing *state.User, ma
 		h.sendRoomChatAs(room, departing, "I dropped from the game.")
 	}
 
-	h.rankedPlayerLeft(matchID, departing.ID)
+	h.rankedPlayerLeft(matchID, departing.ID, reason)
 }
 
 // sendRoomChatAs pushes a chat line to a room attributed to a specific user, so

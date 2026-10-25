@@ -240,10 +240,19 @@ type pendingSet struct {
 	participants []rankedParticipant
 	reports      map[uint64]protocol.MatchResultRequest
 	timer        *time.Timer
-	quitter      uint64 // the player whose leaving voided the set
+	quitter      uint64 // the player who left mid-set (see ranked_left.go)
 	// requiredTeams: each slot's team (index 0 = slot 1) when the lobby
 	// matched teammates; all 0 when the players pick teams in the game
 	requiredTeams [4]int
+	// progress: each player's latest MATCH_PROGRESS, the games counted so far
+	progress map[uint64][]protocol.MatchResultGame
+	// abandoned: MATCH_ABANDONED reports, the set as of a player leaving it
+	abandoned map[uint64]protocol.MatchAbandonedRequest
+	// left is set once a player left mid-set: the set is judged from the
+	// others' reports (judgeLeftSet) instead of waiting for every result
+	left *leftSet
+	// verdict: the result judgeLeftSet decided, used in place of the reports
+	verdict *protocol.MatchResultRequest
 }
 
 func (p *pendingSet) participant(userID uint64) (rankedParticipant, bool) {
@@ -279,9 +288,11 @@ func (r *rankedSets) take(matchID uint64) *pendingSet {
 // beginRankedSet registers a ranked match and returns its MATCH_BEGIN info.
 func (h *Hub) beginRankedSet(match *state.Match, room *state.Room, settings *state.RankedSettings) *protocol.RankedMatchInfo {
 	set := &pendingSet{
-		matchID:  match.ID,
-		settings: *settings,
-		reports:  make(map[uint64]protocol.MatchResultRequest),
+		matchID:   match.ID,
+		settings:  *settings,
+		reports:   make(map[uint64]protocol.MatchResultRequest),
+		progress:  make(map[uint64][]protocol.MatchResultGame),
+		abandoned: make(map[uint64]protocol.MatchAbandonedRequest),
 	}
 	info := &protocol.RankedMatchInfo{
 		Ladder: settings.LadderID, ModuleID: settings.ModuleID,
@@ -393,6 +404,23 @@ func (h *Hub) handleMatchResult(c *Client, env protocol.Envelope) {
 		return
 	}
 	set.reports[c.user.ID] = req
+	if set.left != nil {
+		// a player already left: this result is one of the stayers' reports
+		ready := set.leftReportsComplete()
+		if ready {
+			delete(h.rankedSets.sets, set.matchID)
+			if set.timer != nil {
+				set.timer.Stop()
+			}
+		}
+		h.rankedSets.mu.Unlock()
+		slog.Info("ranked result reported after a player left", "match", req.MatchID, "user", c.user.Username,
+			"winnerSlot", req.WinnerSlot, "complete", ready)
+		if ready {
+			h.finishLeftSet(set)
+		}
+		return
+	}
 	complete := len(set.reports) == len(set.participants)
 	if complete {
 		// claim the set under the lock so the timeout can't finalize it too
@@ -419,11 +447,12 @@ func (h *Hub) handleMatchResult(c *Client, env protocol.Envelope) {
 	h.finalizeRankedSet(set, status, reason)
 }
 
-// rankedPlayerLeft voids a pending set when a player leaves it before
-// reporting. Leaving after reporting (the normal end of a set) is fine.
-// The leave penalty depends on how far the set got; until that policy
-// exists, an abandoned set is simply voided.
-func (h *Hub) rankedPlayerLeft(matchID, userID uint64) {
+// rankedPlayerLeft handles a player leaving a pending set before reporting
+// its result (leaving after reporting is the normal end of a set). The set
+// is then judged from the other players' reports of it as of that moment
+// (see ranked_left.go). A kicked player didn't choose to leave: the set is
+// voided.
+func (h *Hub) rankedPlayerLeft(matchID, userID uint64, reason string) {
 	h.rankedSets.mu.Lock()
 	set := h.rankedSets.sets[matchID]
 	if set == nil {
@@ -432,13 +461,39 @@ func (h *Hub) rankedPlayerLeft(matchID, userID uint64) {
 	}
 	_, isParticipant := set.participant(userID)
 	_, reported := set.reports[userID]
-	h.rankedSets.mu.Unlock()
 	if !isParticipant || reported {
+		h.rankedSets.mu.Unlock()
 		return
 	}
-	if set = h.rankedSets.take(matchID); set != nil {
-		set.quitter = userID
-		h.finalizeRankedSet(set, accounts.SetVoided, "player_left")
+	if reason == "kicked" && set.left == nil {
+		h.rankedSets.mu.Unlock()
+		if set = h.rankedSets.take(matchID); set != nil {
+			set.quitter = userID
+			h.finalizeRankedSet(set, accounts.SetVoided, "player_left")
+		}
+		return
+	}
+	ready := set.playerLeft(userID)
+	if ready {
+		delete(h.rankedSets.sets, set.matchID)
+		if set.timer != nil {
+			set.timer.Stop()
+		}
+	} else if set.left.userID == userID {
+		// the first player to leave: wait for the others' reports
+		if set.timer != nil {
+			set.timer.Stop()
+		}
+		matchID := set.matchID
+		set.timer = time.AfterFunc(rankedLeftReportTimeout, func() {
+			if expired := h.rankedSets.take(matchID); expired != nil {
+				h.finishLeftSet(expired)
+			}
+		})
+	}
+	h.rankedSets.mu.Unlock()
+	if ready {
+		h.finishLeftSet(set)
 	}
 }
 
@@ -552,12 +607,15 @@ func sameResult(a, b protocol.MatchResultRequest) bool {
 
 // finalizeRankedSet records the set and tells its players the outcome.
 func (h *Hub) finalizeRankedSet(set *pendingSet, status accounts.SetStatus, reason string) {
-	// Any report carries the score (rated sets: all reports agree).
-	var reference *protocol.MatchResultRequest
+	// Any report carries the score (rated sets: all reports agree); a set a
+	// player left has the verdict judgeLeftSet decided.
+	reference := set.verdict
 	for _, p := range set.participants {
+		if reference != nil {
+			break
+		}
 		if report, ok := set.reports[p.userID]; ok {
 			reference = &report
-			break
 		}
 	}
 	var score, teams [4]int
@@ -590,6 +648,9 @@ func (h *Hub) finalizeRankedSet(set *pendingSet, status accounts.SetStatus, reas
 		for _, g := range reference.Games {
 			rec.GameWinners = append(rec.GameWinners, g.WinnerTeam)
 		}
+		if reason == reasonForfeit {
+			rec.GameWinners = forfeitedGames(rec.GameWinners, winnerTeam, set.settings.BestOf/2+1)
+		}
 	}
 	for _, p := range set.participants {
 		games, team := 0, 0
@@ -603,18 +664,15 @@ func (h *Hub) finalizeRankedSet(set *pendingSet, status accounts.SetStatus, reas
 		}
 	}
 	// each player's report, by username, so moderators can see who claimed what
-	reports := make(map[string]protocol.MatchResultRequest, len(set.reports))
-	for _, p := range set.participants {
-		if report, ok := set.reports[p.userID]; ok {
-			reports[p.username] = report
-		}
-	}
-	if reportsJSON, err := json.Marshal(reports); err == nil {
+	if reportsJSON, err := json.Marshal(set.recordReports()); err == nil {
 		rec.ResultJSON = string(reportsJSON)
 	}
 
 	payload := protocol.RankedResultPayload{
 		MatchID: set.matchID, Status: string(status), Reason: reason, WinnerSlot: winnerSlot, WinnerTeam: winnerTeam,
+	}
+	if set.left != nil {
+		payload.LeftUsername = set.left.username
 	}
 	if h.accounts != nil {
 		setID, outcomes, err := h.accounts.RecordSetWithID(rec)

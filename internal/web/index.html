@@ -257,6 +257,8 @@ h3.roster:first-of-type { margin-top: 6px; }
 /* ── Scoring ── */
 table.worth { margin: 6px 0 4px; }
 table.worth th { white-space: normal; }
+table.leave th, table.leave td { white-space: normal; vertical-align: top; }
+table.leave td:first-child { width: 45%; }
 h3.sub { font: italic 900 15px var(--head); text-transform: uppercase; color: var(--gold2); margin: 18px 0 4px; }
 .calc { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; margin: 10px 0; }
 .calc label { display: grid; gap: 4px; font: 800 12px var(--head); text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
@@ -641,13 +643,14 @@ function setRow(set, linked = true) {
           set.status === "rated" ? p.after : p.before, chars ? " · " + chars : "")];
     }));
   const games = (members) => members[0].games;
-  const reason = { player_left: "player left", result_timeout: "no result", reports_disagree: "reports disagree",
-    invalid_result: "invalid result", server_error: "server error" }[set.reason] || set.reason;
+  const reason = { player_left: "player left", left_in_game_1: "player left in game 1",
+    leader_left: "the leader left", forfeit: "forfeit", result_timeout: "no result",
+    reports_disagree: "reports disagree", invalid_result: "invalid result", server_error: "server error" }[set.reason] || set.reason;
   return h("div.set", {},
     side(a, false),
     h("div.score", {}, linked ? h("a.scorelink", { href: "#/set/" + set.id, title: "Set details" }, `${games(a)} – ${games(b)}`)
         : `${games(a)} – ${games(b)}`,
-      h("small", {}, set.status === "rated" ? ago(set.time)
+      h("small", {}, set.status === "rated" ? (set.reason === "forfeit" ? "forfeit · " : "") + ago(set.time)
         : h("span.status." + set.status, { title: reason || "" }, set.status + (reason ? ": " + reason : ""))),
       set.rulesetName && (rosterCount(set.ladder) > 1 || (cache.ov && cache.ov.ladders.length > 1))
         ? h("small.roster", {}, ((cache.ov && cache.ov.ladders.length > 1) ? formatName(ladderById(set.ladder)) + " · " : "") +
@@ -952,7 +955,8 @@ async function showRules() {
             h("li", {}, "Team battle with team attack on"),
             h("li", {}, "Every game of the set is rated (OpenSkill)")] : [
             h("li", {}, "1v1, both players logged in"),
-            h("li", {}, "The whole set counts as one result for ratings")])))),
+            h("li", {}, "The whole set counts as one result for ratings")]),
+          h("li", {}, "Leaving a set early can forfeit it: see ", h("b", {}, "Leaving a set early"), " below")))),
     h("h3", { style: "font:italic 900 15px var(--head);text-transform:uppercase;color:var(--gold2);margin:18px 0 8px" }, "Rosters"),
     l.rulesets.length > 1 ? h("p.note", { style: "margin:0 0 10px" }, "Each roster is ranked separately, with its own rating and tier.") : null,
     h("div.cols", {}, l.rulesets.map((r, i) => h("div.card", {},
@@ -961,7 +965,36 @@ async function showRules() {
       r.stages && r.stages.length ? h("p.note", { style: "margin:8px 0 0" },
         h("b", {}, r.stages.length > 1 ? "Stages, picked before each game: " : "Stage: "), r.stages.join(", ")) : null))),
     l.roms.length ? h("p.note", { style: "margin-top:16px" }, "Supported game build" + (l.roms.length > 1 ? "s" : "") + ": ",
-      l.roms.map((rom, i) => [i ? ", " : "", rom.name + " ", h("code", { title: "ROM MD5" }, rom.md5)])) : null)))].filter(Boolean);
+      l.roms.map((rom, i) => [i ? ", " : "", rom.name + " ", h("code", { title: "ROM MD5" }, rom.md5)])) : null))),
+    leaveRules()].filter(Boolean);
+}
+
+// What happens when a player leaves a set before it's over; the lobby's
+// ranked_left.go decides it the same way.
+function leaveRules() {
+  const row = (when, result) => h("tr", {}, h("td", {}, when), h("td", {}, result));
+  const score = (s) => h("span", { style: "white-space:nowrap" }, s); // keeps "1–1" on one line
+  return panel("Leaving a set early", h("div.body", {},
+    h("p.note", { style: "margin:0 0 10px" }, "Closing the game, leaving the room, dropping out or losing the connection " +
+      "all count as leaving. The set is decided by the score at the moment the player left:"),
+    h("div.scroll", {}, h("table.leave", {},
+      h("thead", {}, h("tr", {}, h("th", {}, "The player leaves…"), h("th", {}, "Result"))),
+      h("tbody", {},
+        row("Before game 1 is over", [h("b", {}, "Voided"), ": no rating change"]),
+        row(["Behind in games (e.g. ", score("0–1"), ")"], [h("b", {}, "They forfeit"),
+          ": rated as a set loss for them, a win for the opponent"]),
+        row(["Ahead in games (e.g. ", score("1–0"), ")"], [h("b", {}, "Voided")]),
+        row(["With the games level (e.g. ", score("1–1"), " in game 3)"], [h("b", {}, "They forfeit"),
+          ", unless they were leading that game: more stocks left, or the same stocks and less damage. Then it's ",
+          h("b", {}, "voided"), "."]),
+        row("Level, between games (e.g. on character select before game 3)", [h("b", {}, "They forfeit"),
+          ": nobody leads before the game starts"]),
+        row("After the set is already won", [h("b", {}, "Rated as played")])))),
+    h("ul.rules", { style: "margin-top:12px" },
+      h("li", {}, "A game counts once its results screen appears. Nothing played after a player leaves counts."),
+      h("li", {}, h("b", {}, "2v2: "), "the leaving player's whole team forfeits, teammate included, and the games they " +
+        "didn't play count as losses."),
+      h("li", {}, "A player removed by the room's host doesn't forfeit: the set is voided."))));
 }
 
 // ── Tiers
@@ -1279,7 +1312,9 @@ async function showHow() {
       "Your new rating shows in the lobby chat and here.")))),
     panel("Fair play", h("div.body", {}, h("ul.rules", {},
       h("li", {}, "A game that's reset, played with a CPU, or played with a character outside the room's roster doesn't count — just replay it."),
-      h("li", {}, "If either player leaves before the set is decided, the set is voided: no rating change."),
+      h("li", {}, "Leaving a set early, including losing the connection, can forfeit it: a player who leaves while behind, " +
+        "or in a deciding game without the lead, loses the set. See ", h("a", { href: "#/rules" }, "Leaving a set early"),
+        " on the Rulesets page."),
       h("li", {}, "If the two players' results disagree or the game desyncs, the set is marked disputed. A moderator reviews it " +
         "(the replay helps) and either rates it or voids it."))))];
 }

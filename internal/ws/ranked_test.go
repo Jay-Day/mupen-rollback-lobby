@@ -318,9 +318,10 @@ func TestRankedSetDisputed(t *testing.T) {
 
 func TestRankedSetVoidedWhenPlayerLeaves(t *testing.T) {
 	f := newRankedFixture(t)
-	host, guest, _ := startRankedMatch(t, f)
-	f.hub.handleMatchFinished(guest, protocol.Envelope{}) // drops mid-set
-	if res := rankedResultFor(t, host); res.Status != "voided" || res.Reason != "player_left" {
+	host, guest, matchID := startRankedMatch(t, f)
+	f.hub.handleMatchFinished(guest, protocol.Envelope{}) // drops in game 1
+	f.abandon(host, matchID, 2, nil, nil)
+	if res := rankedResultFor(t, host); res.Status != "voided" || res.Reason != "left_in_game_1" || res.LeftUsername != "p2" {
 		t.Fatalf("result = %+v", res)
 	}
 }
