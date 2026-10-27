@@ -529,8 +529,9 @@ func (h *Hub) startMatchInRoom(room *state.Room, initiator string) {
 	h.broadcastRoomState(room)
 
 	payload := protocol.MatchBeginPayload{
-		MatchID: match.ID,
-		Peers:   peers,
+		MatchID:             match.ID,
+		Peers:               peers,
+		KeyframeIntervalSec: h.cfg().LiveReplayKeyframeSeconds,
 	}
 	h.broadcastToRoom(room, protocol.TypeMatchBegin, payload)
 

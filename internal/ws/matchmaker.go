@@ -18,11 +18,6 @@ const (
 	qmDefaultPrediction = 7
 	qmDefaultPacing     = 1 // smooth/asymmetric — the only model current clients run
 	qmDefaultMaxPlayers = 2
-
-	// Warmup window between pairing and auto-start. Long enough for both clients
-	// to render the in-room view, probe each other, and publish their local
-	// rollback settings.
-	qmWarmup = 5 * time.Second
 )
 
 // qmEntry is a queued searcher: when they enqueued and the ROM they want.
@@ -311,18 +306,22 @@ func (h *Hub) quickMatchAttempt(searcher *state.User) {
 	}
 	h.broadcastRoomState(room)
 	h.broadcastRoomList()
+	// The warmup (lobby config) must be long enough for both clients to render
+	// the in-room view, probe each other, and publish their local rollback
+	// settings.
+	warmup := h.cfg().QuickMatchWarmup()
 	h.sendRoomSystemChat(room,
 		fmt.Sprintf("Match found! Measuring connection — game starts in %d seconds.",
-			int(qmWarmup/time.Second)))
-	h.scheduleQuickMatchStart(room)
+			int(warmup/time.Second)))
+	h.scheduleQuickMatchStart(room, warmup)
 }
 
 // scheduleQuickMatchStart auto-starts the paired match after the warmup window,
 // but only if the room is still valid — a player may have left during warmup,
 // dissolving the room or emptying a seat.
-func (h *Hub) scheduleQuickMatchStart(room *state.Room) {
+func (h *Hub) scheduleQuickMatchStart(room *state.Room, warmup time.Duration) {
 	roomID := room.ID
-	time.AfterFunc(qmWarmup, func() {
+	time.AfterFunc(warmup, func() {
 		r := h.state.GetRoom(roomID)
 		if r == nil {
 			return

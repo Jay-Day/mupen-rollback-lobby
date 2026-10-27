@@ -429,6 +429,9 @@ type MatchPeer struct {
 type MatchBeginPayload struct {
 	MatchID uint64      `json:"matchId"`
 	Peers   []MatchPeer `json:"peers"`
+	// Seconds between the live replay broadcaster's savestate keyframes, from
+	// the lobby config. Clients use 30 when it's missing (older lobbies).
+	KeyframeIntervalSec int `json:"keyframeIntervalSec,omitempty"`
 }
 
 type ICESignalPayload struct {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/jay-day/rmgk-lobby/internal/config"
 	"github.com/jay-day/rmgk-lobby/internal/geo"
 	"github.com/jay-day/rmgk-lobby/internal/moderation"
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
@@ -53,9 +54,10 @@ type Hub struct {
 	matchmaker *matchmaker
 	broadcasts *broadcastManager
 	mod        *moderation.Manager
+	settings   *config.Store // nil = built-in defaults
 }
 
-func NewHub(s *state.State, udpPublicAddr string, iceConfig protocol.ICEConfiguration, mod *moderation.Manager) *Hub {
+func NewHub(s *state.State, udpPublicAddr string, iceConfig protocol.ICEConfiguration, mod *moderation.Manager, settings *config.Store) *Hub {
 	h := &Hub{
 		state:         s,
 		udpPublicAddr: udpPublicAddr,
@@ -66,10 +68,15 @@ func NewHub(s *state.State, udpPublicAddr string, iceConfig protocol.ICEConfigur
 		lobbyChat:     newChatHistory(),
 		matchmaker:    newMatchmaker(),
 		mod:           mod,
+		settings:      settings,
 	}
 	h.broadcasts = newBroadcastManager(h)
 	return h
 }
+
+// cfg returns the lobby settings in effect right now. Read it once per
+// decision: a reload can swap it between two calls.
+func (h *Hub) cfg() *config.Settings { return h.settings.Get() }
 
 // IsBanned reports whether an IP is currently banned (used at connect time).
 func (h *Hub) IsBanned(ip string) (moderation.Sanction, bool) {
@@ -259,11 +266,11 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		c.sendFail(protocol.TypeHelloFail, env.ID, protocol.ReasonInvalidPayload)
 		return err
 	}
-	if !isSupportedClientVersion(req.ClientVersion) {
+	if cfg := h.cfg(); !isSupportedClientVersion(req.ClientVersion, cfg.MinClient()) {
 		c.sendFailMessage(protocol.TypeHelloFail, env.ID, protocol.ReasonVersionMismatch,
-			minimumClientMessage)
+			cfg.OutdatedMessage())
 		slog.Info("out-of-date client rejected", "ip", c.ip,
-			"version", clampString(req.ClientVersion, 64))
+			"version", clampString(req.ClientVersion, 64), "minimum", cfg.MinClientVersion)
 		return errUnsupportedClientVersion
 	}
 
