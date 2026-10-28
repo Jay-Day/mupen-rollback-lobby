@@ -389,6 +389,11 @@ type RoomStatePayload struct {
 	LiveReplayEnabled bool              `json:"liveReplayEnabled"`
 	Players           []RoomSeatPayload `json:"players"`
 	State             string            `json:"state"`
+	// InGameSettings tells clients that ROOM_UPDATE_DELAY and
+	// ROOM_UPDATE_PREDICTION are also accepted while the room is in game.
+	// Older servers drop them, so clients keep the host's mid-match
+	// prediction control disabled unless this is set.
+	InGameSettings bool `json:"inGameSettings"`
 }
 
 type RoomJoinFailPayload struct {

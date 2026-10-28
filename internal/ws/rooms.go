@@ -305,6 +305,14 @@ func (h *Hub) handleRoomUpdateSettings(c *Client, env protocol.Envelope) {
 	h.broadcastRoomState(room)
 }
 
+// acceptsRollbackSettings reports whether a room takes delay and prediction
+// changes: while waiting and while the match runs. Clients switch a running
+// rollback session to the new value without desyncing, and every seat learns
+// it from the ROOM_STATE broadcast (see RoomStatePayload.InGameSettings).
+func acceptsRollbackSettings(room *state.Room) bool {
+	return room.State == state.RoomStateWaiting || room.State == state.RoomStateInGame
+}
+
 // handleRoomUpdateDelay stores the caller's independently selected input delay.
 // Unlike shared legacy settings, this is available to every seated player.
 func (h *Hub) handleRoomUpdateDelay(c *Client, env protocol.Envelope) {
@@ -313,7 +321,7 @@ func (h *Hub) handleRoomUpdateDelay(c *Client, env protocol.Envelope) {
 		return
 	}
 	room := c.user.CurrentRoom
-	if room == nil || room.State != state.RoomStateWaiting {
+	if room == nil || !acceptsRollbackSettings(room) {
 		return
 	}
 	if req.Delay < minDelay {
@@ -381,8 +389,8 @@ func (h *Hub) handleRoomUpdatePrediction(c *Client, env protocol.Envelope) {
 			"user", c.user.Username, "room", room.ID)
 		return
 	}
-	if room.State != state.RoomStateWaiting {
-		slog.Debug("ROOM_UPDATE_PREDICTION rejected: not waiting",
+	if !acceptsRollbackSettings(room) {
+		slog.Debug("ROOM_UPDATE_PREDICTION rejected: not waiting or in game",
 			"room", room.ID, "state", room.State)
 		return
 	}
@@ -903,6 +911,7 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 		DelayAuto:         r.DelayAuto,
 		PredictionAuto:    r.PredictionAuto,
 		LiveReplayEnabled: r.LiveReplayEnabled,
+		InGameSettings:    true,
 		Rom: protocol.RomInfo{
 			Name:   r.RomName,
 			MD5:    r.RomMD5,
