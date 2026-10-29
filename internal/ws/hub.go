@@ -306,6 +306,7 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		Connection:    clampString(req.Connection, 16),
 		Anonymous:     req.Anonymous,
 		ICESupported:  req.ICESupported,
+		LateJoin:      req.LateJoin,
 		JoinedAt:      time.Now(),
 		LastSeen:      time.Now(),
 		Send:          c.send,
@@ -382,6 +383,10 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleQuickMatchJoin(c, env)
 	case protocol.TypeQuickMatchCancel:
 		h.handleQuickMatchCancel(c, env)
+	case protocol.TypeMatchAdmit:
+		h.handleMatchAdmit(c, env)
+	case protocol.TypeMatchAdmitSignal:
+		h.handleMatchAdmitSignal(c, env)
 	case protocol.TypeICESignal:
 		h.handleICESignal(c, env)
 	case protocol.TypeBroadcastBegin:

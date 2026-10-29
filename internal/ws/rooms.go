@@ -161,7 +161,11 @@ func (h *Hub) handleRoomJoin(c *Client, env protocol.Envelope) {
 		return
 	}
 
-	if room.State != state.RoomStateWaiting {
+	// A running match takes new members only when it can add them later: the
+	// host then decides when they join (MATCH_ADMIT). Until then they sit in a
+	// free seat outside the match.
+	if room.State != state.RoomStateWaiting &&
+		!(roomAcceptsLateJoin(room) && canLateJoin(c.user)) {
 		c.sendRoomJoinFail(env.ID, protocol.ReasonAlreadyStarted)
 		return
 	}
@@ -305,6 +309,14 @@ func (h *Hub) handleRoomUpdateSettings(c *Client, env protocol.Envelope) {
 	h.broadcastRoomState(room)
 }
 
+// acceptsRollbackSettings reports whether a room takes delay and prediction
+// changes: while waiting and while the match runs. Clients switch a running
+// rollback session to the new value without desyncing, and every seat learns
+// it from the ROOM_STATE broadcast (see RoomStatePayload.InGameSettings).
+func acceptsRollbackSettings(room *state.Room) bool {
+	return room.State == state.RoomStateWaiting || room.State == state.RoomStateInGame
+}
+
 // handleRoomUpdateDelay stores the caller's independently selected input delay.
 // Unlike shared legacy settings, this is available to every seated player.
 func (h *Hub) handleRoomUpdateDelay(c *Client, env protocol.Envelope) {
@@ -313,7 +325,7 @@ func (h *Hub) handleRoomUpdateDelay(c *Client, env protocol.Envelope) {
 		return
 	}
 	room := c.user.CurrentRoom
-	if room == nil || room.State != state.RoomStateWaiting {
+	if room == nil || !acceptsRollbackSettings(room) {
 		return
 	}
 	if req.Delay < minDelay {
@@ -381,8 +393,8 @@ func (h *Hub) handleRoomUpdatePrediction(c *Client, env protocol.Envelope) {
 			"user", c.user.Username, "room", room.ID)
 		return
 	}
-	if room.State != state.RoomStateWaiting {
-		slog.Debug("ROOM_UPDATE_PREDICTION rejected: not waiting",
+	if !acceptsRollbackSettings(room) {
+		slog.Debug("ROOM_UPDATE_PREDICTION rejected: not waiting or in game",
 			"room", room.ID, "state", room.State)
 		return
 	}
@@ -498,6 +510,7 @@ func (h *Hub) startMatchInRoom(room *state.Room, initiator string) {
 		RoomID:    room.ID,
 		StartedAt: time.Now(),
 		State:     state.MatchStateConnecting,
+		Seats:     matchSeatsFor(room),
 	}
 
 	peers := make([]protocol.MatchPeer, 0, len(room.Players))
@@ -532,6 +545,7 @@ func (h *Hub) startMatchInRoom(room *state.Room, initiator string) {
 		MatchID:             match.ID,
 		Peers:               peers,
 		KeyframeIntervalSec: h.cfg().LiveReplayKeyframeSeconds,
+		Seats:               match.Seats,
 	}
 	h.broadcastToRoom(room, protocol.TypeMatchBegin, payload)
 
@@ -583,6 +597,9 @@ func (h *Hub) unseatUser(u *state.User, room *state.Room) {
 // (by ROOM_LEAVE, by disconnect, or by host dissolving). reason is informational
 // for log lines and propagated when notifying peers of in-game departures.
 func (h *Hub) removeUserFromRoom(u *state.User, room *state.Room, reason string) {
+	// A member leaving while the host adds them to the match cancels it.
+	h.abortAdmissionFor(room, u, protocol.ReasonJoinerLeft)
+
 	// If the room is mid-match, also notify peers via MATCH_PEER_LEFT so they
 	// can drop emulation. Do this BEFORE we remove the player from the seat list.
 	var matchID uint64
@@ -770,13 +787,21 @@ func (h *Hub) handleMatchFinished(c *Client, env protocol.Envelope) {
 	}
 
 	if !isHost {
-		// Non-host drop: match keeps running for the rest of the seats.
+		// Non-host drop: match keeps running for the rest of the seats. A
+		// match open to late joiners shows the dropper as waiting, so the
+		// host can add them back.
+		if roomAcceptsLateJoin(room) {
+			h.broadcastRoomState(room)
+		}
 		return
 	}
 
 	// Host drop ends the match. Room reverts to waiting; everyone stays
 	// seated. Each surviving client's onRoomStateChanged detects the
 	// in_game → waiting transition and tears down their own emulation.
+	if admit := match.CurrentAdmission(); admit != nil {
+		h.abortAdmission(room, match, admit.ID, "match_over", 0)
+	}
 	match.SetState(state.MatchStateFinished)
 	h.state.RemoveMatch(match.ID)
 	h.broadcasts.endByMatch(match.ID) // host ended the match → stop any broadcast
@@ -850,6 +875,7 @@ func (h *Hub) buildRoomListPayload() protocol.RoomListPayload {
 			Broadcasting: broadcasting,
 			MatchID:      matchID,
 			ViewerCount:  viewerCount,
+			LateJoin:     players < max && roomAcceptsLateJoin(r),
 		})
 	}
 	return payload
@@ -904,6 +930,8 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 		DelayAuto:         r.DelayAuto,
 		PredictionAuto:    r.PredictionAuto,
 		LiveReplayEnabled: r.LiveReplayEnabled,
+		InGameSettings:    true,
+		LateJoin:          roomAcceptsLateJoin(r),
 		Rom: protocol.RomInfo{
 			Name:   r.RomName,
 			MD5:    r.RomMD5,
@@ -927,6 +955,8 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 			PredictionWindow: r.Prediction,
 			PredictionAuto:   r.PredictionAuto,
 			ICESupported:     seat.User.ICESupported,
+			InMatch:          seat.User.CurrentMatch != nil,
+			LateJoin:         canLateJoin(seat.User),
 		})
 	}
 	return out
