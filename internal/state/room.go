@@ -48,6 +48,8 @@ type Room struct {
 	LiveReplayEnabled bool // host's room-wide choice for streaming the next match
 	Visibility        Visibility
 	Password          string
+	// QuickMatch rooms are paired by the matchmaker; nobody joins them mid-match.
+	QuickMatch bool
 
 	Players    []*RoomSeat
 	Spectators []*User

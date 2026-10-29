@@ -87,10 +87,55 @@ func TestRoomPredictionUpdateIsHostOnly(t *testing.T) {
 			room.Prediction, room.PredictionAuto)
 	}
 
+	// Clients switch a running match to the new window, so the host may keep
+	// changing it in game; it stays host-only there.
 	room.SetState(state.RoomStateInGame)
-	h.handleRoomUpdatePrediction(&Client{user: host}, request(9, false))
+	h.handleRoomUpdatePrediction(&Client{user: guest}, request(2, false))
 	if room.Prediction != 4 {
-		t.Fatalf("in-game prediction changed to %d", room.Prediction)
+		t.Fatalf("guest changed in-game prediction to %d", room.Prediction)
+	}
+	h.handleRoomUpdatePrediction(&Client{user: host}, request(9, false))
+	if room.Prediction != 9 {
+		t.Fatalf("in-game host prediction = %d, want 9", room.Prediction)
+	}
+
+	room.SetState(state.RoomStateStarting)
+	h.handleRoomUpdatePrediction(&Client{user: host}, request(3, false))
+	if room.Prediction != 9 {
+		t.Fatalf("prediction changed to %d while starting", room.Prediction)
+	}
+}
+
+func TestPlayerDelayUpdateIsAcceptedInGame(t *testing.T) {
+	player := &state.User{ID: 1, Username: "player"}
+	room := &state.Room{ID: 10, Host: player, MaxPlayers: 2, State: state.RoomStateInGame}
+	if err := room.AddPlayer(player); err != nil {
+		t.Fatalf("AddPlayer: %v", err)
+	}
+	player.CurrentRoom = room
+
+	request := func(delay int) protocol.Envelope {
+		data, err := json.Marshal(protocol.RoomUpdateDelayRequest{Delay: delay})
+		if err != nil {
+			t.Fatalf("json.Marshal: %v", err)
+		}
+		return protocol.Envelope{Data: data}
+	}
+	seatDelay := func() int { return roomStatePayload(room).Players[0].FrameDelay }
+
+	h := &Hub{}
+	h.handleRoomUpdateDelay(&Client{user: player}, request(5))
+	if got := seatDelay(); got != 5 {
+		t.Fatalf("in-game delay = %d, want 5", got)
+	}
+	if !roomStatePayload(room).InGameSettings {
+		t.Fatal("ROOM_STATE does not advertise in-game settings")
+	}
+
+	room.SetState(state.RoomStateFinished)
+	h.handleRoomUpdateDelay(&Client{user: player}, request(1))
+	if got := seatDelay(); got != 5 {
+		t.Fatalf("delay changed to %d after the match finished", got)
 	}
 }
 

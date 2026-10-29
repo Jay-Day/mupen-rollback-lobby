@@ -37,6 +37,7 @@ type User struct {
 	ClientVersion string // self-reported build, shown in peer tooltips
 	Connection    string // self-reported transport medium ("wifi"/"lan"/...)
 	ICESupported  bool   // room-scoped libjuice signaling/transport support
+	LateJoin      bool   // can join a running match (MATCH_ADMIT_*)
 
 	PingToServer uint16
 

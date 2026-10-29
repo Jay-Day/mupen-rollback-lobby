@@ -259,6 +259,7 @@ func (h *Hub) quickMatchAttempt(searcher *state.User) {
 		DelayAuto:      true,
 		PredictionAuto: true,
 		Visibility:     state.VisibilityInviteOnly,
+		QuickMatch:     true,
 		State:          state.RoomStateWaiting,
 		CreatedAt:      time.Now(),
 	}

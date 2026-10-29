@@ -37,6 +37,12 @@ const (
 	// server never sees gameplay datagrams and is not a TURN relay.
 	TypeICESignal = "ICE_SIGNAL"
 
+	// Late join: the host adds a room member who isn't in the running match.
+	// MATCH_ADMIT starts it; every later step of the hand-off travels as a
+	// MATCH_ADMIT_SIGNAL that the server checks and routes (see latejoin.go).
+	TypeMatchAdmit       = "MATCH_ADMIT"
+	TypeMatchAdmitSignal = "MATCH_ADMIT_SIGNAL"
+
 	// Spectating: one player streams the match's .krec up via BROADCAST_*; other
 	// users pull it back down via SPECTATE_*. krec bytes ride as base64 strings
 	// inside the normal JSON envelopes (the stream is ~1 KB/s, so the encoding
@@ -83,6 +89,10 @@ const (
 	TypeMatchBegin        = "MATCH_BEGIN"
 	TypeMatchPeerLeft     = "MATCH_PEER_LEFT"
 	TypeQuickMatchStatus  = "QUICK_MATCH_STATUS"
+	// Late join (server → client). MATCH_ADMIT_BEGIN goes to the match's
+	// players and the joiner; MATCH_ADMIT_FAIL answers a refused MATCH_ADMIT.
+	TypeMatchAdmitBegin = "MATCH_ADMIT_BEGIN"
+	TypeMatchAdmitFail  = "MATCH_ADMIT_FAIL"
 
 	// Spectating (server → spectator).
 	TypeSpectateBegin = "SPECTATE_BEGIN" // ack: stream is starting; history follows
@@ -117,6 +127,11 @@ const (
 	ReasonRoomNotFound    = "room_not_found"
 	ReasonAlreadyInRoom   = "already_in_room"
 	ReasonKickedFromRoom  = "kicked_from_room"
+	// Late join refusals and aborts.
+	ReasonLateJoinUnsupported = "late_join_unsupported"
+	ReasonAdmitBusy           = "admit_busy"
+	ReasonNotWaiting          = "not_waiting"
+	ReasonJoinerLeft          = "joiner_left"
 )
 
 // -- Request payloads --
@@ -140,6 +155,9 @@ type HelloRequest struct {
 	// Advertises support for the room-scoped libjuice transport. Older clients
 	// omit this and are prevented from entering an ICE match with newer clients.
 	ICESupported bool `json:"iceSupported,omitempty"`
+	// Advertises support for joining a running match (MATCH_ADMIT_*). A match
+	// only sizes itself for late joiners when every seated player sets it.
+	LateJoin bool `json:"lateJoin,omitempty"`
 }
 
 type HeartbeatRequest struct {
@@ -352,6 +370,9 @@ type RoomSummary struct {
 	Broadcasting bool     `json:"broadcasting,omitempty"` // a player is streaming this match for spectators
 	MatchID      uint64   `json:"matchId,omitempty"`      // current match id (set while in-game), for SPECTATE_START
 	ViewerCount  int      `json:"viewerCount,omitempty"`  // live replay audience; omitted at zero
+	// LateJoin marks an in-game room with a free seat that a late-join capable
+	// client may enter; the host can then add them to the running match.
+	LateJoin bool `json:"lateJoin,omitempty"`
 }
 
 type RoomListPayload struct {
@@ -369,6 +390,13 @@ type RoomSeatPayload struct {
 	PredictionWindow int  `json:"predictionWindow"`
 	PredictionAuto   bool `json:"predictionAuto"`
 	ICESupported     bool `json:"iceSupported,omitempty"`
+	// InMatch is true while this seat plays in the room's running match. A
+	// member who joined mid-match (or dropped) is seated with InMatch false.
+	// Always sent: clients read a missing value (an older server) as true.
+	InMatch bool `json:"inMatch"`
+	// LateJoin mirrors the client's capability so the host's UI can tell
+	// whether it can add this member to a running match.
+	LateJoin bool `json:"lateJoin,omitempty"`
 }
 
 type RoomStatePayload struct {
@@ -389,6 +417,15 @@ type RoomStatePayload struct {
 	LiveReplayEnabled bool              `json:"liveReplayEnabled"`
 	Players           []RoomSeatPayload `json:"players"`
 	State             string            `json:"state"`
+	// InGameSettings tells clients that ROOM_UPDATE_DELAY and
+	// ROOM_UPDATE_PREDICTION are also accepted while the room is in game.
+	// Older servers drop them, so clients keep the host's mid-match
+	// prediction control disabled unless this is set.
+	InGameSettings bool `json:"inGameSettings"`
+	// LateJoin is set while the room's running match can take more players:
+	// it was sized for every seat (MatchBeginPayload.Seats) and the host may
+	// add waiting members with MATCH_ADMIT.
+	LateJoin bool `json:"lateJoin,omitempty"`
 }
 
 type RoomJoinFailPayload struct {
@@ -432,6 +469,64 @@ type MatchBeginPayload struct {
 	// Seconds between the live replay broadcaster's savestate keyframes, from
 	// the lobby config. Clients use 30 when it's missing (older lobbies).
 	KeyframeIntervalSec int `json:"keyframeIntervalSec,omitempty"`
+	// Seats is the number of controller ports every client emulates. It is
+	// the room's capacity when every seated player supports late join, so an
+	// empty seat is an idle controller someone can take over mid-match. Zero
+	// keeps the older sizing (the highest occupied seat).
+	Seats int `json:"seats,omitempty"`
+}
+
+// MatchAdmitRequest is the host asking to add a waiting room member to the
+// running match.
+type MatchAdmitRequest struct {
+	MatchID uint64 `json:"matchId"`
+	UserID  uint64 `json:"userId"`
+}
+
+type MatchAdmitFailPayload struct {
+	MatchID uint64 `json:"matchId"`
+	UserID  uint64 `json:"userId"`
+	Reason  string `json:"reason"`
+}
+
+// MatchAdmitBeginPayload starts a hand-off. Peers is the roster after the
+// join (the joiner included); Epoch numbers the rollback session the clients
+// switch to, so packets of the session being replaced can't reach it.
+type MatchAdmitBeginPayload struct {
+	MatchID uint64      `json:"matchId"`
+	AdmitID uint64      `json:"admitId"`
+	Epoch   int         `json:"epoch"`
+	Seats   int         `json:"seats"`
+	HostID  uint64      `json:"hostId"`
+	Joiner  MatchPeer   `json:"joiner"`
+	Peers   []MatchPeer `json:"peers"`
+}
+
+// Late join hand-off steps, in order. Each names who may send it and who
+// receives it (the server enforces both).
+const (
+	AdmitStepManifest = "manifest"  // host → joiner: pre-match settings (chunked)
+	AdmitStepReady    = "ready"     // joiner → host: booted and connected to every player
+	AdmitStepCut      = "cut"       // host → players: stop at Frame
+	AdmitStepCutReady = "cut_ready" // player → host: stopped at Frame (OK false: already past it)
+	AdmitStepState    = "state"     // host → joiner: the game state at the cut (chunked)
+	AdmitStepGo       = "go"        // host → players and joiner: switch to the new session
+	AdmitStepAbort    = "abort"     // anyone involved (or the server) → everyone else
+)
+
+// MatchAdmitSignalPayload is one hand-off step. Data carries a base64 chunk
+// for the chunked steps; Index/Count place it.
+type MatchAdmitSignalPayload struct {
+	MatchID    uint64 `json:"matchId"`
+	AdmitID    uint64 `json:"admitId"`
+	Step       string `json:"step"`
+	FromUserID uint64 `json:"fromUserId,omitempty"`
+	Frame      int    `json:"frame,omitempty"`
+	OK         bool   `json:"ok,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+	Index      int    `json:"index,omitempty"`
+	Count      int    `json:"count,omitempty"`
+	Data       string `json:"data,omitempty"`
 }
 
 type ICESignalPayload struct {
