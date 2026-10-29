@@ -73,3 +73,23 @@ func TestPruneDropsIdleEntries(t *testing.T) {
 		t.Fatal("expected idle entry to be pruned")
 	}
 }
+
+func TestLimitsChangeAtRuntime(t *testing.T) {
+	limits := DefaultLimits()
+	limits.MaxConcurrent = 1
+	g := NewConnectGate()
+	g.SetLimits(func() Limits { return limits })
+	ip := "203.0.113.10"
+
+	if ok, _ := g.Allow(ip); !ok {
+		t.Fatal("first connection should be allowed")
+	}
+	if ok, _ := g.Allow(ip); ok {
+		t.Fatal("expected cap of 1 to deny a second connection")
+	}
+	// Raising the cap applies to the next attempt without a new gate.
+	limits.MaxConcurrent = 2
+	if ok, _ := g.Allow(ip); !ok {
+		t.Fatal("expected raised cap to allow a second connection")
+	}
+}

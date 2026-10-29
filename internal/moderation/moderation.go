@@ -6,6 +6,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -27,8 +28,9 @@ func (s Sanction) expired(now time.Time) bool {
 // Manager owns the filter, admin credentials, and the ban/mute state. Bans
 // (including timeouts) persist to disk; mutes are in-memory only.
 type Manager struct {
-	filter *Filter
-	admins *AdminStore
+	// Swapped whole when their files are edited (SetFilter, SetAdmins).
+	filter atomic.Pointer[Filter]
+	admins atomic.Pointer[AdminStore]
 
 	mu      sync.Mutex
 	bans    map[string]Sanction // ip -> ban/timeout (persisted)
@@ -40,26 +42,32 @@ type Manager struct {
 // ban list from banPath (missing file is fine).
 func NewManager(filter *Filter, admins *AdminStore, banPath string) *Manager {
 	m := &Manager{
-		filter:  filter,
-		admins:  admins,
 		bans:    make(map[string]Sanction),
 		mutes:   make(map[string]Sanction),
 		banPath: banPath,
 	}
+	m.filter.Store(filter)
+	m.admins.Store(admins)
 	m.loadBans()
 	return m
 }
 
+// SetFilter replaces the chat filter, e.g. after the blocklist file changes.
+func (m *Manager) SetFilter(f *Filter) { m.filter.Store(f) }
+
+// SetAdmins replaces the moderator credentials, e.g. after admins.json changes.
+func (m *Manager) SetAdmins(a *AdminStore) { m.admins.Store(a) }
+
 func (m *Manager) FilterMessage(msg string) (string, bool) {
-	return m.filter.Check(msg)
+	return m.filter.Load().Check(msg)
 }
 
 func (m *Manager) AuthenticateAdmin(password string) (string, bool) {
-	return m.admins.Authenticate(password)
+	return m.admins.Load().Authenticate(password)
 }
 
-func (m *Manager) FilterSize() int { return m.filter.Size() }
-func (m *Manager) AdminCount() int { return m.admins.Count() }
+func (m *Manager) FilterSize() int { return m.filter.Load().Size() }
+func (m *Manager) AdminCount() int { return m.admins.Load().Count() }
 
 // IsBanned reports whether an IP is currently banned, pruning the entry if its
 // timeout has elapsed.

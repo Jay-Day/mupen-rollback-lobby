@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jay-day/rmgk-lobby/internal/config"
 	"github.com/jay-day/rmgk-lobby/internal/moderation"
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
 	"github.com/jay-day/rmgk-lobby/internal/ratelimit"
@@ -19,6 +20,10 @@ import (
 	"github.com/jay-day/rmgk-lobby/internal/udp"
 	"github.com/jay-day/rmgk-lobby/internal/ws"
 )
+
+// How often the server checks its config files (lobby.json, admins.json and
+// the blocklist override) for edits.
+const configPollInterval = 2 * time.Second
 
 func main() {
 	var (
@@ -43,26 +48,33 @@ func main() {
 	}
 	slog.SetDefault(slog.New(handler))
 
+	// Settings that can change while the server runs (see internal/config).
+	configPath := envOr("RMGK_CONFIG_PATH", "lobby.json")
+	settings, err := config.Open(configPath)
+	if err != nil {
+		slog.Error("lobby config load failed", "path", configPath, "err", err)
+		os.Exit(1)
+	}
+	slog.Info("lobby config ready", "path", configPath,
+		"min_client_version", settings.Get().MinClientVersion,
+		"keyframe_seconds", settings.Get().LiveReplayKeyframeSeconds)
+
 	gameState := state.New()
 	gate := ratelimit.NewConnectGate()
+	gate.SetLimits(func() ratelimit.Limits { return settings.Get().ConnectLimits() })
 
 	// Moderation: hate-speech filter (embedded blocklist, optional file override),
-	// admin credentials, and the persisted IP ban list.
-	terms := moderation.DefaultTerms()
-	if p := os.Getenv("RMGK_BLOCKLIST_PATH"); p != "" {
-		if t, err := moderation.LoadBlocklistFile(p); err != nil {
-			slog.Warn("blocklist override load failed; using embedded default", "path", p, "err", err)
-		} else {
-			terms = t
-		}
-	}
-	admins, err := moderation.LoadAdmins(envOr("RMGK_ADMINS_PATH", "admins.json"))
+	// admin credentials, and the persisted IP ban list. The blocklist and admins
+	// files are re-read when they change.
+	blocklistPath := os.Getenv("RMGK_BLOCKLIST_PATH")
+	adminsPath := envOr("RMGK_ADMINS_PATH", "admins.json")
+	admins, err := moderation.LoadAdmins(adminsPath)
 	if err != nil {
 		slog.Error("admins.json load failed", "err", err)
 		os.Exit(1)
 	}
 	banPath := envOr("RMGK_BANLIST_PATH", "bans.json")
-	mod := moderation.NewManager(moderation.NewFilter(terms), admins, banPath)
+	mod := moderation.NewManager(moderation.NewFilter(loadBlocklist(blocklistPath)), admins, banPath)
 	slog.Info("moderation ready", "blocklist_terms", mod.FilterSize(), "admins", mod.AdminCount(), "banlist", banPath)
 	if *stunHost == "" || *stunPort < 1 || *stunPort > 65535 {
 		slog.Error("invalid STUN configuration", "host", *stunHost, "port", *stunPort)
@@ -82,7 +94,7 @@ func main() {
 			Username: *turnUsername, Password: *turnPassword,
 		})
 	}
-	hub := ws.NewHub(gameState, *udpPublicAddr, iceConfig, mod)
+	hub := ws.NewHub(gameState, *udpPublicAddr, iceConfig, mod, settings)
 
 	udpListenAddr, err := net.ResolveUDPAddr("udp", *udpAddr)
 	if err != nil {
@@ -104,6 +116,23 @@ func main() {
 	go anchor.Run(rootCtx)
 	go gate.Janitor(rootCtx)
 	go hub.Run(rootCtx)
+
+	go config.WatchFile(rootCtx, configPath, configPollInterval, settings.Reload)
+	go config.WatchFile(rootCtx, adminsPath, configPollInterval, func() {
+		a, err := moderation.LoadAdmins(adminsPath)
+		if err != nil {
+			slog.Error("admins.json reload failed; keeping previous admins", "path", adminsPath, "err", err)
+			return
+		}
+		mod.SetAdmins(a)
+		slog.Info("admins reloaded", "path", adminsPath, "admins", mod.AdminCount())
+	})
+	if blocklistPath != "" {
+		go config.WatchFile(rootCtx, blocklistPath, configPollInterval, func() {
+			mod.SetFilter(moderation.NewFilter(loadBlocklist(blocklistPath)))
+			slog.Info("blocklist reloaded", "path", blocklistPath, "blocklist_terms", mod.FilterSize())
+		})
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
@@ -148,6 +177,20 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("http shutdown error", "err", err)
 	}
+}
+
+// loadBlocklist returns the override blocklist at path, or the embedded one
+// when path is empty or unreadable.
+func loadBlocklist(path string) []string {
+	if path == "" {
+		return moderation.DefaultTerms()
+	}
+	terms, err := moderation.LoadBlocklistFile(path)
+	if err != nil {
+		slog.Warn("blocklist override load failed; using embedded default", "path", path, "err", err)
+		return moderation.DefaultTerms()
+	}
+	return terms
 }
 
 func envOr(key, fallback string) string {

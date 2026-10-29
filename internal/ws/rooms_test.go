@@ -2,8 +2,11 @@ package ws
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/jay-day/rmgk-lobby/internal/config"
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
 	"github.com/jay-day/rmgk-lobby/internal/state"
 )
@@ -210,5 +213,51 @@ func TestCompatibilityHostSettingsChangeRoomPrediction(t *testing.T) {
 	if room.Prediction != 5 || room.PredictionAuto {
 		t.Fatalf("compatibility host prediction = (%d, %v), want (5, false)",
 			room.Prediction, room.PredictionAuto)
+	}
+}
+
+func TestMatchBeginCarriesConfiguredKeyframeInterval(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lobby.json")
+	if err := os.WriteFile(path, []byte(`{"liveReplayKeyframeSeconds": 45}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := config.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostMessages := make(chan []byte, 8)
+	guestMessages := make(chan []byte, 8)
+	host := &state.User{ID: 1, Username: "host", Send: hostMessages}
+	guest := &state.User{ID: 2, Username: "guest", Send: guestMessages}
+	room := &state.Room{ID: 10, Host: host, MaxPlayers: 2, State: state.RoomStateWaiting}
+	for _, user := range []*state.User{host, guest} {
+		if err := room.AddPlayer(user); err != nil {
+			t.Fatalf("AddPlayer: %v", err)
+		}
+		user.CurrentRoom = room
+	}
+	h := &Hub{state: state.New(), settings: settings}
+	h.startMatchInRoom(room, "test")
+
+	for name, messages := range map[string]chan []byte{"host": hostMessages, "guest": guestMessages} {
+		var begin *protocol.MatchBeginPayload
+		for len(messages) > 0 && begin == nil {
+			var env protocol.Envelope
+			if err := json.Unmarshal(<-messages, &env); err != nil {
+				t.Fatal(err)
+			}
+			if env.Type == protocol.TypeMatchBegin {
+				begin = &protocol.MatchBeginPayload{}
+				if err := json.Unmarshal(env.Data, begin); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		if begin == nil {
+			t.Fatalf("%s got no MATCH_BEGIN", name)
+		}
+		if begin.KeyframeIntervalSec != 45 {
+			t.Fatalf("%s MATCH_BEGIN keyframeIntervalSec = %d, want 45", name, begin.KeyframeIntervalSec)
+		}
 	}
 }
