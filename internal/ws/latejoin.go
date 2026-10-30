@@ -79,6 +79,13 @@ func matchSeatsFor(room *state.Room) int {
 	return room.MaxPlayers
 }
 
+// roomCanStartAlone reports whether the host may start with nobody else seated.
+// Only a match that can take late joiners qualifies; otherwise nobody could ever
+// join it.
+func roomCanStartAlone(room *state.Room) bool {
+	return matchSeatsFor(room) > 0
+}
+
 func matchPeerFor(u *state.User, slot int) protocol.MatchPeer {
 	ip, port := u.GetUDPEndpoint()
 	return protocol.MatchPeer{

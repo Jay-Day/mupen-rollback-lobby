@@ -426,6 +426,9 @@ type RoomStatePayload struct {
 	// it was sized for every seat (MatchBeginPayload.Seats) and the host may
 	// add waiting members with MATCH_ADMIT.
 	LateJoin bool `json:"lateJoin,omitempty"`
+	// CanStartAlone tells the host ROOM_START works with nobody else seated.
+	// Older servers refuse it, so clients need this to offer the option.
+	CanStartAlone bool `json:"canStartAlone,omitempty"`
 }
 
 type RoomJoinFailPayload struct {

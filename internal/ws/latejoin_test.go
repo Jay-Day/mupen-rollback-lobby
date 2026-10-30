@@ -278,6 +278,85 @@ func TestLateJoinHandOff(t *testing.T) {
 	}
 }
 
+// openRoom seats the named users in a fresh waiting room.
+func (f *lateJoinFixture) openRoom(maxPlayers int, names ...string) {
+	f.t.Helper()
+	f.room = &state.Room{
+		ID:         f.h.state.NextRoomID(),
+		Name:       "room",
+		Host:       f.users[names[0]],
+		MaxPlayers: maxPlayers,
+		State:      state.RoomStateWaiting,
+	}
+	f.h.state.AddRoom(f.room)
+	for _, name := range names {
+		if err := f.h.seatUser(f.users[name], f.room, state.UserStateInRoom); err != nil {
+			f.t.Fatalf("seatUser(%s): %v", name, err)
+		}
+	}
+}
+
+func TestHostCanStartAloneWhenOthersCanJoinLater(t *testing.T) {
+	f := newLateJoinFixture(t, 3)
+	host := f.user("host", true)
+	joiner := f.user("joiner", true)
+	f.openRoom(3, "host")
+	if !roomStatePayload(f.room).CanStartAlone {
+		t.Fatal("room state should offer starting alone")
+	}
+
+	f.send("host", protocol.TypeRoomStart, struct{}{})
+	match := host.CurrentMatch
+	if match == nil || f.room.State != state.RoomStateInGame {
+		t.Fatal("the host could not start alone")
+	}
+	env, ok := findEnvelope(f.drain("host"), protocol.TypeMatchBegin)
+	if !ok {
+		t.Fatal("no MATCH_BEGIN for a match started alone")
+	}
+	var begin protocol.MatchBeginPayload
+	if err := json.Unmarshal(env.Data, &begin); err != nil {
+		t.Fatal(err)
+	}
+	if begin.Seats != 3 || len(begin.Peers) != 1 || begin.Peers[0].UserID != host.ID {
+		t.Fatalf("begin = %+v", begin)
+	}
+
+	// Someone joins and the host adds them, as in any late join.
+	f.send("joiner", protocol.TypeRoomJoin, protocol.RoomJoinRequest{RoomID: f.room.ID})
+	if joiner.CurrentRoom != f.room || joiner.CurrentMatch != nil {
+		t.Fatal("joiner should sit in the room outside the match")
+	}
+	f.send("host", protocol.TypeMatchAdmit, protocol.MatchAdmitRequest{MatchID: match.ID, UserID: joiner.ID})
+	if match.CurrentAdmission() == nil {
+		t.Fatal("the host could not add the joiner")
+	}
+}
+
+func TestHostCannotStartAloneWhenNobodyCouldJoin(t *testing.T) {
+	// An older host's client can't add anyone.
+	f := newLateJoinFixture(t, 3)
+	f.user("old", false)
+	f.openRoom(3, "old")
+	if roomStatePayload(f.room).CanStartAlone {
+		t.Fatal("an older client's room should not offer starting alone")
+	}
+	f.send("old", protocol.TypeRoomStart, struct{}{})
+	if f.users["old"].CurrentMatch != nil || f.room.State != state.RoomStateWaiting {
+		t.Fatal("an older client started alone")
+	}
+
+	// Quick match rooms never take late joiners.
+	g := newLateJoinFixture(t, 2)
+	g.user("host", true)
+	g.openRoom(2, "host")
+	g.room.QuickMatch = true
+	g.send("host", protocol.TypeRoomStart, struct{}{})
+	if g.users["host"].CurrentMatch != nil {
+		t.Fatal("started a quick match room alone")
+	}
+}
+
 func TestLateJoinAbortsWhenJoinerLeaves(t *testing.T) {
 	f := newLateJoinFixture(t, 3)
 	f.user("host", true)
