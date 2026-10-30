@@ -232,7 +232,8 @@ func (c *Client) sendRoomJoinFail(id, reason string) {
 }
 
 // handleRoomStart is invoked by the host to begin the match.
-// Validates: caller is host, room is waiting, ≥2 players seated.
+// Validates: caller is host, room is waiting, ≥2 players seated (or just the
+// host, when others can join the running match later).
 func (h *Hub) handleRoomStart(c *Client, env protocol.Envelope) {
 	_ = env
 	room := c.user.CurrentRoom
@@ -248,7 +249,7 @@ func (h *Hub) handleRoomStart(c *Client, env protocol.Envelope) {
 		slog.Debug("ROOM_START rejected: state not waiting", "state", room.State, "room", room.ID)
 		return
 	}
-	if len(room.Players) < 2 {
+	if len(room.Players) < 2 && !roomCanStartAlone(room) {
 		slog.Debug("ROOM_START rejected: need at least 2 players", "room", room.ID, "count", len(room.Players))
 		return
 	}
@@ -932,6 +933,7 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 		LiveReplayEnabled: r.LiveReplayEnabled,
 		InGameSettings:    true,
 		LateJoin:          roomAcceptsLateJoin(r),
+		CanStartAlone:     roomCanStartAlone(r),
 		Rom: protocol.RomInfo{
 			Name:   r.RomName,
 			MD5:    r.RomMD5,
