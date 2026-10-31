@@ -29,7 +29,14 @@ func (h *Hub) handleAdminAuth(c *Client, env protocol.Envelope) {
 	if err := json.Unmarshal(env.Data, &req); err != nil {
 		return
 	}
-	name, ok := h.mod.AuthenticateAdmin(req.Password)
+	name, ok, limited := h.mod.AuthenticateAdminFrom(c.ip, req.Password)
+	if limited {
+		slog.Info("admin auth refused: too many failures", "user", c.user.Username, "ip", c.ip)
+		c.sendEnvelope(protocol.TypeAdminAuthFail, env.ID, protocol.ModNoticePayload{
+			Text: "Too many failed attempts. Try again later.", Severity: "error",
+		})
+		return
+	}
 	if !ok {
 		c.authFails++
 		slog.Info("admin auth failed", "user", c.user.Username, "ip", c.ip, "fails", c.authFails)
@@ -99,6 +106,19 @@ func (h *Hub) handleModAction(c *Client, env protocol.Envelope) {
 		} else {
 			c.notice("warn", "No mute found for "+target+".")
 		}
+		return
+
+	case "disputes":
+		h.modListDisputes(c)
+		return
+
+	case "resolve":
+		// target: "<setId> <winner username | void>", reason: optional note
+		h.modResolveSet(c, target, strings.TrimSpace(req.Reason))
+		return
+
+	case "pwreset":
+		h.modPasswordReset(c, target)
 		return
 
 	case "closeroom":

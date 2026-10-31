@@ -1,0 +1,109 @@
+{
+  "ladders": [
+    {
+      "id": "smashremix-1v1",
+      "name": "Smash Remix 1v1",
+      "moduleId": "smashremix",
+      "rules": [
+        "1v1, 4 stock, 8 minute timer",
+        "No items",
+        "Hazards and stage movement on",
+        "Remix Tournament toggle profile",
+        "Character select only — menus are locked during a set"
+      ],
+      "rulesets": [
+        "remix-1v1-vanilla",
+        "remix-1v1-remix"
+      ],
+      "rulesetNames": {
+        "remix-1v1-vanilla": "Vanilla roster",
+        "remix-1v1-remix": "Remix roster"
+      },
+      "rulesetDescriptions": {
+        "remix-1v1-vanilla": "The original 12: Mario, Donkey Kong, Link, Samus, Yoshi, Kirby, Fox, Pikachu, Luigi, Captain Falcon, Ness and Jigglypuff.",
+        "remix-1v1-remix": "Everyone on the main character select screen plus Dark Samus and Lucas. No polygons, regional (J/E) variants, bosses or other bonus fighters."
+      },
+      "rulesetStages": {
+        "remix-1v1-vanilla": ["Dream Land"],
+        "remix-1v1-remix": ["Dream Land", "Goomba Road", "Pokémon Stadium 2", "Pokémon Stadium"]
+      },
+      "bestOf": 3,
+      "roms": [
+        {
+          "md5": "2B2D6B295106C54216B7FC7A2F14346E",
+          "name": "Smash Remix 2.0.1 (official release)"
+        }
+      ]
+    },
+    {
+      "id": "smashremix-2v2",
+      "name": "Smash Remix 2v2",
+      "moduleId": "smashremix",
+      "teamSize": 2,
+      "rules": [
+        "2v2 team battle, team attack on",
+        "Exactly two teams of two players, any ports",
+        "4 stock, 8 minute timer",
+        "No items",
+        "Hazards and stage movement on",
+        "Remix Tournament toggle profile",
+        "Character select only — menus are locked during a set"
+      ],
+      "rulesets": [
+        "remix-2v2-vanilla",
+        "remix-2v2-remix"
+      ],
+      "rulesetNames": {
+        "remix-2v2-vanilla": "Vanilla roster",
+        "remix-2v2-remix": "Remix roster"
+      },
+      "rulesetDescriptions": {
+        "remix-2v2-vanilla": "The original 12: Mario, Donkey Kong, Link, Samus, Yoshi, Kirby, Fox, Pikachu, Luigi, Captain Falcon, Ness and Jigglypuff.",
+        "remix-2v2-remix": "Everyone on the main character select screen plus Dark Samus and Lucas. No polygons, regional (J/E) variants, bosses or other bonus fighters."
+      },
+      "rulesetStages": {
+        "remix-2v2-vanilla": ["Dream Land"],
+        "remix-2v2-remix": ["Dream Land", "Goomba Road", "Pokémon Stadium 2", "Pokémon Stadium"]
+      },
+      "bestOf": 3,
+      "roms": [
+        {
+          "md5": "2B2D6B295106C54216B7FC7A2F14346E",
+          "name": "Smash Remix 2.0.1 (official release)"
+        }
+      ]
+    }
+  ],
+  "tiers": {
+    "bands": [
+      {
+        "name": "Bronze",
+        "minConservative": 0
+      },
+      {
+        "name": "Silver",
+        "minConservative": 1150
+      },
+      {
+        "name": "Gold",
+        "minConservative": 1300
+      },
+      {
+        "name": "Platinum",
+        "minConservative": 1450
+      },
+      {
+        "name": "Diamond",
+        "minConservative": 1600
+      },
+      {
+        "name": "Master",
+        "minConservative": 1750
+      },
+      {
+        "name": "Grandmaster",
+        "minConservative": 1900
+      }
+    ]
+  }
+}

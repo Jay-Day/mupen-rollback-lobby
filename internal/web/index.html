@@ -1,0 +1,1586 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RMG-K Ranked</title>
+<meta name="description" content="Rankings, rulesets and recent sets for RMG-K ranked netplay.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='28' fill='%23f6c22d' stroke='%23311' stroke-width='5'/%3E%3Cpath d='M38 4v56M4 40h56' stroke='%23311' stroke-width='7'/%3E%3C/svg%3E">
+<style>
+:root {
+  --bg: #0b0a14;
+  --bg2: #16131f;
+  --panel: #1b1826;
+  --panel-edge: #2b2638;
+  --ink: #f4efe3;
+  --ink2: #c8c0b0;
+  --muted: #8f8778;
+  --gold1: #fff3a8;
+  --gold2: #f6c22d;
+  --gold3: #b9780b;
+  --red1: #ff6a3d;
+  --red2: #d8261d;
+  --red3: #7a0d0d;
+  --outline: #1a0c05;
+  --p1: #e5463b;
+  --p2: #3f6fe8;
+  --p3: #e9c21e;
+  --p4: #3cb84b;
+  --good: #59d27a;
+  --bad: #ff6b5e;
+  --radius: 10px;
+  --head: "Arial Black", "Arial Bold", Gadget, Impact, system-ui, sans-serif;
+  --body: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; color: var(--ink); font: 15px/1.5 var(--body);
+  background: var(--bg);
+  min-height: 100vh;
+}
+a { color: var(--gold2); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.wrap { max-width: 1000px; margin: 0 auto; padding: 0 16px 48px; }
+
+/* ── Title ── */
+header.top { padding: 22px 0 8px; display: flex; align-items: center; gap: 14px; }
+.emblem { width: 54px; height: 54px; flex: none; filter: drop-shadow(0 3px 0 var(--outline)); }
+.logo {
+  margin: 0; font: italic 900 clamp(26px, 6vw, 44px)/1 var(--head); letter-spacing: .5px;
+  text-transform: uppercase;
+  color: var(--gold2);
+  filter: drop-shadow(2px 0 0 var(--outline)) drop-shadow(-2px 0 0 var(--outline))
+          drop-shadow(0 2px 0 var(--outline)) drop-shadow(0 -2px 0 var(--outline));
+}
+.logo small { display: block; font-size: .38em; letter-spacing: 4px; margin-top: 6px; }
+
+/* ── Nav pills (the CSS "STOCK / BACK" buttons) ── */
+nav.tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 20px; }
+/* phones: a hamburger in the header opens the sections */
+.hamburger { display: none; }
+.pill {
+  display: inline-block; padding: 7px 16px 6px; border-radius: 999px;
+  font: italic 900 13px/1.2 var(--head); text-transform: uppercase; letter-spacing: .5px;
+  color: #2a1603; background: var(--gold2);
+  border: 2px solid var(--outline); box-shadow: 0 3px 0 var(--outline);
+  cursor: pointer; text-decoration: none; transition: transform .08s, filter .15s;
+}
+.pill:hover { filter: brightness(1.08); text-decoration: none; }
+.pill:active { transform: translateY(2px); box-shadow: 0 1px 0 var(--outline); }
+.pill.dim { background: #3c3646; color: var(--ink2); }
+.pill[aria-current="page"] { color: #fff; background: var(--red2); }
+
+/* ── Panels (VS menu boxes) ── */
+.panel {
+  background: var(--panel);
+  border: 2px solid var(--outline); border-radius: var(--radius);
+  box-shadow: inset 0 0 0 1px var(--panel-edge), 0 6px 0 rgba(0,0,0,.35);
+  margin-bottom: 20px; overflow: hidden;
+}
+.panel > h2, .panel > .head {
+  margin: 0; padding: 9px 16px 8px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  font: italic 900 18px/1.2 var(--head); text-transform: uppercase; letter-spacing: .5px;
+  color: var(--gold1); text-shadow: 1px 1px 0 var(--outline);
+  background: var(--red2);
+  border-bottom: 2px solid var(--outline);
+}
+.panel > .head h2 { margin: 0; font: inherit; }
+.panel .body { padding: 14px 16px; }
+.panel .body > :first-child { margin-top: 0; }
+.panel .body > :last-child { margin-bottom: 0; }
+.spacer { flex: 1; }
+
+/* ── Leaderboard ── */
+.tools { display: flex; gap: 8px; flex-wrap: wrap; }
+input[type=search] { width: min(220px, 100%); }
+input[type=search], select {
+  font: 14px var(--body); color: var(--ink); background: #0f0d17;
+  border: 2px solid var(--outline); border-radius: 999px; padding: 5px 12px; outline: none;
+  box-shadow: inset 0 0 0 1px var(--panel-edge);
+}
+input[type=search]:focus, select:focus { box-shadow: inset 0 0 0 1px var(--gold2); }
+.scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 8px 10px; text-align: left; white-space: nowrap; }
+th {
+  font: italic 900 11px var(--head); text-transform: uppercase; letter-spacing: .6px; color: var(--muted);
+  border-bottom: 1px solid var(--panel-edge);
+}
+td { border-bottom: 1px solid rgba(255,255,255,.04); }
+tbody tr:hover td { background: rgba(246,194,45,.06); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.name a { color: var(--ink); font-weight: 700; }
+.rank {
+  display: inline-grid; place-items: center; min-width: 30px; height: 30px; padding: 0 6px; border-radius: 8px;
+  font: italic 900 14px var(--head); color: #fff; background: #2e2a3a; border: 2px solid var(--outline);
+  text-shadow: 1px 1px 0 var(--outline);
+}
+.rank.r1 { background: var(--p1); } .rank.r2 { background: var(--p2); }
+.rank.r3 { background: var(--p3); color: #2a1603; text-shadow: none; } .rank.r4 { background: var(--p4); }
+.tier {
+  display: inline-block; padding: 2px 9px; border-radius: 999px; font: italic 900 11px/1.5 var(--head);
+  text-transform: uppercase; letter-spacing: .4px; border: 2px solid var(--outline); color: #1a1208;
+}
+.wl .w, .m-wl .w { color: var(--good); } .wl .l, .m-wl .l { color: var(--bad); }
+.dev { color: var(--muted); font-size: 12px; }
+.region { margin-left: 6px; color: var(--muted); font: 700 11px var(--body); letter-spacing: .5px; }
+small.world { display: block; color: var(--muted); font-size: 11px; white-space: nowrap; }
+details.placement > summary { cursor: pointer; padding: 10px 16px; color: var(--ink2); list-style: none; }
+details.placement > summary::before { content: "▸ "; } details.placement[open] > summary::before { content: "▾ "; }
+.empty { padding: 26px 16px; text-align: center; color: var(--ink2); }
+.empty b { display: block; font: italic 900 18px var(--head); color: var(--gold2); text-shadow: 2px 2px 0 var(--outline); }
+
+/* ── Sets ── */
+.set { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 10px;
+  padding: 10px 16px; border-bottom: 1px solid rgba(255,255,255,.05); }
+.set:last-child { border-bottom: 0; }
+.scorelink { color: inherit; text-decoration: none; }
+.scorelink:hover { text-decoration: underline; }
+.replay { display: flex; flex-wrap: wrap; justify-content: center; gap: 2px 10px; margin-top: 5px;
+  font: 800 11px var(--head); text-transform: uppercase; letter-spacing: .04em; }
+.replay a { color: var(--gold2); text-decoration: none; white-space: nowrap; }
+.replay a:hover { text-decoration: underline; }
+.replay.none { font: 600 11px var(--body); text-transform: none; letter-spacing: 0; color: var(--muted); }
+.filters { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,.05); }
+.filters select, .filters input { flex: 1 1 150px; min-width: 0; }
+.filters select:disabled { opacity: .5; }
+.filters .btn { flex: 0 0 auto; border: 0; cursor: pointer; }
+.panel > .head .count { color: #ffe9c4; font: 700 13px var(--body); text-shadow: none; }
+.btn { display: inline-block; padding: 8px 16px; border-radius: 8px; background: var(--gold2); color: var(--outline);
+  font: italic 900 14px var(--head); text-transform: uppercase; text-decoration: none; box-shadow: 0 3px 0 var(--outline); }
+.btn:hover { filter: brightness(1.08); }
+.btn.alt { background: var(--panel-edge); color: var(--ink); box-shadow: 0 3px 0 var(--outline); }
+p.actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+ol.marks { list-style: none; padding: 0; margin: 12px 0; display: grid; gap: 6px; }
+ol.marks li { display: flex; gap: 10px; align-items: baseline; }
+ol.marks a { color: var(--gold2); font-weight: 700; text-decoration: none; }
+ol.marks a:hover { text-decoration: underline; }
+ol.marks .when { font: 700 13px ui-monospace, monospace; color: var(--gold2); min-width: 48px; }
+.side { min-width: 0; }
+.side.right { text-align: right; }
+.side .who { font-weight: 700; overflow: hidden; text-overflow: ellipsis; }
+.side .who a { color: var(--ink); }
+.side .meta { font-size: 12px; color: var(--muted); }
+.side .meta + .who { margin-top: 6px; }
+.slot { font: italic 900 11px var(--head); padding: 0 5px; border-radius: 4px; color: #fff; margin-right: 4px; }
+.slot.s1 { background: var(--p1); } .slot.s2 { background: var(--p2); }
+.slot.s3 { background: var(--p3); color: #2a1603; } .slot.s4 { background: var(--p4); }
+.score { max-width: 46vw; text-align: center; font: italic 900 24px/1 var(--head); color: var(--gold1); text-shadow: 2px 2px 0 var(--outline); }
+.score small { display: block; font: 600 11px var(--body); color: var(--muted); text-shadow: none; margin-top: 4px; }
+.delta.up { color: var(--good); } .delta.down { color: var(--bad); }
+.status { display: inline-block; max-width: 100%; overflow-wrap: anywhere; font: italic 900 10px var(--head);
+  text-transform: uppercase; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--outline); }
+.status.voided { background: #4a4455; color: var(--ink2); } .status.disputed { background: #8a5a12; color: #fff; }
+.winner .who::after { content: " ★"; color: var(--gold2); }
+
+/* ── Profile ── */
+.profile { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+.profile .big { font: italic 900 clamp(24px, 5vw, 34px)/1 var(--head); color: var(--ink); text-shadow: 3px 3px 0 var(--outline); }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-top: 14px; }
+.stat { background: #121019; border: 2px solid var(--outline); border-radius: 8px; padding: 8px 12px; }
+.stat .k { font: italic 900 10px var(--head); text-transform: uppercase; color: var(--muted); letter-spacing: .6px; }
+.stat .v.text { font-size: 15px; line-height: 1.6; }
+.stat .v { font: italic 900 22px/1.2 var(--head); color: var(--gold1); text-shadow: 2px 2px 0 var(--outline); font-variant-numeric: tabular-nums; }
+.chart { position: relative; margin-top: 6px; }
+.chart svg { display: block; width: 100%; height: 180px; overflow: visible; }
+.chart .tip { position: absolute; pointer-events: none; transform: translate(-50%, -115%);
+  background: #0f0d17; border: 2px solid var(--outline); box-shadow: inset 0 0 0 1px var(--gold3);
+  border-radius: 6px; padding: 4px 8px; font-size: 12px; white-space: nowrap; display: none; }
+.chart .tip b { color: var(--gold1); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+/* character rings: the arc is the share of the player's sets on that roster */
+.ring { display: inline-block; flex: none; vertical-align: middle; }
+.ring .track { stroke: var(--panel-edge); }
+.ring .arc { stroke: var(--gold2); }
+.ring text { fill: var(--ink); font-family: var(--body); font-weight: 800; }
+/* phone-only extras in rankings rows, and the phone filter dropdowns */
+.m-sub, .m-wl, .filterselects { display: none; }
+.rings { display: flex; align-items: center; gap: 4px; }
+.rings .more { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%;
+  border: 1px dashed var(--panel-edge); color: var(--muted); font: 700 10px var(--body); flex: none; }
+.mains { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; align-items: center; }
+.mains .label { color: var(--muted); font-size: 13px; }
+button.main { display: inline-flex; align-items: center; gap: 7px; padding: 3px 10px 3px 3px; border-radius: 999px;
+  background: #262131; border: 1px solid var(--panel-edge); color: var(--ink2); font: 13px var(--body); cursor: pointer; }
+button.main:hover { border-color: var(--gold2); color: var(--ink); }
+button.main b { color: var(--ink); font-weight: 700; }
+.chip { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: #262131; border: 1px solid var(--panel-edge); color: var(--ink2); }
+button.chip { font-family: var(--body); cursor: pointer; }
+button.chip:hover { border-color: var(--gold2); color: var(--ink); }
+
+/* ── Text pages ── */
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+.card { background: #121019; border: 2px solid var(--outline); border-radius: 8px; padding: 12px 14px; }
+.card h3 { margin: 0 0 6px; font: italic 900 15px var(--head); text-transform: uppercase; color: var(--gold2); text-shadow: 1px 1px 0 var(--outline); }
+ul.rules { margin: 0; padding-left: 0; list-style: none; }
+ul.rules li { padding: 6px 0 6px 26px; position: relative; border-bottom: 1px solid rgba(255,255,255,.05); }
+ul.rules li:last-child { border-bottom: 0; }
+ul.rules li::before { content: ""; position: absolute; left: 4px; top: 12px; width: 10px; height: 10px; border-radius: 50%;
+  background: var(--gold2); border: 2px solid var(--outline); }
+ol.steps { counter-reset: step; list-style: none; padding: 0; margin: 0; }
+ol.steps li { counter-increment: step; position: relative; padding: 10px 0 10px 50px; border-bottom: 1px solid rgba(255,255,255,.05); }
+ol.steps li:last-child { border-bottom: 0; }
+ol.steps li::before { content: counter(step); position: absolute; left: 0; top: 8px; width: 34px; height: 34px;
+  display: grid; place-items: center; border-radius: 50%; font: italic 900 16px var(--head); color: #fff;
+  background: var(--red2); border: 2px solid var(--outline); }
+ol.steps b { color: var(--gold1); }
+code { font: 12px ui-monospace, Consolas, monospace; background: #0f0d17; padding: 1px 5px; border-radius: 4px; border: 1px solid var(--panel-edge); word-break: break-all; }
+/* one grid for all rows: the name column fits the widest tier, so bars line up and never overlap */
+.tierbar { display: grid; grid-template-columns: max-content minmax(0, 1fr) auto; gap: 6px 10px; align-items: center; }
+.tierrow { display: contents; }
+.tierrow .bar { height: 12px; border-radius: 999px; border: 2px solid var(--outline); }
+.note { color: var(--ink2); font-size: 14px; }
+.callout { margin: 0 0 20px; padding: 12px 16px; border: 2px solid var(--outline); border-left: 6px solid var(--gold2);
+  border-radius: var(--radius); background: var(--panel); color: var(--ink2); font-size: 14px; }
+.callout b { color: var(--ink); }
+footer { color: var(--muted); font-size: 12px; text-align: center; margin-top: 24px; }
+footer a { color: var(--muted); }
+
+[hidden] { display: none !important; }
+
+/* ── Rosters ── */
+.seg { display: inline-flex; border: 2px solid var(--outline); border-radius: 999px; overflow: hidden; background: #121019; }
+.seg a { padding: 5px 14px; font: italic 900 13px var(--head); text-transform: uppercase; color: var(--ink2); text-decoration: none;
+  white-space: nowrap; }
+.seg a + a { border-left: 2px solid var(--outline); }
+.seg a[aria-current] { background: var(--gold2); color: var(--outline); }
+.seg a:focus-visible { outline: 2px solid var(--gold1); outline-offset: -3px; }
+.rosterbar { display: flex; gap: 8px 12px; align-items: center; flex-wrap: wrap; padding: 12px 16px 2px; }
+.rosterbar .note { font-size: 13px; }
+.score small.roster { margin-top: 2px; color: var(--ink2); }
+button.more { display: block; margin: 12px auto 14px; border: 0; cursor: pointer; }
+h3.roster { display: flex; align-items: center; gap: 8px; margin: 18px 0 0; font: italic 900 15px var(--head);
+  text-transform: uppercase; color: var(--gold2); text-shadow: 1px 1px 0 var(--outline); }
+h3.roster:first-of-type { margin-top: 6px; }
+
+/* ── Scoring ── */
+table.worth { margin: 6px 0 4px; }
+table.worth th { white-space: normal; }
+table.leave th, table.leave td { white-space: normal; vertical-align: top; }
+table.leave td:first-child { width: 45%; }
+h3.sub { font: italic 900 15px var(--head); text-transform: uppercase; color: var(--gold2); margin: 18px 0 4px; }
+.calc { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; margin: 10px 0; }
+.calc label { display: grid; gap: 4px; font: 800 12px var(--head); text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.calc input.field { width: 100%; }
+.calcout { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.calc.calc4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.calcout .card span { display: block; font-size: 12px; color: var(--muted); }
+.calcout .card b { display: block; font: italic 900 22px var(--head); color: var(--gold1); text-shadow: 2px 2px 0 var(--outline); }
+
+/* ── Moderators ── */
+input.field {
+  font: 14px var(--body); color: var(--ink); background: #0f0d17;
+  border: 2px solid var(--outline); border-radius: 8px; padding: 6px 10px; outline: none;
+  box-shadow: inset 0 0 0 1px var(--panel-edge); min-width: 0;
+}
+input.field:focus { box-shadow: inset 0 0 0 1px var(--gold2); }
+.btn.small { padding: 5px 11px; font-size: 12px; border: 0; cursor: pointer; }
+.btn.danger { background: var(--red2); color: var(--ink); }
+.btn:disabled { filter: grayscale(1) brightness(.7); cursor: default; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.dispute { padding: 0 16px; border-bottom: 2px solid var(--panel-edge); }
+.dispute:last-child { border-bottom: 0; }
+.dispute[open] { padding-bottom: 16px; }
+details.dispute > summary, details.results > summary { cursor: pointer; padding: 12px 0; list-style: none; color: var(--ink2); }
+details.dispute > summary::-webkit-details-marker, details.results > summary::-webkit-details-marker { display: none; }
+details.dispute > summary::before, details.results > summary::before { content: "▸ "; color: var(--gold2); }
+details.dispute[open] > summary::before, details.results[open] > summary::before { content: "▾ "; }
+details.dispute > summary b { color: var(--ink); }
+.panel > .head .btn.small { white-space: nowrap; }
+.dispute .set { padding: 4px 0 10px; border: 0; }
+ul.reports { margin: 0 0 10px; padding-left: 18px; color: var(--ink2); font-size: 14px; }
+.msg { font-size: 13px; color: var(--bad); min-height: 1em; }
+.msg.ok { color: var(--good); }
+.codebox { margin-top: 10px; padding: 10px 12px; border-radius: 8px; background: #0f0d17;
+  border: 2px dashed var(--gold3); }
+.codebox code { font: 700 20px ui-monospace, monospace; color: var(--gold1); letter-spacing: 2px; }
+.acct { display: inline-block; padding: 1px 8px; border-radius: 999px; font: 800 11px var(--head);
+  text-transform: uppercase; background: var(--good); color: var(--outline); }
+.acct.off { background: var(--bad); }
+td.detail { white-space: normal; color: var(--ink2); }
+.loading { padding: 26px; text-align: center; color: var(--muted); }
+
+@media (max-width: 640px) {
+  .hamburger { display: grid; place-content: center; gap: 5px; margin-left: auto; flex: none; width: 46px; height: 46px;
+    border: 2px solid var(--outline); border-radius: 10px; background: var(--panel); cursor: pointer;
+    box-shadow: inset 0 0 0 1px var(--panel-edge), 0 3px 0 var(--outline); }
+  .hamburger span { display: block; width: 22px; height: 3px; border-radius: 2px; background: var(--gold2);
+    transition: transform .15s, opacity .15s; }
+  .hamburger[aria-expanded="true"] span:nth-child(1) { transform: translateY(8px) rotate(45deg); }
+  .hamburger[aria-expanded="true"] span:nth-child(2) { opacity: 0; }
+  .hamburger[aria-expanded="true"] span:nth-child(3) { transform: translateY(-8px) rotate(-45deg); }
+  .hamburger:focus-visible { outline: 2px solid var(--gold1); outline-offset: 2px; }
+  nav.tabs { display: none; }
+  nav.tabs.open { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 6px 0 20px; padding: 12px;
+    border: 2px solid var(--outline); border-radius: var(--radius); background: var(--panel); }
+  nav.tabs.open .pill { text-align: center; }
+  /* rankings: the switches become three dropdowns on one line */
+  .filterbar { display: block; padding: 12px 12px 4px; }
+  .filterbar .seg { display: none; }
+  .filterselects { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 8px; }
+  .filterselects select { width: 100%; min-width: 0; padding: 7px 8px; }
+  .filterbar .note { display: block; margin-top: 8px; font-size: 12px; }
+  /* rankings rows: characters under the name, W–L under the rating */
+  .m-sub { display: block; margin-top: 5px; }
+  .m-sub .rings { gap: 3px; }
+  .m-sub .rings .more { width: 24px; height: 24px; font-size: 9px; }
+  .m-wl { display: block; margin-top: 4px; font-size: 13px; }
+  td.name, td.num { padding-top: 10px; padding-bottom: 10px; }
+  .logo { font-size: 23px; }
+  .logo small { font-size: .45em; letter-spacing: 2px; }
+  .hide-sm { display: none; }
+  .panel > .head .tools { width: 100%; }
+  .panel > .head input[type=search] { width: 100%; }
+  th, td { padding: 7px 6px; }
+  .set { padding: 10px 10px; }
+  .score { max-width: 30vw; }
+  table.worth th, table.worth td { padding: 7px 5px; }
+  .calcout { gap: 6px; }
+  .calc.calc4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .calcout .card { padding: 8px 9px; }
+}
+@media (max-width: 460px) {
+  .hide-xs, .dev { display: none; }
+  td.name .region { display: none; }
+  td.name { white-space: normal; }
+  .seg a { padding: 5px 9px; font-size: 12px; }
+  .logo small { letter-spacing: 2px; }
+}
+/* the smallest phones: tighter tables so nothing scrolls sideways */
+@media (max-width: 360px) {
+  th, td { padding: 6px 3px; }
+  table.worth th, table.worth td { padding: 6px 2px; font-size: 12px; }
+}
+@media (max-width: 380px) {
+  .emblem { width: 40px; height: 40px; }
+  header.top { gap: 10px; }
+  .logo { font-size: 20px; }
+}
+@media (prefers-reduced-motion: reduce) { .pill, .hamburger span { transition: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <svg class="emblem" viewBox="0 0 64 64" aria-hidden="true">
+      <circle cx="32" cy="32" r="27" fill="#f6c22d" stroke="#1a0c05" stroke-width="5"/>
+      <path d="M38 3v58M3 40h58" stroke="#1a0c05" stroke-width="7"/>
+    </svg>
+    <h1 class="logo">RMG-K Ranked<small>Netplay Rankings</small></h1>
+    <button class="hamburger" type="button" aria-expanded="false" aria-controls="sections" aria-label="Menu">
+      <span></span><span></span><span></span>
+    </button>
+  </header>
+  <nav class="tabs" id="sections" aria-label="Sections">
+    <a class="pill" href="#/" data-route="rankings">Rankings</a>
+    <a class="pill" href="#/sets" data-route="sets">Recent Sets</a>
+    <a class="pill" href="#/rules" data-route="rules">Rulesets</a>
+    <a class="pill" href="#/tiers" data-route="tiers">Tiers</a>
+    <a class="pill" href="#/scoring" data-route="scoring">Scoring</a>
+    <a class="pill" href="#/how" data-route="how">How to Play</a>
+  </nav>
+  <main id="view"><div class="loading">Loading…</div></main>
+  <footer>RMG-K ranked netplay · 1v1: Glicko-2, one set = one result · 2v2: OpenSkill, every game · <a href="#/admin">Moderators</a></footer>
+</div>
+<script>
+"use strict";
+// ── tiny DOM helper: h("tag.class", {attrs}, ...children) — text is always set safely
+function h(sel, attrs, ...kids) {
+  const [tag, ...cls] = sel.split(".");
+  const el = document.createElement(tag || "div");
+  if (cls.length) el.className = cls.join(" ");
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === "style") el.style.cssText = v; else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const kid of kids.flat(Infinity)) if (kid != null && kid !== false)
+    el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  return el;
+}
+const view = document.getElementById("view");
+const cache = {};
+async function api(path) {
+  const res = await fetch("/api/ranked/" + path, { headers: { Accept: "application/json" } });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+  return data;
+}
+async function overview() { return cache.ov || (cache.ov = await api("overview")); }
+
+// ── formatting
+const TIER_COLORS = { Bronze: "#c7834d", Silver: "#c9d1d9", Gold: "#f6c22d", Platinum: "#7fe0d2",
+  Diamond: "#79b2ff", Master: "#c98bff", Grandmaster: "#ff6b6b" };
+function tierBadge(row) {
+  if (row.provisional) return h("span.tier", { style: "background:#6d6578;color:#f4efe3" }, "Placement");
+  return h("span.tier", { style: "background:" + (TIER_COLORS[row.tier] || "#9aa") }, row.tier);
+}
+function ago(unix) {
+  if (!unix) return "—";
+  const s = Math.max(0, Date.now() / 1000 - unix);
+  if (s < 60) return "just now";
+  const units = [[86400 * 365, "y"], [86400 * 30, "mo"], [86400, "d"], [3600, "h"], [60, "m"]];
+  for (const [n, u] of units) if (s >= n) return Math.floor(s / n) + u + " ago";
+}
+const playerLink = (name) => h("a", { href: "#/player/" + encodeURIComponent(name) }, name);
+
+// Formats: a ladder is 1v1 or 2v2 (team battles, rated with OpenSkill).
+const formatName = (l) => l && l.teamSize > 1 ? l.teamSize + "v" + l.teamSize : "1v1";
+function ladderById(id) { return (cache.ov && cache.ov.ladders || []).find((l) => l.id === id); }
+const isTeamSet = (set) => set.players.some((p) => p.team);
+
+// Rosters: each roster (ruleset) of a ladder is a separate ranking.
+const shortRoster = (name) => String(name || "").replace(/\s+roster$/i, "");
+function rosterOf(ladder, id) { return ladder.rulesets.find((r) => r.id === id) || ladder.rulesets[0]; }
+// The same choices as a dropdown (phones): picking one goes to its link.
+function switchSelect(choices, current, label) {
+  const select = h("select", { "aria-label": label, title: label },
+    choices.map(([id, name, href]) => h("option", { value: href, selected: id === current }, name)));
+  select.onchange = () => { location.hash = select.value; };
+  return select;
+}
+function switchLinks(choices, current, label) {
+  return h("nav.seg", { "aria-label": label }, choices.map(([id, name, href, title]) =>
+    h("a", { href, title: title || null, "aria-current": id === current ? "page" : null }, name)));
+}
+
+// Regional rankings: continents by id, with short labels for switches and rows
+const REGION_SHORT = { na: "NA", sa: "SA", eu: "EU", asia: "Asia", oc: "OCE" };
+function regionName(id) {
+  const r = (cache.ov && cache.ov.regions || []).find((x) => x.id === id);
+  return r ? r.name : "";
+}
+
+// Character names by ranked module (ids are the game's own character ids)
+const CHARACTERS = {
+  smashremix: { 0: "Mario", 1: "Fox", 2: "Donkey Kong", 3: "Samus", 4: "Luigi", 5: "Link", 6: "Yoshi",
+    7: "Captain Falcon", 8: "Kirby", 9: "Pikachu", 10: "Jigglypuff", 11: "Ness", 29: "Falco", 30: "Ganondorf",
+    31: "Young Link", 32: "Dr. Mario", 33: "Wario", 34: "Dark Samus", 38: "Lucas", 52: "Bowser", 55: "Wolf",
+    56: "Conker", 57: "Mewtwo", 58: "Marth", 59: "Sonic", 62: "Sheik", 63: "Marina", 64: "King Dedede",
+    65: "Goemon", 68: "Banjo & Kazooie", 72: "Crash", 73: "Peach" },
+};
+// Short labels for character rings (fallback: the name's first letters)
+const CHARACTER_SHORT = {
+  smashremix: { 0: "MAR", 1: "FOX", 2: "DK", 3: "SAM", 4: "LUI", 5: "LNK", 6: "YOS", 7: "CF", 8: "KIR", 9: "PIK",
+    10: "JIG", 11: "NES", 29: "FCO", 30: "GAN", 31: "YL", 32: "DOC", 33: "WAR", 34: "DSM", 38: "LUC", 52: "BOW",
+    55: "WLF", 56: "CON", 57: "MEW", 58: "MTH", 59: "SON", 62: "SHK", 63: "MRN", 64: "DDD", 65: "GOE", 68: "B&K",
+    72: "CRA", 73: "PCH" },
+};
+function charShort(ladderId, id) {
+  const table = CHARACTER_SHORT[moduleOf(ladderId)] || {};
+  return table[id] || charName(ladderId, id).replace(/[^A-Za-z]/g, "").slice(0, 3).toUpperCase();
+}
+const SVG = "http://www.w3.org/2000/svg";
+function svgEl(tag, attrs) {
+  const el = document.createElementNS(SVG, tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  return el;
+}
+// A character ring: the label in the middle, the arc filled to `percent`.
+function charRing(ladderId, c, size = 32) {
+  const r = size / 2 - 2.5, len = 2 * Math.PI * r;
+  const svg = svgEl("svg", { class: "ring", width: size, height: size, viewBox: `0 0 ${size} ${size}`, role: "img",
+    "aria-label": `${charName(ladderId, c.id)}, ${c.percent}% of sets` });
+  const title = svgEl("title", {});
+  title.textContent = `${charName(ladderId, c.id)} · ${c.percent}% of sets (${c.sets})`;
+  svg.append(title,
+    svgEl("circle", { class: "track", cx: size / 2, cy: size / 2, r, fill: "none", "stroke-width": 3 }),
+    svgEl("circle", { class: "arc", cx: size / 2, cy: size / 2, r, fill: "none", "stroke-width": 3, "stroke-linecap": "round",
+      "stroke-dasharray": `${(len * Math.min(100, c.percent) / 100).toFixed(2)} ${len.toFixed(2)}`,
+      transform: `rotate(-90 ${size / 2} ${size / 2})` }));
+  const label = charShort(ladderId, c.id);
+  const text = svgEl("text", { x: "50%", y: "50%", "text-anchor": "middle", "dominant-baseline": "central",
+    "font-size": (size * (label.length > 2 ? 0.26 : 0.3)).toFixed(1) });
+  text.textContent = label;
+  svg.append(text);
+  return svg;
+}
+function charRings(ladderId, p, size = 32) {
+  if (!p.characters || !p.characters.length) return null;
+  return h("div.rings", {}, p.characters.map((c) => charRing(ladderId, c, size)),
+    p.moreCharacters ? h("span.more", { title: p.moreCharacters + " more" }, "+" + p.moreCharacters) : null);
+}
+// The ROM builds ranked accepts, across ladders (name + MD5 from ranked.json).
+function rankedRoms(ov) {
+  const seen = new Map();
+  for (const l of ov.ladders) for (const rom of l.roms) if (!seen.has(rom.md5)) seen.set(rom.md5, rom);
+  return [...seen.values()];
+}
+function romCallout(ov) {
+  const roms = rankedRoms(ov);
+  if (!roms.length) return null;
+  return h("div.callout", {}, h("b", {}, "Ranked needs " + roms.map((r) => r.name || "a supported build").join(" or ") + ". "),
+    "Other builds, including PAL versions and mods like +Extra, can't play ranked.");
+}
+// Rankings title: the Vanilla roster is the original game's cast, so it
+// shows as Super Smash Bros.
+function ladderTitle(ladder, roster) {
+  return /vanilla/i.test(roster ? roster.id + " " + roster.name : "") ? ladder.name.replace(/^Smash Remix\b/, "Super Smash Bros") : ladder.name;
+}
+function rosterCount(ladderId) {
+  const l = (cache.ov && cache.ov.ladders || []).find((x) => x.id === ladderId);
+  return l ? l.rulesets.length : 0;
+}
+function moduleOf(ladderId) {
+  const l = (cache.ov && cache.ov.ladders || []).find((x) => x.id === ladderId);
+  return l ? l.moduleId : "";
+}
+function charName(ladderId, id) {
+  const table = CHARACTERS[moduleOf(ladderId)] || {};
+  return table[id] || ("#" + id);
+}
+
+function panel(title, ...body) { return h("section.panel", {}, h("h2", {}, title), ...body); }
+function emptyState(title, text) { return h("div.empty", {}, h("b", {}, title), text); }
+function errorState(err) { return panel("Oops", emptyState("Couldn't load this", err.message)); }
+
+// ── Rankings
+async function showRankings(params) {
+  const ov = await overview();
+  if (!ov.ladders.length) {
+    return [panel("Rankings", emptyState("No ranked ladders yet", "This server isn't running ranked play."))];
+  }
+  const ladderId = params.get("ladder") || ov.ladders[0].id;
+  const ladder = ov.ladders.find((l) => l.id === ladderId) || ov.ladders[0];
+  const roster = rosterOf(ladder, params.get("ruleset"));
+  const region = (ov.regions || []).some((r) => r.id === params.get("region")) ? params.get("region") : "";
+  const data = await api("leaderboard?ladder=" + encodeURIComponent(ladder.id) + "&ruleset=" + encodeURIComponent(roster.id) +
+    (region ? "&region=" + region : ""));
+  const ranked = data.players.filter((p) => !p.provisional);
+  const placement = data.players.filter((p) => p.provisional);
+  const PAGE = 100;
+
+  const search = h("input", { type: "search", placeholder: "Find a player…", "aria-label": "Find a player" });
+  const tools = h("div.tools", {}, search);
+
+  const row = (p, i) => h("tr", { "data-name": p.username.toLowerCase(), "data-more": i >= PAGE ? "" : null, hidden: i >= PAGE },
+    h("td", {}, p.rank ? h("span.rank" + (p.rank <= 4 ? ".r" + p.rank : ""), {}, p.rank) : h("span.rank", {}, "–")),
+    h("td.name", {}, playerLink(p.username),
+      !region && p.region ? h("span.region", { title: regionName(p.region) }, REGION_SHORT[p.region] || "") : null,
+      region && p.worldRank ? h("small.world", { title: "Worldwide rank" }, "#" + p.worldRank + " world") : null,
+      h("div.m-sub", {}, charRings(ladder.id, p, 24))),
+    h("td.hide-sm", {}, charRings(ladder.id, p)),
+    h("td.hide-xs", {}, tierBadge(p)),
+    h("td.num", {}, String(p.rating), h("span.dev", {}, " ±" + p.deviation),
+      h("div.m-wl", {}, h("span.w", {}, p.wins), "–", h("span.l", {}, p.losses))),
+    h("td.num.wl.hide-sm", {}, h("span.w", {}, p.wins), "–", h("span.l", {}, p.losses)),
+    h("td.num.hide-sm", {}, p.sets),
+    h("td.num.hide-sm", {}, ago(p.lastPlayed)));
+  const table = (rows, paged) => h("div.scroll", {}, h("table", {},
+    h("thead", {}, h("tr", {}, h("th", {}, "#"), h("th", {}, "Player"), h("th.hide-sm", {}, "Plays"), h("th.hide-xs", {}, "Tier"),
+      h("th.num", {}, "Rating"), h("th.num.hide-sm", {}, "W–L"), h("th.num.hide-sm", {}, "Sets"), h("th.num.hide-sm", {}, "Last set"))),
+    h("tbody", {}, rows.map((p, i) => row(p, paged ? i : 0)))));
+
+  // 1v1 / 2v2, then the roster; switching format keeps the roster's place
+  const rosterIndex = Math.max(0, ladder.rulesets.findIndex((r) => r.id === roster.id));
+  const link = (l, r, g = region) => "#/?ladder=" + encodeURIComponent(l.id) + "&ruleset=" + encodeURIComponent(r.id) +
+    (g ? "&region=" + g : "");
+  const formatChoices = ov.ladders.length > 1 ? ov.ladders.map((l) =>
+    [l.id, formatName(l), link(l, l.rulesets[Math.min(rosterIndex, l.rulesets.length - 1)])]) : null;
+  const rosterChoices = ladder.rulesets.length > 1 ? ladder.rulesets.map((r) => [r.id, shortRoster(r.name), link(ladder, r)]) : null;
+  const regionChoices = (ov.regions || []).length ? [["", "World", link(ladder, roster, ""), "Everyone"],
+    ...ov.regions.map((r) => [r.id, REGION_SHORT[r.id] || r.name, link(ladder, roster, r.id), r.name])] : null;
+  const formats = formatChoices ? switchLinks(formatChoices, ladder.id, "Format") : null;
+  const rosters = rosterChoices ? switchLinks(rosterChoices, roster.id, "Roster") : null;
+  const regions = regionChoices ? switchLinks(regionChoices, region, "Region") : null;
+  // phones: the three switches as dropdowns on one line
+  const dropdowns = h("div.filterselects", {},
+    formatChoices ? switchSelect(formatChoices, ladder.id, "Format") : null,
+    rosterChoices ? switchSelect(rosterChoices, roster.id, "Roster") : null,
+    regionChoices ? switchSelect(regionChoices, region, "Region") : null);
+  const note = region
+    ? regionName(region) + ": players who play most of their sets from there. Ratings and tiers are worldwide."
+    : ladder.teamSize > 1 ? "2v2 team battles: your own rating, whoever you team with."
+      : "Each format and roster is its own ranking.";
+  const switcher = h("div.rosterbar.filterbar", {}, formats, rosters, regions, dropdowns, h("span.note", {}, note));
+  let expanded = false;
+  const more = ranked.length > PAGE ? h("button.btn.alt.small.more", { type: "button" }, `Show all ${ranked.length} players`) : null;
+  const main = h("section.panel", {},
+    h("div.head", {}, h("h2", {}, ladderTitle(ladder, roster)), h("span.spacer"), tools),
+    switcher,
+    ranked.length ? table(ranked, true)
+      : region ? emptyState("No ranked players in " + regionName(region) + " yet", "Try another region or World.")
+        : emptyState("No ranked players yet", "Players appear here once they finish their placement sets."),
+    more);
+  const blocks = [main];
+  let details = null;
+  if (placement.length) {
+    details = h("details.placement", {},
+      h("summary", {}, `In placement (${placement.length}) — rating still settling`), table(placement, false));
+    blocks.push(h("section.panel", {}, details));
+  }
+  const showRows = () => {
+    const q = search.value.trim().toLowerCase();
+    let placementHit = false;
+    for (const tr of document.querySelectorAll("tbody tr[data-name]")) {
+      const hit = q !== "" && tr.dataset.name.includes(q);
+      tr.hidden = q !== "" ? !hit : tr.hasAttribute("data-more") && !expanded;
+      placementHit ||= hit && details !== null && details.contains(tr);
+    }
+    if (placementHit) details.open = true;
+    if (more) more.hidden = q !== "" || expanded;
+  };
+  if (more) more.onclick = () => { expanded = true; showRows(); };
+  search.oninput = showRows;
+  return blocks;
+}
+
+// ── Sets
+function setRow(set, linked = true) {
+  // a side is one player (1v1) or a team (2v2)
+  const sides = isTeamSet(set) ? [1, 2].map((t) => set.players.filter((p) => p.team === t)) : set.players.map((p) => [p]);
+  const [a, b] = sides;
+  if (!a || !b || !a.length || !b.length) return null;
+  const won = (members) => isTeamSet(set) ? set.winnerTeam === members[0].team : set.winner === members[0].username;
+  const side = (members, right) => h("div.side" + (right ? ".right" : "") + (won(members) ? ".winner" : ""), {},
+    members.map((p) => {
+      const delta = p.after - p.before;
+      const chars = p.characters.map((c) => charName(set.ladder, c)).join(", ");
+      return [h("div.who", {}, h("span.slot.s" + p.slot, {}, "P" + p.slot), playerLink(p.username)),
+        h("div.meta", {},
+          set.status === "rated" ? h("span.delta." + (delta >= 0 ? "up" : "down"), {},
+            (delta >= 0 ? "+" : "") + delta + " ") : null,
+          set.status === "rated" ? p.after : p.before, chars ? " · " + chars : "")];
+    }));
+  const games = (members) => members[0].games;
+  const reason = { player_left: "player left", left_in_game_1: "player left in game 1",
+    leader_left: "the leader left", forfeit: "forfeit", result_timeout: "no result",
+    reports_disagree: "reports disagree", invalid_result: "invalid result", server_error: "server error" }[set.reason] || set.reason;
+  return h("div.set", {},
+    side(a, false),
+    h("div.score", {}, linked ? h("a.scorelink", { href: "#/set/" + set.id, title: "Set details" }, `${games(a)} – ${games(b)}`)
+        : `${games(a)} – ${games(b)}`,
+      h("small", {}, set.status === "rated" ? (set.reason === "forfeit" ? "forfeit · " : "") + ago(set.time)
+        : h("span.status." + set.status, { title: reason || "" }, set.status + (reason ? ": " + reason : ""))),
+      set.rulesetName && (rosterCount(set.ladder) > 1 || (cache.ov && cache.ov.ladders.length > 1))
+        ? h("small.roster", {}, ((cache.ov && cache.ov.ladders.length > 1) ? formatName(ladderById(set.ladder)) + " · " : "") +
+          shortRoster(set.rulesetName)) : null,
+      linked ? replayStatus(set) : null),
+    side(b, true));
+}
+// "rmgk://" link that opens a replay in RMG-K
+const watchLink = (url, record) => "rmgk://replay?url=" + encodeURIComponent(location.origin + url) +
+  (record > 0 ? "&record=" + record : "");
+function replayStatus(set) {
+  if (!set.hasReplay || !set.replayUrl) return h("span.replay.none", { title: "No replay was uploaded for this set" }, "no replay");
+  return h("span.replay", {},
+    h("a", { href: watchLink(set.replayUrl), title: "Watch in RMG-K" }, "▶ Watch"),
+    h("a", { href: set.replayUrl, download: "rmgk-set-" + set.id + ".krec", title: "Download the replay (.krec)" }, "⬇ .krec"));
+}
+
+// A filterable, paged list of sets: roster, player (or opponent on a player's
+// page), character and result. Filters live in the page's URL.
+async function setsBrowser({ title, player, params, basePath }) {
+  const ov = await overview();
+  const PAGE = 30;
+  // with one ladder it's always chosen; with several, "" = all formats
+  const initialLadder = ov.ladders.length === 1 ? ov.ladders[0] : ov.ladders.find((l) => l.id === params.get("ladder"));
+  let ladder = initialLadder;
+  const state = {
+    ladder: initialLadder ? initialLadder.id : "",
+    ruleset: ladder && ladder.rulesets.some((r) => r.id === params.get("ruleset")) ? params.get("ruleset") : "",
+    who: params.get(player ? "opponent" : "player") || "",
+    character: params.get("character") || "",
+    result: ["win", "loss"].includes(params.get("result")) ? params.get("result") : "",
+  };
+
+  const formatSel = ov.ladders.length > 1 ? h("select", { "aria-label": "Format" },
+    h("option", { value: "" }, "All formats"),
+    ov.ladders.map((l) => h("option", { value: l.id, selected: l.id === state.ladder }, formatName(l)))) : null;
+  const rosterSel = ov.ladders.some((l) => l.rulesets.length > 1) ? h("select", { "aria-label": "Roster" }) : null;
+  const fillRosters = () => {
+    if (!rosterSel) return;
+    rosterSel.replaceChildren(h("option", { value: "" }, ladder ? "All rosters" : "All rosters (pick a format)"),
+      ...(ladder ? ladder.rulesets : []).map((r) => h("option", { value: r.id, selected: r.id === state.ruleset },
+        shortRoster(r.name) + " roster")));
+    rosterSel.disabled = !ladder;
+  };
+  fillRosters();
+  const who = h("input", { type: "search", value: state.who, placeholder: player ? "Opponent…" : "Player…",
+    "aria-label": player ? "Opponent" : "Player", autocomplete: "off" });
+  const charSel = h("select", { "aria-label": "Character" });
+  const fillCharacters = () => {
+    const ids = new Set();
+    for (const l of ladder ? [ladder] : ov.ladders)
+      for (const r of l.rulesets) if (!state.ruleset || r.id === state.ruleset) for (const c of r.characters || []) ids.add(c);
+    if (state.character !== "") ids.add(+state.character);
+    const any = ladder || ov.ladders[0];
+    const named = any ? [...ids].map((id) => [id, charName(any.id, id)]).sort((x, y) => x[1].localeCompare(y[1])) : [];
+    charSel.replaceChildren(h("option", { value: "" }, "Any character"),
+      ...named.map(([id, name]) => h("option", { value: String(id), selected: String(id) === state.character }, name)));
+  };
+  fillCharacters();
+  const resultSel = h("select", { "aria-label": "Result" },
+    h("option", { value: "" }, "Wins and losses"), h("option", { value: "win" }, "Wins"), h("option", { value: "loss" }, "Losses"));
+  resultSel.value = state.result;
+  const clear = h("button.btn.alt.small", { type: "button" }, "Clear");
+  const count = h("span.count");
+  const list = h("div");
+  const more = h("button.btn.alt.small.more", { type: "button", hidden: true }, "Load more");
+
+  const owner = () => player || state.who.trim();
+  const query = (offset) => {
+    const q = new URLSearchParams();
+    if (state.ladder) q.set("ladder", state.ladder);
+    if (state.ruleset) q.set("ruleset", state.ruleset);
+    if (player) { q.set("player", player); if (state.who.trim()) q.set("opponent", state.who.trim()); }
+    else if (state.who.trim()) q.set("player", state.who.trim());
+    if (state.character !== "") q.set("character", state.character);
+    if (state.result && owner()) q.set("result", state.result);
+    q.set("limit", PAGE);
+    q.set("offset", offset);
+    return q;
+  };
+  const syncControls = () => {
+    // wins/losses are someone's: the page's player or the one typed in
+    resultSel.disabled = !owner();
+    resultSel.title = owner() ? "Sets " + owner() + " won or lost" : "Pick a player first";
+    charSel.title = owner() ? "Sets where " + owner() + " played this character" : "Sets where anyone played this character";
+    clear.hidden = !((ov.ladders.length > 1 && state.ladder) || state.ruleset || state.who || state.character || state.result);
+    const q = new URLSearchParams();
+    if (ov.ladders.length > 1 && state.ladder) q.set("ladder", state.ladder);
+    if (state.ruleset) q.set("ruleset", state.ruleset);
+    if (state.who.trim()) q.set(player ? "opponent" : "player", state.who.trim());
+    if (state.character !== "") q.set("character", state.character);
+    if (state.result) q.set("result", state.result);
+    const qs = q.toString();
+    history.replaceState(null, "", basePath + (qs ? "?" + qs : ""));
+  };
+
+  let loaded = 0, seq = 0;
+  const load = async (reset) => {
+    const mine = ++seq;
+    if (reset) loaded = 0;
+    more.disabled = true;
+    try {
+      const data = await api("sets?" + query(loaded));
+      if (mine !== seq) return;
+      if (reset) list.replaceChildren();
+      list.append(...data.sets.map((set) => setRow(set)).filter(Boolean));
+      loaded += data.sets.length;
+      count.textContent = data.total.toLocaleString() + (data.total === 1 ? " set" : " sets");
+      if (!data.total) list.replaceChildren(emptyState("No sets match", clear.hidden ? "" : "Try fewer filters."));
+      more.hidden = loaded >= data.total;
+      more.textContent = "Load more (" + (data.total - loaded).toLocaleString() + " left)";
+      more.disabled = false;
+    } catch (err) {
+      if (mine !== seq) return;
+      count.textContent = "";
+      more.hidden = true;
+      list.replaceChildren(emptyState("No sets to show", err.message));
+    }
+  };
+  const update = () => { syncControls(); load(true); };
+
+  if (formatSel) formatSel.onchange = () => {
+    state.ladder = formatSel.value;
+    ladder = ov.ladders.find((l) => l.id === state.ladder);
+    state.ruleset = "";
+    fillRosters();
+    fillCharacters();
+    update();
+  };
+  if (rosterSel) rosterSel.onchange = () => { state.ruleset = rosterSel.value; fillCharacters(); update(); };
+  let typing;
+  who.oninput = () => { clearTimeout(typing); typing = setTimeout(() => { state.who = who.value; update(); }, 450); };
+  who.onkeydown = (ev) => { if (ev.key === "Enter") { clearTimeout(typing); state.who = who.value; update(); } };
+  charSel.onchange = () => { state.character = charSel.value; update(); };
+  resultSel.onchange = () => { state.result = resultSel.value; update(); };
+  clear.onclick = () => {
+    Object.assign(state, { ladder: ov.ladders.length === 1 ? ov.ladders[0].id : "", ruleset: "", who: "", character: "", result: "" });
+    ladder = ov.ladders.length === 1 ? ov.ladders[0] : undefined;
+    if (formatSel) formatSel.value = "";
+    fillRosters();
+    who.value = ""; resultSel.value = "";
+    fillCharacters();
+    update();
+  };
+  more.onclick = () => load(false);
+
+  syncControls();
+  await load(true);
+  const panelEl = h("section.panel", {}, h("div.head", {}, h("h2", {}, title), h("span.spacer"), count),
+    h("div.filters", {}, formatSel, rosterSel, who, charSel, resultSel, clear), list, more);
+  // lets the page filter by a character (the player page's character chips)
+  panelEl.filterCharacter = (id, ladderId, rulesetId) => {
+    const target = ov.ladders.find((l) => l.id === ladderId);
+    if (target) {
+      ladder = target;
+      state.ladder = target.id;
+      if (formatSel) formatSel.value = target.id;
+      state.ruleset = target.rulesets.some((r) => r.id === rulesetId) ? rulesetId : "";
+      fillRosters();
+    }
+    state.character = String(id);
+    fillCharacters();
+    update();
+    panelEl.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+  return panelEl;
+}
+async function showSets(params) {
+  return [await setsBrowser({ title: "Recent Sets", params, basePath: "#/sets" })];
+}
+
+// ── Player
+function ratingChart(points) {
+  // single series: one 2px line, hover tooltip per point; the set list below is the table view
+  const W = 600, H = 180, P = { l: 40, r: 10, t: 12, b: 22 };
+  const wrap = h("div.chart");
+  if (points.length < 2) { wrap.append(h("p.note", {}, "The rating chart appears after a few rated sets.")); return wrap; }
+  const ys = points.map((p) => p.rating);
+  let lo = Math.min(...ys), hi = Math.max(...ys);
+  const pad = Math.max(10, (hi - lo) * 0.15); lo = Math.floor((lo - pad) / 10) * 10; hi = Math.ceil((hi + pad) / 10) * 10;
+  const x = (i) => P.l + (i / (points.length - 1)) * (W - P.l - P.r);
+  const y = (v) => P.t + (1 - (v - lo) / (hi - lo)) * (H - P.t - P.b);
+  const NS = "http://www.w3.org/2000/svg";
+  const s = (tag, attrs) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); return e; };
+  const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: "none", role: "img",
+    "aria-label": `Rating history: from ${ys[0]} to ${ys[ys.length - 1]} over ${points.length} rated sets` });
+  for (const v of [lo, Math.round((lo + hi) / 2), hi]) {
+    svg.append(s("line", { x1: P.l, x2: W - P.r, y1: y(v), y2: y(v), stroke: "rgba(255,255,255,.08)", "stroke-width": 1 }));
+    const t = s("text", { x: P.l - 6, y: y(v) + 4, "text-anchor": "end", fill: "#8f8778", "font-size": 11 }); t.textContent = v; svg.append(t);
+  }
+  const d = points.map((p, i) => (i ? "L" : "M") + x(i).toFixed(1) + " " + y(p.rating).toFixed(1)).join(" ");
+  svg.append(s("path", { d: d + ` L${x(points.length - 1)} ${H - P.b} L${x(0)} ${H - P.b} Z`, fill: "rgba(246,194,45,.10)" }));
+  svg.append(s("path", { d, fill: "none", stroke: "#f6c22d", "stroke-width": 2, "stroke-linejoin": "round",
+    "vector-effect": "non-scaling-stroke" }));
+  const dot = s("circle", { r: 5, fill: "#f6c22d", stroke: "#1a0c05", "stroke-width": 2, visibility: "hidden" });
+  svg.append(dot);
+  const tip = h("div.tip");
+  const hit = s("rect", { x: P.l, y: 0, width: W - P.l - P.r, height: H, fill: "transparent" });
+  svg.append(hit);
+  const move = (ev) => {
+    const r = svg.getBoundingClientRect();
+    const fx = (ev.clientX - r.left) / r.width * W;
+    const i = Math.max(0, Math.min(points.length - 1, Math.round((fx - P.l) / (W - P.l - P.r) * (points.length - 1))));
+    const p = points[i];
+    dot.setAttribute("cx", x(i)); dot.setAttribute("cy", y(p.rating)); dot.setAttribute("visibility", "visible");
+    tip.replaceChildren(h("b", {}, p.rating), " · set " + (i + 1) + " · " + new Date(p.time * 1000).toLocaleDateString());
+    tip.style.left = (x(i) / W * r.width) + "px"; tip.style.top = (y(p.rating) / H * r.height) + "px"; tip.style.display = "block";
+  };
+  hit.addEventListener("pointermove", move);
+  hit.addEventListener("pointerleave", () => { tip.style.display = "none"; dot.setAttribute("visibility", "hidden"); });
+  wrap.append(svg, tip);
+  return wrap;
+}
+async function showPlayer(name, params) {
+  await overview();
+  const data = await api("player?name=" + encodeURIComponent(name));
+  const blocks = [];
+  const head = h("div.profile", {}, h("div.big", {}, data.username),
+    data.region ? h("div.note", {}, regionName(data.region)) : null);
+  const body = h("div.body", {}, head);
+  const sets = await setsBrowser({ title: "Sets", player: data.username, params,
+    basePath: "#/player/" + encodeURIComponent(data.username) });
+  const rosterLabel = (st) => (cache.ov.ladders.length > 1 ? formatName(ladderById(st.ladder)) + " " : "") + shortRoster(st.rulesetName);
+  for (const st of data.standings) {
+    body.append(h("h3.roster", {}, (cache.ov.ladders.length > 1 ? formatName(ladderById(st.ladder)) + " · " : "") +
+      st.rulesetName, tierBadge(st)));
+    body.append(h("div.stats", {},
+      stat(st.rank && st.regionRank ? "World" : "Rank", st.rank ? "#" + st.rank : "Placement"),
+      st.rank && st.regionRank ? stat(regionName(st.region) || "Region", "#" + st.regionRank) : null,
+      stat("Rating", st.rating + " ±" + st.deviation), stat("Record", st.wins + "–" + st.losses),
+      stat("Sets", st.sets)));
+    if (st.characters && st.characters.length) {
+      body.append(h("div.mains", {}, h("span.label", {}, "Plays"), st.characters.slice(0, 8).map((c) => {
+        const button = h("button.main", { type: "button",
+          title: "Show " + data.username + "'s " + rosterLabel(st) + " sets with " + charName(st.ladder, c.id) },
+          charRing(st.ladder, c, 28), h("b", {}, charName(st.ladder, c.id)), c.percent + "%");
+        button.onclick = () => sets.filterCharacter(c.id, st.ladder, st.ruleset);
+        return button;
+      })));
+    }
+    body.append(ratingChart(data.history[st.ladder + "/" + st.ruleset] || []));
+  }
+  if (!data.standings.length) body.append(h("p.note", {}, "No ranked sets yet."));
+  body.append(h("p.note", {}, "Joined " + new Date(data.joined * 1000).toLocaleDateString()));
+  blocks.push(h("section.panel", {}, h("h2", {}, "Player"), body));
+  blocks.push(sets);
+  return blocks;
+}
+// ── Set detail
+const fmtTime = (records) => { // a .krec record is one 60 Hz frame of input
+  const s = Math.floor(records / 60);
+  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+};
+const fmtSize = (n) => n >= 1 << 20 ? (n / (1 << 20)).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB";
+async function showSet(id) {
+  await overview();
+  const set = await api("sets/" + encodeURIComponent(id));
+  const ladder = (cache.ov.ladders || []).find((l) => l.id === set.ladder);
+  const body = h("div.body", {},
+    h("div.stats", {},
+      stat("Ladder", ladder ? ladderTitle(ladder, { id: set.ruleset || "", name: set.rulesetName || "" }) : set.ladder, true),
+      stat("Roster", set.rulesetName || set.ruleset || "—", true),
+      stat("Status", set.status, true),
+      stat("Played", set.time ? new Date(set.time * 1000).toLocaleString() : "—", true)));
+  const blocks = [h("section.panel", {}, h("h2", {}, "Set #" + set.id), h("div", {}, setRow(set, false)), body)];
+  const r = set.replay;
+  if (!r) {
+    blocks.push(panel("Replay", emptyState("No replay for this set", "Replays are uploaded automatically after ranked sets.")));
+    return blocks;
+  }
+  const marks = (r.bookmarks || []).filter((b) => b.kind !== "game_end");
+  blocks.push(panel("Replay", h("div.body", {},
+    h("p.actions", {},
+      h("a.btn", { href: watchLink(r.url) }, "▶ Watch in RMG-K"),
+      h("a.btn.alt", { href: r.url, download: "rmgk-set-" + set.id + ".krec" }, "Download"),
+      h("span.note", {}, fmtSize(r.size))),
+    marks.length ? h("ol.marks", {}, marks.map((b) => h("li", {},
+      h("span.when", {}, fmtTime(b.record)),
+      h("a", { href: watchLink(r.url, b.record), title: "Watch from here in RMG-K" },
+        "▶ " + (b.label || (b.game ? "Game " + b.game : "Bookmark")))))) : null,
+    h("p.note", {}, h("b", {}, "Watch in RMG-K"), " opens the replay in RMG-K (start RMG-K once so your browser knows it); " +
+      "a game in the list opens it at that game. Downloaded replays open from ", h("b", {}, "Playback"),
+      " on the toolbar, which has a button for each game. " +
+      "You'll need the ROM with MD5 ", h("code", {}, r.romMd5 || "?"), "."))));
+  return blocks;
+}
+function stat(k, v, text) { return h("div.stat", {}, h("div.k", {}, k), h("div.v" + (text ? ".text" : ""), {}, v)); }
+
+// ── Rulesets
+async function showRules() {
+  const ov = await overview();
+  if (!ov.ladders.length) return [panel("Rulesets", emptyState("No ranked ladders yet", ""))];
+  return [romCallout(ov), ...ov.ladders.map((l) => h("section.panel", {}, h("h2", {}, formatName(l)), h("div.body", {},
+    h("div.cols", {},
+      h("div.card", {}, h("h3", {}, "Match rules"),
+        l.rules.length ? h("ul.rules", {}, l.rules.map((r) => h("li", {}, r))) : h("p.note", {}, "Set by the game module.")),
+      h("div.card", {}, h("h3", {}, "Sets"),
+        h("ul.rules", {},
+          h("li", {}, "Best of " + l.bestOf + ", from Quick Ranked Match or a ranked room"),
+          ...(l.teamSize > 1 ? [
+            h("li", {}, "Two teams of two, all four players logged in; any ports"),
+            h("li", {}, "Team battle with team attack on"),
+            h("li", {}, "Every game of the set is rated (OpenSkill)")] : [
+            h("li", {}, "1v1, both players logged in"),
+            h("li", {}, "The whole set counts as one result for ratings")]),
+          h("li", {}, "Leaving a set early can forfeit it: see ", h("b", {}, "Leaving a set early"), " below")))),
+    h("h3", { style: "font:italic 900 15px var(--head);text-transform:uppercase;color:var(--gold2);margin:18px 0 8px" }, "Rosters"),
+    l.rulesets.length > 1 ? h("p.note", { style: "margin:0 0 10px" }, "Each roster is ranked separately, with its own rating and tier.") : null,
+    h("div.cols", {}, l.rulesets.map((r, i) => h("div.card", {},
+      h("h3", {}, r.name + (i === 0 ? " · default" : "")),
+      h("p.note", { style: "margin:0" }, r.description || ""),
+      r.stages && r.stages.length ? h("p.note", { style: "margin:8px 0 0" },
+        h("b", {}, r.stages.length > 1 ? "Stages, picked before each game: " : "Stage: "), r.stages.join(", ")) : null))),
+    l.roms.length ? h("p.note", { style: "margin-top:16px" }, "Supported game build" + (l.roms.length > 1 ? "s" : "") + ": ",
+      l.roms.map((rom, i) => [i ? ", " : "", rom.name + " ", h("code", { title: "ROM MD5" }, rom.md5)])) : null))),
+    leaveRules()].filter(Boolean);
+}
+
+// What happens when a player leaves a set before it's over; the lobby's
+// ranked_left.go decides it the same way.
+function leaveRules() {
+  const row = (when, result) => h("tr", {}, h("td", {}, when), h("td", {}, result));
+  const score = (s) => h("span", { style: "white-space:nowrap" }, s); // keeps "1–1" on one line
+  return panel("Leaving a set early", h("div.body", {},
+    h("p.note", { style: "margin:0 0 10px" }, "Closing the game, leaving the room, dropping out or losing the connection " +
+      "all count as leaving. The set is decided by the score at the moment the player left:"),
+    h("div.scroll", {}, h("table.leave", {},
+      h("thead", {}, h("tr", {}, h("th", {}, "The player leaves…"), h("th", {}, "Result"))),
+      h("tbody", {},
+        row("Before game 1 is over", [h("b", {}, "Voided"), ": no rating change"]),
+        row(["Behind in games (e.g. ", score("0–1"), ")"], [h("b", {}, "They forfeit"),
+          ": rated as a set loss for them, a win for the opponent"]),
+        row(["Ahead in games (e.g. ", score("1–0"), ")"], [h("b", {}, "Voided")]),
+        row(["With the games level (e.g. ", score("1–1"), " in game 3)"], [h("b", {}, "They forfeit"),
+          ", unless they were leading that game: more stocks left, or the same stocks and less damage. Then it's ",
+          h("b", {}, "voided"), "."]),
+        row("Level, between games (e.g. on character select before game 3)", [h("b", {}, "They forfeit"),
+          ": nobody leads before the game starts"]),
+        row("After the set is already won", [h("b", {}, "Rated as played")])))),
+    h("ul.rules", { style: "margin-top:12px" },
+      h("li", {}, "A game counts once its results screen appears. Nothing played after a player leaves counts."),
+      h("li", {}, h("b", {}, "2v2: "), "the leaving player's whole team forfeits, teammate included, and the games they " +
+        "didn't play count as losses."),
+      h("li", {}, "A player removed by the room's host doesn't forfeit: the set is voided."))));
+}
+
+// ── Tiers
+async function showTiers() {
+  const ov = await overview();
+  const tiers = ov.tiers.slice().reverse();
+  const top = Math.max(1, ...ov.tiers.map((t) => t.minConservative)) + 150;
+  return [panel("Tiers", h("div.body", {},
+    h("p.note", {}, "Tiers come from your ", h("b", {}, "cautious rating"),
+      " — your rating minus its uncertainty (the ± number; twice it in 1v1). A hot streak can't lift you a tier until the system is sure, " +
+      "and time away slowly widens the uncertainty again. You have a tier on each roster you play. ",
+      h("a", { href: "#/scoring" }, "How scoring works"), "."),
+    h("div.tierbar", {}, tiers.map((t) => h("div.tierrow", {},
+      h("span", {}, h("span.tier", { style: "background:" + (TIER_COLORS[t.name] || "#9aa") }, t.name)),
+      h("span.bar", { style: `background:${TIER_COLORS[t.name] || "#9aa"};width:${Math.max(6, (t.minConservative / top) * 100)}%` }),
+      h("span.note", {}, t.minConservative > 0 ? t.minConservative + "+" : "start")))),
+    h("p.note", { style: "margin-top:14px" }, "Players stay in ", h("b", {}, "placement"),
+      " until their uncertainty drops low enough — usually 10 to 15 sets. Everyone starts at 1500 ±350."),
+    ov.ladders.length ? h("ul.rules", {}, ov.ladders.map((l) => h("li", {}, h("b", {}, formatName(l) + ": "),
+      `placement until ±${Math.round(l.placementDeviation)}; tiers from rating − ${l.tierDeviations === 1 ? "" : l.tierDeviations + " × "}±.` +
+      (l.teamSize > 1 ? " 2v2 ratings are less certain (partners share every result), so 2v2 places a little sooner and subtracts one ± instead of two." : "")))) : null))];
+}
+
+// ── Scoring
+// Glicko-2, the same steps as internal/rating/glicko2.go; the constants come
+// from the overview (g). Used for the examples and the calculator.
+const GLICKO_SCALE = 173.7178;
+function glickoG(phi) { return 1 / Math.sqrt(1 + 3 * phi * phi / (Math.PI * Math.PI)); }
+function glickoExpected(mu, muJ, gJ) { return 1 / (1 + Math.exp(-gJ * (mu - muJ))); }
+function glickoVolatility(g, phi, sigma, v, delta) {
+  const a = Math.log(sigma * sigma), tau = g.tau;
+  const f = (x) => {
+    const ex = Math.exp(x), d = phi * phi + v + ex;
+    return ex * (delta * delta - phi * phi - v - ex) / (2 * d * d) - (x - a) / (tau * tau);
+  };
+  let A = a, B;
+  if (delta * delta > phi * phi + v) B = Math.log(delta * delta - phi * phi - v);
+  else { let k = 1; while (f(a - k * tau) < 0) k++; B = a - k * tau; }
+  let fA = f(A), fB = f(B);
+  for (let i = 0; i < 100 && Math.abs(B - A) > 0.000001; i++) {
+    const C = A + (A - B) * fA / (fB - fA), fC = f(C);
+    if (fC * fB <= 0) { A = B; fA = fB; } else fA /= 2;
+    B = C; fB = fC;
+  }
+  return Math.exp(A / 2);
+}
+function glickoUpdate(g, player, opponent, score) {
+  const mu = (player.rating - g.rating) / GLICKO_SCALE, phi = player.deviation / GLICKO_SCALE;
+  const muJ = (opponent.rating - g.rating) / GLICKO_SCALE, gJ = glickoG(opponent.deviation / GLICKO_SCALE);
+  const e = glickoExpected(mu, muJ, gJ);
+  const v = 1 / (gJ * gJ * e * (1 - e));
+  const sigma = glickoVolatility(g, phi, player.volatility, v, v * gJ * (score - e));
+  const phiStar = Math.sqrt(phi * phi + sigma * sigma);
+  const phiNew = 1 / Math.sqrt(1 / (phiStar * phiStar) + 1 / v);
+  return { rating: (mu + phiNew * phiNew * gJ * (score - e)) * GLICKO_SCALE + g.rating,
+    deviation: Math.max(g.minDeviation, Math.min(g.maxDeviation, phiNew * GLICKO_SCALE)), volatility: sigma };
+}
+function glickoWinChance(g, player, opponent) {
+  return glickoExpected((player.rating - g.rating) / GLICKO_SCALE, (opponent.rating - g.rating) / GLICKO_SCALE,
+    glickoG(opponent.deviation / GLICKO_SCALE));
+}
+function glickoAfterDays(g, player, days) {
+  const phi = player.deviation / GLICKO_SCALE;
+  const periods = days * 24 / g.ratingPeriodHours;
+  return Math.min(Math.sqrt(phi * phi + player.volatility * player.volatility * periods) * GLICKO_SCALE, g.maxDeviation);
+}
+// end of Glicko-2
+
+// OpenSkill (Plackett-Luce) for 2v2: the same steps and constants as
+// internal/rating/openskill.go. Ratings on the 1500 ±350 scale, 42 points
+// per skill point.
+const OS = { mu: 25, sigma: 25 / 3, beta: 25 / 6, tau: 25 / 300, kappa: 0.0001, scale: 350 / (25 / 3) };
+function osUpdate(g, teams, ranks) {
+  const ts = teams.map((members, i) => {
+    const players = members.map((r) => {
+      const mu = OS.mu + (r.rating - g.rating) / OS.scale, sigma = r.deviation / OS.scale;
+      return { mu, sigma: Math.sqrt(sigma * sigma + OS.tau * OS.tau) };
+    });
+    return { players, rank: ranks[i], mu: players.reduce((x, p) => x + p.mu, 0),
+      sigma2: players.reduce((x, p) => x + p.sigma * p.sigma, 0) };
+  });
+  const c = Math.sqrt(ts.reduce((x, t) => x + t.sigma2 + OS.beta * OS.beta, 0));
+  const sumQ = ts.map((tq) => ts.reduce((x, ti) => x + (ti.rank >= tq.rank ? Math.exp(ti.mu / c) : 0), 0));
+  const a = ts.map((tq) => ts.filter((ti) => ti.rank === tq.rank).length);
+  return ts.map((ti, i) => {
+    let omega = 0, delta = 0;
+    const e = Math.exp(ti.mu / c);
+    ts.forEach((tq, q) => {
+      const pr = e / sumQ[q];
+      if (tq.rank <= ti.rank) {
+        delta += pr * (1 - pr) / a[q];
+        omega += (q === i ? 1 - pr : -pr) / a[q];
+      }
+    });
+    omega *= ti.sigma2 / c;
+    delta *= ti.sigma2 / (c * c) * Math.sqrt(ti.sigma2) / c;
+    return ti.players.map((pl) => {
+      const share = pl.sigma * pl.sigma / ti.sigma2;
+      const mu = pl.mu + share * omega, sigma = pl.sigma * Math.sqrt(Math.max(1 - share * delta, OS.kappa));
+      return { rating: g.rating + (mu - OS.mu) * OS.scale,
+        deviation: Math.max(g.minDeviation, Math.min(g.maxDeviation, sigma * OS.scale)), volatility: g.volatility };
+    });
+  });
+}
+// erfc (Abramowitz & Stegun 7.1.26, |error| < 1.5e-7) for the win chance
+function erfc(x) {
+  const z = Math.abs(x), t = 1 / (1 + 0.3275911 * z);
+  const y = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429)))) * Math.exp(-z * z);
+  return x >= 0 ? y : 2 - y;
+}
+// chance that team a wins a game against team b, as the reference libraries predict it
+function osWinChance(g, a, b) {
+  const sum = (team) => team.reduce(([m, v], r) => {
+    const mu = OS.mu + (r.rating - g.rating) / OS.scale, sigma = r.deviation / OS.scale;
+    return [m + mu, v + sigma * sigma];
+  }, [0, 0]);
+  const [ma, va] = sum(a), [mb, vb] = sum(b);
+  return 0.5 * erfc(-((ma - mb) / Math.sqrt(2 * OS.beta * OS.beta + va + vb)) / Math.SQRT2);
+}
+// end of OpenSkill
+
+// what a set is worth to `you` against `opponent`
+function setWorth(g, you, opponent) {
+  const win = glickoUpdate(g, you, opponent, 1), loss = glickoUpdate(g, you, opponent, 0);
+  return { chance: glickoWinChance(g, you, opponent), win: win.rating - you.rating, loss: loss.rating - you.rating,
+    winDev: win.deviation, lossDev: loss.deviation };
+}
+const signed = (n) => (Math.round(n) >= 0 ? "+" : "−") + Math.abs(Math.round(n));
+const pct = (x) => Math.round(x * 100) + "%";
+
+// 2v2: how team sets are rated, with a calculator
+function teamScoringPanel(g, ov) {
+  const team = ov.ladders.find((l) => l.teamSize > 1);
+  if (!team) return null;
+  const pl = (rating, deviation) => ({ rating, deviation, volatility: g.volatility });
+  // how a game moves a new player and their settled partner
+  const fresh = pl(g.rating, g.deviation), settled = pl(1600, 80), opp = pl(1550, 100);
+  const [[newAfter, settledAfter]] = osUpdate(g, [[fresh, settled], [opp, opp]], [0, 1]);
+
+  const field = (value, label) => h("input.field", { type: "number", inputmode: "numeric", value: String(value), step: "1", "aria-label": label });
+  const inputs = [["You", 1600, 80], ["Partner", 1500, 350], ["Opponent", 1550, 100], ["Opponent", 1650, 90]]
+    .map(([who, r, d]) => [who, field(r, who + " rating"), field(d, who + " ±")]);
+  const out = h("div.calcout", { "aria-live": "polite" });
+  const recalc = () => {
+    const num = (el, lo, hi) => Math.max(lo, Math.min(hi, Number(el.value) || 0));
+    const [you, partner, o1, o2] = inputs.map(([, r, d]) => pl(num(r, 0, 4000), num(d, g.minDeviation, g.maxDeviation)));
+    const win = osUpdate(g, [[you, partner], [o1, o2]], [0, 1])[0];
+    const loss = osUpdate(g, [[you, partner], [o1, o2]], [1, 0])[0];
+    out.replaceChildren(
+      h("div.card", {}, h("span", {}, "Win chance (a game)"), h("b", {}, pct(osWinChance(g, [you, partner], [o1, o2])))),
+      h("div.card", {}, h("span", {}, "Win a game"), h("b", {}, signed(win[0].rating - you.rating)),
+        h("span", {}, "partner " + signed(win[1].rating - partner.rating))),
+      h("div.card", {}, h("span", {}, "Lose a game"), h("b", {}, signed(loss[0].rating - you.rating)),
+        h("span", {}, "partner " + signed(loss[1].rating - partner.rating))));
+  };
+  for (const [, r, d] of inputs) { r.addEventListener("input", recalc); d.addEventListener("input", recalc); }
+  recalc();
+
+  return panel("2v2 team battles", h("div.body", {},
+    h("p.note", { style: "margin-top:0" }, "2v2 is its own ranking (one per roster), rated with ", h("b", {}, "OpenSkill"),
+      ", a rating system built for teams. Your 2v2 rating is yours: it follows you whoever you team with, " +
+      "and shows on the same 1500 ±350 scale as 1v1."),
+    h("div.cols", {},
+      h("div.card", {}, h("h3", {}, "Every game counts"), h("ul.rules", {},
+        h("li", {}, "Each game of a 2v2 set is rated, in order: a 2–1 is three results. One team result says less about each " +
+          "player than a 1v1 result does, so 2v2 uses all of them."),
+        h("li", {}, "Voided sets change nothing; disputed sets wait for a moderator, as in 1v1."))),
+      h("div.card", {}, h("h3", {}, "You and your partner"), h("ul.rules", {},
+        h("li", {}, "A team's strength is both players' ratings added up. Beating a stronger team is worth more, " +
+          "losing to a weaker one costs more."),
+        h("li", {}, "Both players win or lose together, but each moves by their own ±: the less sure the system is " +
+          `about you, the more you move. A new player (${g.rating} ±${g.deviation}) winning a game with a settled ` +
+          `1600 ±80 partner gains ${signed(newAfter.rating - fresh.rating)}; the partner gains ${signed(settledAfter.rating - settled.rating)}.`))),
+      h("div.card", {}, h("h3", {}, "Placement and tiers"), h("ul.rules", {},
+        h("li", {}, `2v2 ratings settle more slowly, because partners share every result. Placement ends below ` +
+          `±${Math.round(team.placementDeviation)}, after about 15–20 sets (1v1 takes 10–15).`),
+        h("li", {}, `2v2 tiers use your rating minus ${team.tierDeviations === 1 ? "one" : team.tierDeviations} ± ` +
+          "(1v1 uses two), so a settled player lands in about the tier their 1v1 rating would give.")))),
+    h("h3.sub", {}, "Try it"),
+    h("div.calc.calc4", {}, inputs.map(([who, r, d]) => [h("label", {}, who + " rating", r), h("label", {}, who + " ±", d)])),
+    out,
+    h("p.note", {}, "Changes are for one game; a set adds up its games. The calculator runs the same formula as the server."),
+    h("h3.sub", {}, "Why OpenSkill for teams"),
+    h("ul.rules", {},
+      h("li", {}, "Glicko-2 rates one player against one opponent. For teams it needs workarounds, like rating each " +
+        "player against the other team's average, which ignore who carried whom."),
+      h("li", {}, "OpenSkill models teams directly and splits each result by how sure it is about each player. " +
+        "In simulated 2v2 sets it ranked players better after 15 sets than a Glicko-2 team method did after 60."),
+      h("li", {}, "It's open and widely used (the openskill libraries), and close to Microsoft's TrueSkill."))));
+}
+
+async function showScoring() {
+  const ov = await overview();
+  const g = ov.glicko;
+  const player = (rating, deviation) => ({ rating, deviation, volatility: g.volatility });
+  const settled = player(1600, 60);
+  const opponents = [["1400 ±60", player(1400, 60)], ["1600 ±60", player(1600, 60)],
+    ["1800 ±60", player(1800, 60)], ["1600 ±300, new", player(1600, 300)]];
+  const worthTable = (you) => h("div.scroll", {}, h("table.worth", {},
+    h("thead", {}, h("tr", {}, h("th", {}, "Opponent"), h("th.num", {}, "Win chance"),
+      h("th.num", {}, "If you win"), h("th.num", {}, "If you lose"))),
+    h("tbody", {}, opponents.map(([label, opp]) => {
+      const w = setWorth(g, you, opp);
+      return h("tr", {}, h("td", {}, label), h("td.num", {}, pct(w.chance)),
+        h("td.num", {}, h("span.delta.up", {}, signed(w.win))), h("td.num", {}, h("span.delta.down", {}, signed(w.loss))));
+    }))));
+  const away = (days) => Math.round(glickoAfterDays(g, settled, days));
+  const first = setWorth(g, player(g.rating, g.deviation), player(g.rating, 60));
+
+  // calculator
+  const field = (value, label) => h("input.field", { type: "number", inputmode: "numeric", value: String(value),
+    step: "1", "aria-label": label });
+  const yourRating = field(1600, "Your rating"), yourDev = field(60, "Your ±");
+  const oppRating = field(1700, "Opponent rating"), oppDev = field(80, "Opponent ±");
+  const out = h("div.calcout", { "aria-live": "polite" });
+  const recalc = () => {
+    const num = (el, lo, hi) => Math.max(lo, Math.min(hi, Number(el.value) || 0));
+    const you = player(num(yourRating, 0, 4000), num(yourDev, g.minDeviation, g.maxDeviation));
+    const opp = player(num(oppRating, 0, 4000), num(oppDev, g.minDeviation, g.maxDeviation));
+    const w = setWorth(g, you, opp);
+    out.replaceChildren(
+      h("div.card", {}, h("span", {}, "Win chance"), h("b", {}, pct(w.chance))),
+      h("div.card", {}, h("span", {}, "If you win"), h("b", {}, signed(w.win)),
+        h("span", {}, "→ " + Math.round(you.rating + w.win) + " ±" + Math.round(w.winDev))),
+      h("div.card", {}, h("span", {}, "If you lose"), h("b", {}, signed(w.loss)),
+        h("span", {}, "→ " + Math.round(you.rating + w.loss) + " ±" + Math.round(w.lossDev))));
+  };
+  for (const el of [yourRating, yourDev, oppRating, oppDev]) el.addEventListener("input", recalc);
+  recalc();
+
+  return [
+    panel("Scoring", h("div.body", {},
+      h("p.note", { style: "margin-top:0" }, (ov.ladders.some((l) => l.teamSize > 1) ? "1v1 ratings use " : "Ratings use "),
+        h("b", {}, "Glicko-2"),
+        ". Like Elo, you gain for winning and lose for losing: more for upsets, less for expected results. " +
+        "Unlike Elo, it also keeps track of how sure it is about you." +
+        (ov.ladders.some((l) => l.teamSize > 1) ? " 2v2 uses OpenSkill, built for teams: see 2v2 team battles below." : "")),
+      h("div.cols", {},
+        h("div.card", {}, h("h3", {}, "One set, one result (1v1)"), h("ul.rules", {},
+          h("li", {}, "The set winner gets a win, the other player a loss. 2–0 and 2–1 count the same: " +
+            "the rating is about who wins, not by how much."),
+          h("li", {}, "Voided sets (someone left early) change nothing. Disputed sets wait for a moderator."),
+          h("li", {}, "Both players are rated from their ratings before the set."),
+          h("li", {}, "Each roster is its own ranking, with its own rating, rank and tier: " +
+            "a Remix-roster set doesn't change your Vanilla-roster rating."))),
+        h("div.card", {}, h("h3", {}, "Rating and ±"), h("ul.rules", {},
+          h("li", {}, h("b", {}, "Rating"), " is the system's best guess of your skill."),
+          h("li", {}, h("b", {}, "±"), " is how unsure it is. Your real level is very likely within two ± of your rating."),
+          h("li", {}, `Everyone starts at ${g.rating} ±${g.deviation}. Each set shrinks the ±, down to ±${g.minDeviation}.`))),
+        h("div.card", {}, h("h3", {}, "Time away"), h("ul.rules", {},
+          h("li", {}, `Your rating never decays, but each day without a ranked set widens your ± a little, up to ±${g.maxDeviation}.`),
+          h("li", {}, `A settled ±60 becomes about ±${away(30)} after a month away and ±${away(365)} after a year.`),
+          h("li", {}, "Your first sets back then move your rating more, until it settles again.")))))),
+    panel("What a set is worth", h("div.body", {},
+      h("p.note", { style: "margin-top:0" }, "How far one set moves your rating depends on:"),
+      h("ul.rules", {},
+        h("li", {}, h("b", {}, "How surprising the result is. "), "Beating a higher-rated player is worth more than beating a lower-rated one."),
+        h("li", {}, h("b", {}, "Your ±. "), "The less sure the system is about you, the faster you move. " +
+          `A brand new player who beats a settled ${g.rating} ±60 player gains ${signed(first.win)} in one set.`),
+        h("li", {}, h("b", {}, "Your opponent's ±. "), "A result against a player the system doesn't know well yet counts for less."),
+        h("li", {}, h("b", {}, "How consistent you are. "), "Steady results keep changes small; a run of surprises makes them bigger.")),
+      h("h3.sub", {}, "Example: you are 1600 ±60"),
+      worthTable(settled),
+      h("h3.sub", {}, "Try it"),
+      h("div.calc", {},
+        h("label", {}, "Your rating", yourRating), h("label", {}, "Your ±", yourDev),
+        h("label", {}, "Opponent rating", oppRating), h("label", {}, "Opponent ±", oppDev)),
+      out,
+      h("p.note", {}, "Every player's rating and ± are on their page. The calculator assumes typical consistency, " +
+        "so a real set can differ by a point or two."))),
+    panel("Tiers and the leaderboard", h("div.body", {}, h("ul.rules", {},
+      h("li", {}, "The leaderboard is sorted by rating."),
+      h("li", {}, "Tiers use your ", h("b", {}, "cautious rating"), ": your rating minus two ±. " +
+        "A lucky streak can't lift you a tier until the system is sure. See ", h("a", { href: "#/tiers" }, "Tiers"), "."),
+      h("li", {}, `You're in placement until your ± drops below ±${Math.round(ov.provisionalDeviation)}, usually after 10 to 15 sets.`)))),
+    teamScoringPanel(g, ov),
+    panel("Why Glicko-2 and not Elo?", h("div.body", {}, h("ul.rules", {},
+      h("li", {}, "Elo moves everyone by the same amount every game. New players take dozens of sets to reach their level, " +
+        "and someone back from a year away is treated as if they never left."),
+      h("li", {}, "Glicko-2 knows how sure it is. New and returning players find their level in a handful of sets, " +
+        "settled players stay steady, and a win over an unknown player counts less than a win over a proven one."),
+      h("li", {}, "It's the system Lichess uses, and it suits a community where people play in bursts.")))),
+  ];
+}
+
+// ── How to play
+async function showHow() {
+  const ov = await overview();
+  const l = ov.ladders[0];
+  return [panel("How to Play", h("div.body", {}, h("ol.steps", {},
+    h("li", {}, h("b", {}, "Get RMG-K"), " and open ", h("b", {}, "Netplay → Rollback Lobby"), "."),
+    h("li", {}, h("b", {}, "Make an account. "), "In the connect dialog enter a name and password and tick ",
+      h("i", {}, "Create a new account"), ". Keep ", h("i", {}, "Keep me logged in"),
+      " ticked and you won't need the password next time. Guests can still play unranked. " +
+      "Change your password from the lobby (next to your name); if you forget it, a moderator can give you a reset code."),
+    h("li", {}, h("b", {}, "Use the official ROM. "),
+      rankedRoms(ov).length ? ["Ranked needs ", rankedRoms(ov).map((r) => r.name).join(" or "),
+        " — the exact release, checked by its MD5 (listed under ", h("a", { href: "#/rules" }, "Rulesets"),
+        "). Other builds, including PAL versions and mods like +Extra, can't play ranked."] :
+        "Ranked play needs a supported game build."),
+    h("li", {}, h("b", {}, "Find a match. "), "Pick the game and press ", h("i", {}, "Quick Ranked Match"),
+      ". Choose 1v1 or 2v2, the roster and the highest ping you'll play at " +
+      "(120 ms by default; the match is cancelled if the measured ping is higher). The set starts by itself once " +
+      "someone else searches for the same format and roster within both of your ping limits (2v2 waits for four players). " +
+      "After each set the next search starts a few seconds later, with a new opponent; if only your last opponent " +
+      "is around after 2 minutes, you can choose to play them again. Press ", h("i", {}, "Stop Ranked Session"),
+      " when you're done."),
+    h("li", {}, h("b", {}, "Or create or join a ranked room. "), "Pick the game, press ", h("i", {}, "Create Room"),
+      ", tick ", h("i", {}, "Ranked set"), ", choose 1v1 or 2v2 and the roster (each has its own rankings). " +
+      "A 2v2 room needs four players; pick teams on character select (any ports). Ranked rooms are marked ",
+      h("code", {}, "[Ranked]"), " in the room list."),
+    h("li", {}, h("b", {}, "Play the set. "), "The game boots straight to character select with the rules locked in. " +
+      "Pick your character and play — each finished game updates the score."),
+    h("li", {}, h("b", {}, "Get rated. "), "When someone wins the set both players' results are sent automatically. " +
+      "Your new rating shows in the lobby chat and here.")))),
+    panel("Fair play", h("div.body", {}, h("ul.rules", {},
+      h("li", {}, "A game that's reset, played with a CPU, or played with a character outside the room's roster doesn't count — just replay it."),
+      h("li", {}, "Leaving a set early, including losing the connection, can forfeit it: a player who leaves while behind, " +
+        "or in a deciding game without the lead, loses the set. See ", h("a", { href: "#/rules" }, "Leaving a set early"),
+        " on the Rulesets page."),
+      h("li", {}, "If the two players' results disagree or the game desyncs, the set is marked disputed. A moderator reviews it " +
+        "(the replay helps) and either rates it or voids it."))))];
+}
+
+// ── Moderators (#/admin): disputed sets, accounts, activity log
+async function adminApi(method, path, body) {
+  const res = await fetch("/api/admin/" + path, {
+    method, credentials: "same-origin",
+    headers: { "X-RMGK-Admin": "1", "Content-Type": "application/json", Accept: "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data.error || ("HTTP " + res.status));
+    err.status = res.status;
+    throw err;
+  }
+  return data;
+}
+// runs an admin action from a button, showing failures in msg
+async function adminAction(button, msg, run) {
+  button.disabled = true;
+  msg.textContent = "";
+  try {
+    await run();
+  } catch (err) {
+    msg.textContent = err.message;
+    button.disabled = false;
+  }
+}
+function adminSignIn() {
+  const password = h("input.field", { type: "password", placeholder: "Moderator password", autocomplete: "current-password",
+    "aria-label": "Moderator password" });
+  const submit = h("button.btn.small", { type: "submit" }, "Sign in");
+  const msg = h("div.msg");
+  const form = h("form.row", {}, password, submit);
+  form.onsubmit = (ev) => {
+    ev.preventDefault();
+    adminAction(submit, msg, async () => { await adminApi("POST", "login", { password: password.value }); route(); });
+  };
+  setTimeout(() => password.focus(), 0);
+  return panel("Moderators", h("div.body", {},
+    h("p.note", {}, "Sign in with the moderator password (the lobby's /login)."), form, msg));
+}
+function disputesPanel(sets) {
+  if (!sets.length) return panel("Disputed sets", emptyState("Nothing to review", "Sets whose reports disagree or desynced show up here."));
+  const items = sets.map((set) => {
+    const note = h("input.field", { type: "text", placeholder: "Note (optional)", maxlength: 200, style: "flex:1;min-width:160px" });
+    const msg = h("div.msg");
+    const resolve = (button, body, question) => {
+      if (!confirm(question)) return;
+      adminAction(button, msg, async () => {
+        await adminApi("POST", "sets/" + set.id + "/resolve", { ...body, note: note.value });
+        route();
+      });
+    };
+    // 2v2: a button per team; naming any of its players rates the team's win
+    const choices = isTeamSet(set)
+      ? [1, 2].map((t) => set.players.filter((p) => p.team === t)).filter((m) => m.length)
+        .map((m) => [m[0].username, m.map((p) => "P" + p.slot + " " + p.username).join(" + ") + " win",
+          m.map((p) => p.username).join(" and ")])
+      : set.players.map((p) => [p.username, "P" + p.slot + " " + p.username + " wins", p.username]);
+    const buttons = choices.map(([winner, label, who]) => {
+      const b = h("button.btn.small", { type: "button" }, label);
+      b.onclick = () => resolve(b, { winner }, `Rate set #${set.id} as a win for ${who}?`);
+      return b;
+    });
+    const voidButton = h("button.btn.small.danger", { type: "button" }, "Void");
+    voidButton.onclick = () => resolve(voidButton, { void: true }, `Void set #${set.id}? Ratings won't change.`);
+    const [a, b] = set.players;
+    return h("details.dispute", {},
+      h("summary", {}, h("b", {}, "Set #" + set.id), " · ",
+        isTeamSet(set) ? [1, 2].map((t) => set.players.filter((p) => p.team === t).map((p) => p.username).join(" + ")).join(" vs ") + " · "
+          : a && b ? a.username + " vs " + b.username + " · " : "",
+        set.rulesetName && rosterCount(set.ladder) > 1 ? shortRoster(set.rulesetName) + " · " : "",
+        (set.reason || "disputed").replace(/^integrity: /, ""), " · ", ago(set.time)),
+      h("div.row", {}, h("a", { href: "#/set/" + set.id }, "Open set page"),
+        h("span.note", {}, " · " + new Date(set.time * 1000).toLocaleString())),
+      setRow(set, false),
+      h("ul.reports", {}, set.reports.length ? set.reports.map((r) => h("li", {},
+        h("b", {}, r.reporter), ": P" + r.winnerSlot + " won " + (r.score || []).join("–") +
+        (r.integrity && r.integrity !== "ok" ? " · " + r.integrity : ""))) : h("li", {}, "no reports")),
+      h("div.row", {}, ...buttons, voidButton, note), msg);
+  });
+  const toggle = h("button.btn.alt.small", { type: "button" }, "Open all");
+  toggle.onclick = () => {
+    const open = items.some((d) => !d.open);
+    for (const d of items) d.open = open;
+    toggle.textContent = open ? "Close all" : "Open all";
+  };
+  return h("section.panel", {}, h("div.head", {}, h("h2", {}, "Disputed sets (" + sets.length + ")"), h("span.spacer"), toggle),
+    h("div", {}, items));
+}
+async function accountsPanel(params) {
+  const query = params.get("q") || "";
+  const search = h("input.field", { type: "search", value: query, placeholder: "Find an account…", "aria-label": "Find an account" });
+  const form = h("form.row", {}, search, h("button.btn.small", { type: "submit" }, "Search"));
+  form.onsubmit = (ev) => { ev.preventDefault(); location.hash = "#/admin/accounts?q=" + encodeURIComponent(search.value.trim()); };
+  const body = h("div.body", {}, form);
+
+  const name = params.get("account");
+  if (query) {
+    const found = await adminApi("GET", "accounts?q=" + encodeURIComponent(query));
+    const results = found.accounts.length ? h("div.scroll", {}, h("table", {},
+      h("thead", {}, h("tr", {}, h("th", {}, "Account"), h("th", {}, "Status"), h("th.hide-xs", {}, "Joined"))),
+      h("tbody", {}, found.accounts.map((a) => h("tr", {},
+        h("td.name", {}, h("a", { href: "#/admin/accounts?q=" + encodeURIComponent(query) + "&account=" + encodeURIComponent(a.username) }, a.username)),
+        h("td", {}, h("span.acct" + (a.disabled ? ".off" : ""), {}, a.disabled ? "disabled" : "active")),
+        h("td.hide-xs", {}, new Date(a.created * 1000).toLocaleDateString()))))))
+      : h("p.note", {}, "No accounts match “" + query + "”.");
+    body.append(h("details.results", { open: !name },
+      h("summary", {}, found.accounts.length + (found.accounts.length === 1 ? " account matches" : " accounts match") +
+        " “" + query + "”"), results));
+  }
+  if (name) body.append(await accountDetail(name));
+  return panel("Accounts", body);
+}
+async function accountDetail(name) {
+  const data = await adminApi("GET", "accounts/" + encodeURIComponent(name));
+  const a = data.account;
+  const msg = h("div.msg");
+  const codeArea = h("div");
+
+  const resetButton = h("button.btn.small", { type: "button", disabled: a.disabled }, "Issue reset code");
+  resetButton.onclick = () => adminAction(resetButton, msg, async () => {
+    const r = await adminApi("POST", "accounts/" + encodeURIComponent(a.username) + "/reset-code");
+    const copy = h("button.btn.small", { type: "button" }, "Copy");
+    copy.onclick = () => navigator.clipboard && navigator.clipboard.writeText(r.code).then(() => { copy.textContent = "Copied"; });
+    codeArea.replaceChildren(h("div.codebox", {}, h("code", {}, r.code), " ", copy,
+      h("p.note", { style: "margin:8px 0 0" }, "Give it to " + r.username + " privately. It works once and expires " +
+        new Date(r.expires * 1000).toLocaleString() + ". They enter it under “Forgot password?” when connecting.")));
+    resetButton.disabled = false;
+  });
+
+  const note = h("input.field", { type: "text", placeholder: a.disabled ? "Note (optional)" : "Reason (optional)", maxlength: 200,
+    style: "flex:1;min-width:160px" });
+  const toggle = h("button.btn.small" + (a.disabled ? "" : ".danger"), { type: "button" }, a.disabled ? "Enable account" : "Disable account");
+  toggle.onclick = () => {
+    if (!a.disabled && !confirm(`Disable ${a.username}? They're signed out, can't log in and leave the rankings.`)) return;
+    adminAction(toggle, msg, async () => {
+      await adminApi("POST", "accounts/" + encodeURIComponent(a.username) + "/disabled", { disabled: !a.disabled, note: note.value });
+      route();
+    });
+  };
+
+  // Discord sign-in link: for moderators only, so they can unlink a lost or wrong one
+  let discordRow = h("p.note", { style: "margin:12px 0 0" }, "Discord sign-in: not linked.");
+  if (data.discord) {
+    const d = data.discord;
+    const unlink = h("button.btn.small", { type: "button" }, "Unlink Discord");
+    unlink.onclick = () => {
+      if (!confirm(`Unlink ${a.username} from Discord ${d.username}? They can still log in with their password.`)) return;
+      adminAction(unlink, msg, async () => {
+        await adminApi("POST", "accounts/" + encodeURIComponent(a.username) + "/discord/unlink");
+        route();
+      });
+    };
+    discordRow = h("div.row", { style: "margin-top:12px" },
+      h("span.note", {}, "Discord sign-in: ", h("b", {}, d.username), d.name && d.name !== d.username ? " (" + d.name + ")" : "",
+        " · ID ", h("code", {}, d.id), " · linked " + new Date(d.linked * 1000).toLocaleDateString() +
+        " · last Discord sign-in " + ago(d.lastLogin)), unlink);
+  }
+
+  // one tile per format and roster, e.g. "1v1 Remix", 1v1 first
+  const ov = await overview();
+  const boards = data.standings.map((st) => {
+    const ladder = ov.ladders.find((l) => l.id === st.ladder);
+    const roster = (st.rulesetName || st.ruleset || "").replace(/\s+roster$/i, "");
+    return { st, team: ladder ? ladder.teamSize || 1 : 1, label: (ladder ? formatName(ladder) + " " : "") + (roster || st.ladder) };
+  }).sort((x, y) => x.team - y.team);
+
+  return h("div", { style: "margin-top:16px" },
+    h("div.profile", {}, h("div.big", {}, a.username), h("span.acct" + (a.disabled ? ".off" : ""), {}, a.disabled ? "disabled" : "active"),
+      a.disabled ? null : h("a", { href: "#/player/" + encodeURIComponent(a.username) }, "public profile")),
+    h("div.stats", {},
+      stat("Joined", new Date(a.created * 1000).toLocaleDateString(), true),
+      stat("Saved logins", a.sessions),
+      stat("Reset code", a.resetPending ? "pending" : "none", true),
+      ...boards.map(({ st, label }) => stat(label, st.rating + " ±" + st.deviation + " · " + st.sets + (st.sets === 1 ? " set" : " sets"), true))),
+    h("div.row", { style: "margin-top:12px" }, resetButton), codeArea, discordRow,
+    h("div.row", { style: "margin-top:12px" }, toggle, note), msg,
+    data.sets.length ? h("div", { style: "margin-top:12px" }, data.sets.map((set) => setRow(set))) : null);
+}
+function adminLogPanel(entries) {
+  if (!entries.length) return panel("Activity", emptyState("No moderator actions yet", ""));
+  return panel("Activity", h("div.scroll", {}, h("table", {},
+    h("thead", {}, h("tr", {}, h("th", {}, "When"), h("th", {}, "Moderator"), h("th", {}, "Action"), h("th", {}, "Detail"))),
+    h("tbody", {}, entries.map((e) => h("tr", {},
+      h("td", { title: new Date(e.time * 1000).toLocaleString() }, ago(e.time)),
+      h("td", {}, e.admin), h("td", {}, e.action), h("td.detail", {}, e.detail)))))));
+}
+// one page per tab (#/admin/accounts, /disputes, /activity), each loading only its own data
+const ADMIN_TABS = [["accounts", "Accounts"], ["disputes", "Disputes"], ["activity", "Activity"]];
+async function showAdmin(params, tab) {
+  await overview();
+  let me;
+  try {
+    me = await adminApi("GET", "session");
+  } catch (err) {
+    if (err.status === 401) return [adminSignIn()];
+    throw err;
+  }
+  if (!ADMIN_TABS.some(([id]) => id === tab)) tab = "accounts";
+  const signOut = h("button.btn.small", { type: "button" }, "Sign out");
+  signOut.onclick = async () => { await adminApi("POST", "logout").catch(() => {}); route(); };
+  const tabs = switchLinks(ADMIN_TABS.map(([id, name]) =>
+    [id, id === "disputes" && me.disputes ? name + " (" + me.disputes + ")" : name, "#/admin/" + id]), tab, "Moderator pages");
+  const content = tab === "disputes" ? disputesPanel((await adminApi("GET", "disputes")).sets)
+    : tab === "activity" ? adminLogPanel((await adminApi("GET", "log")).entries)
+    : await accountsPanel(params);
+  return [
+    h("section.panel", {}, h("div.head", {}, h("h2", {}, "Moderators"), h("span.spacer"),
+      h("span.note", {}, "Signed in as " + me.name + " "), signOut), h("div.rosterbar", { style: "padding-bottom:12px" }, tabs)),
+    content,
+  ];
+}
+
+// ── Navigation menu (phones)
+const navToggle = document.querySelector(".hamburger");
+const navMenu = document.getElementById("sections");
+function setNavOpen(open) {
+  navToggle.setAttribute("aria-expanded", open ? "true" : "false");
+  navToggle.setAttribute("aria-label", open ? "Close menu" : "Menu");
+  navMenu.classList.toggle("open", open);
+}
+navToggle.addEventListener("click", () => setNavOpen(navToggle.getAttribute("aria-expanded") !== "true"));
+navMenu.addEventListener("click", (ev) => { if (ev.target.closest("a")) setNavOpen(false); });
+document.addEventListener("click", (ev) => {
+  if (navMenu.classList.contains("open") && !navMenu.contains(ev.target) && !navToggle.contains(ev.target)) setNavOpen(false);
+});
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && navMenu.classList.contains("open")) { setNavOpen(false); navToggle.focus(); }
+});
+
+// ── Router
+const routes = { "": showRankings, sets: showSets, rules: showRules, tiers: showTiers, scoring: showScoring, how: showHow, admin: showAdmin };
+let token = 0;
+async function route() {
+  const raw = location.hash.replace(/^#\/?/, "");
+  const [path, query] = raw.split("?");
+  const [page, arg] = path.split("/");
+  const params = new URLSearchParams(query || "");
+  const current = page === "player" ? "rankings" : page === "set" ? "sets" : (page || "rankings");
+  for (const a of document.querySelectorAll("nav.tabs a")) {
+    if (a.dataset.route === current) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+  }
+  setNavOpen(false);
+  const mine = ++token;
+  view.replaceChildren(h("div.loading", {}, "Loading…"));
+  let blocks;
+  try {
+    blocks = page === "player" && arg ? await showPlayer(decodeURIComponent(arg), params)
+      : page === "set" && arg ? await showSet(arg)
+      : page === "admin" ? await showAdmin(params, arg)
+      : await (routes[page] || showRankings)(params);
+  } catch (err) {
+    blocks = [errorState(err)];
+  }
+  if (mine !== token) return;
+  view.replaceChildren(...blocks);
+  document.title = (page === "player" && arg ? decodeURIComponent(arg) + " · "
+    : page === "set" && arg ? "Set #" + arg + " · " : page === "admin" ? "Moderators · " : "") + "RMG-K Ranked";
+  window.scrollTo(0, 0);
+}
+addEventListener("hashchange", route);
+route();
+</script>
+</body>
+</html>

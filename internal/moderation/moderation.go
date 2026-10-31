@@ -25,6 +25,13 @@ func (s Sanction) expired(now time.Time) bool {
 	return !s.Until.IsZero() && now.After(s.Until)
 }
 
+// Moderator passwords get one budget of failures per IP, shared by the
+// lobby's /login and the website's moderator pages.
+const (
+	AdminFailLimit  = 10
+	AdminFailWindow = 15 * time.Minute
+)
+
 // Manager owns the filter, admin credentials, and the ban/mute state. Bans
 // (including timeouts) persist to disk; mutes are in-memory only.
 type Manager struct {
@@ -32,19 +39,21 @@ type Manager struct {
 	filter atomic.Pointer[Filter]
 	admins atomic.Pointer[AdminStore]
 
-	mu      sync.Mutex
-	bans    map[string]Sanction // ip -> ban/timeout (persisted)
-	mutes   map[string]Sanction // ip -> mute (in-memory)
-	banPath string
+	mu         sync.Mutex
+	bans       map[string]Sanction    // ip -> ban/timeout (persisted)
+	mutes      map[string]Sanction    // ip -> mute (in-memory)
+	adminFails map[string][]time.Time // ip -> recent wrong moderator passwords
+	banPath    string
 }
 
 // NewManager wires the filter and admin store together and loads any persisted
 // ban list from banPath (missing file is fine).
 func NewManager(filter *Filter, admins *AdminStore, banPath string) *Manager {
 	m := &Manager{
-		bans:    make(map[string]Sanction),
-		mutes:   make(map[string]Sanction),
-		banPath: banPath,
+		bans:       make(map[string]Sanction),
+		mutes:      make(map[string]Sanction),
+		adminFails: make(map[string][]time.Time),
+		banPath:    banPath,
 	}
 	m.filter.Store(filter)
 	m.admins.Store(admins)
@@ -62,8 +71,45 @@ func (m *Manager) FilterMessage(msg string) (string, bool) {
 	return m.filter.Load().Check(msg)
 }
 
-func (m *Manager) AuthenticateAdmin(password string) (string, bool) {
-	return m.admins.Load().Authenticate(password)
+// AuthenticateAdminFrom checks a moderator password sent from ip. While ip
+// has AdminFailLimit wrong passwords within AdminFailWindow, nothing is
+// checked and limited is true.
+func (m *Manager) AuthenticateAdminFrom(ip, password string) (name string, ok, limited bool) {
+	now := time.Now()
+	m.mu.Lock()
+	if len(m.adminFails) > 10000 {
+		for key := range m.adminFails {
+			m.pruneAdminFailsLocked(key, now)
+		}
+	}
+	m.pruneAdminFailsLocked(ip, now)
+	limited = len(m.adminFails[ip]) >= AdminFailLimit
+	m.mu.Unlock()
+	if limited {
+		return "", false, true
+	}
+
+	name, ok = m.admins.Load().Authenticate(password)
+	if !ok {
+		m.mu.Lock()
+		m.adminFails[ip] = append(m.adminFails[ip], now)
+		m.mu.Unlock()
+	}
+	return name, ok, false
+}
+
+func (m *Manager) pruneAdminFailsLocked(ip string, now time.Time) {
+	kept := m.adminFails[ip][:0]
+	for _, t := range m.adminFails[ip] {
+		if now.Sub(t) < AdminFailWindow {
+			kept = append(kept, t)
+		}
+	}
+	if len(kept) == 0 {
+		delete(m.adminFails, ip)
+	} else {
+		m.adminFails[ip] = kept
+	}
 }
 
 func (m *Manager) FilterSize() int { return m.filter.Load().Size() }
