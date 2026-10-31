@@ -660,8 +660,10 @@ func (h *Hub) removeUserFromRoom(u *state.User, room *state.Room, reason string)
 			memberReason = "admin_closed"
 		} else if qmLeft.warmup {
 			memberReason = "quick_match_cancelled"
-		} else if qmLeft.setDone || (qmLeft.quickMatch && room.GetRanked() == nil) {
-			// a ranked set is over, or a casual quick match ends with its host
+		} else if qmLeft.quickMatch {
+			// A quick match's host is only whoever queued first: its players move
+			// on rather than being told a host closed their room. That also holds
+			// for a ranked set still being judged; its result follows.
 			memberReason = "quick_match_next"
 		}
 		// Snapshot first: unseatUser mutates room.Players while we iterate.

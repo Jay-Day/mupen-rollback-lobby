@@ -269,6 +269,30 @@ func TestRankedSessionQuitterLeavesSession(t *testing.T) {
 	}
 }
 
+// The quick match's host leaving mid-set must not read as a host closing a room:
+// the client would stop for a "room closed" box until the player dismissed it.
+func TestRankedSessionHostLeavesMidSet(t *testing.T) {
+	fastSessions(t)
+	f := newRankedFixture(t)
+	host, guest := f.connect("p1", true), f.connect("p2", true)
+	f.session(host)
+	f.session(guest)
+	room := host.user.CurrentRoom
+	if room == nil || room.Host == nil {
+		t.Fatal("no room formed")
+	}
+	if room.Host.ID != host.user.ID {
+		host, guest = guest, host
+	}
+	f.startQuickMatch(room)
+	drainAll(guest)
+
+	f.hub.handleRoomLeave(host, protocol.Envelope{})
+	if reasons := roomLeftReasons(drainAll(guest)); len(reasons) != 1 || reasons[0] != "quick_match_next" {
+		t.Fatalf("the other player's ROOM_LEFT reasons = %v", reasons)
+	}
+}
+
 func (f *rankedFixture) casualSession(c *Client) {
 	f.t.Helper()
 	f.hub.handleQuickMatchJoin(c, envelope(f.t, protocol.QuickMatchJoinRequest{

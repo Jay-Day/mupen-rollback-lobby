@@ -67,8 +67,9 @@ func roomAcceptsLateJoin(room *state.Room) bool {
 
 // matchSeatsFor sizes a new match: every port the room can seat when all of
 // its players can take part in a late join, otherwise 0 (the older sizing).
+// A ranked set never takes late joiners: its players are fixed when it starts.
 func matchSeatsFor(room *state.Room) int {
-	if room.QuickMatch || room.MaxPlayers < 2 {
+	if room.QuickMatch || room.MaxPlayers < 2 || room.GetRanked() != nil {
 		return 0
 	}
 	for _, seat := range room.Players {
