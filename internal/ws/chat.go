@@ -13,7 +13,7 @@ import (
 const (
 	channelLobby      = "lobby"
 	channelRoom       = "room"
-	channelSpectate   = "spectate" // viewers of one live replay; never reaches its players
+	channelSpectate   = "spectate" // one live replay's viewers, and the players of its match
 	channelPM         = "pm"       // one person to another; live only, never stored
 	lobbyHistorySize  = 50
 	maxChatMessageLen = 500

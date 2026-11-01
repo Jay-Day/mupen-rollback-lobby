@@ -323,6 +323,7 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		LateJoin:      req.LateJoin,
 		LocalPlayers:  req.LocalPlayers,
 		Social:        req.Social,
+		SpectatorChat: req.SpectatorChat,
 		RomHashes:     romHashSet(req.RomHashes),
 		JoinedAt:      time.Now(),
 		LastSeen:      time.Now(),
@@ -345,8 +346,9 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		Region:     user.Region,
 		ICE:        h.iceConfig,
 
-		LocalPlayers: true,
-		Social:       true,
+		LocalPlayers:  true,
+		Social:        true,
+		SpectatorChat: true,
 	}
 	c.sendEnvelope(protocol.TypeHelloOK, env.ID, resp)
 
@@ -709,8 +711,8 @@ func (h *Hub) handleChatSend(c *Client, env protocol.Envelope) {
 		}
 		h.broadcastToRoom(room, protocol.TypeChatMsg, payload)
 	case channelSpectate:
-		// Only to the viewers of the live replay the sender is watching.
-		h.broadcasts.spectatorChat(c.user.ID, payload)
+		// A live replay's viewers, and the players of the match it shows.
+		h.broadcasts.spectatorChat(c, payload)
 	case channelPM:
 		h.deliverPrivateMessage(c, env.ID, req, payload)
 	}

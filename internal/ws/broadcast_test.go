@@ -439,7 +439,8 @@ func TestSpectatorChatReachesOnlyThatBroadcastsViewers(t *testing.T) {
 	send(viewer1, "nice combo")
 	expect(map[*Client]bool{viewer1: true, viewer2: true}, "nice combo")
 
-	// Players, lobby users and viewers of another match can't post into it.
+	// Players on clients that can't show it, lobby users and viewers of another
+	// match can't post into it.
 	send(host, "from the match")
 	send(player, "from the match")
 	send(browser, "from the lobby")

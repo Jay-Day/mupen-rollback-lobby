@@ -225,6 +225,10 @@ type HelloRequest struct {
 	// Advertises support for private messages and challenges. Peers are told
 	// through presence, so they don't offer them to a client that can't show them.
 	Social bool `json:"social,omitempty"`
+	// Advertises that this client shows a match's players their spectators' chat,
+	// and tells spectators the players can read it. A spectator without it was
+	// promised they can't, so the players don't get that spectator's lines.
+	SpectatorChat bool `json:"spectatorChat,omitempty"`
 }
 
 type HeartbeatRequest struct {
@@ -394,6 +398,8 @@ type HelloOKResponse struct {
 	LocalPlayers bool `json:"localPlayers,omitempty"`
 	// Social tells the client private messages and challenges work here.
 	Social bool `json:"social,omitempty"`
+	// SpectatorChat tells the client a match's players share its spectators' chat here.
+	SpectatorChat bool `json:"spectatorChat,omitempty"`
 }
 
 type LocalPlayerAddedPayload struct {
@@ -440,6 +446,8 @@ type ChatMsgPayload struct {
 	// Sender was authenticated as a moderator (ADMIN_AUTH) when sending.
 	// Clients use this to trust admin-only chat directives like "@notify".
 	Admin bool `json:"admin,omitempty"`
+	// Spectator chat only: the sender is playing the match being watched.
+	FromPlayer bool `json:"fromPlayer,omitempty"`
 	// Private messages only: who it's for. It may be a local player, whose
 	// owner's connection receives it.
 	ToUserID   uint64 `json:"toUserId,omitempty"`

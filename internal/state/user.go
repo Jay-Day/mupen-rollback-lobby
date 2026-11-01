@@ -40,6 +40,7 @@ type User struct {
 	LateJoin      bool   // can join a running match (MATCH_ADMIT_*)
 	LocalPlayers  bool   // reads the peerId routing that local players need
 	Social        bool   // can receive private messages and challenges
+	SpectatorChat bool   // shares a match's spectator chat with its players
 
 	// The games this client has, by upper-case MD5, from HELLO. Set once and
 	// only read afterwards.

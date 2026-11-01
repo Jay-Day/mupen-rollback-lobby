@@ -110,6 +110,7 @@ func (h *Hub) handleLocalPlayerAdd(c *Client, env protocol.Envelope) {
 		LateJoin:      owner.LateJoin,
 		LocalPlayers:  owner.LocalPlayers,
 		Social:        owner.Social,
+		SpectatorChat: owner.SpectatorChat,
 		PingToServer:  owner.PingToServer,
 		JoinedAt:      time.Now(),
 		LastSeen:      time.Now(),
