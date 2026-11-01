@@ -8,6 +8,7 @@ import (
 
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
 	"github.com/jay-day/rmgk-lobby/internal/state"
+	"github.com/jay-day/rmgk-lobby/internal/usernames"
 )
 
 // Local players: several people on one PC. Each is an ordinary lobby user with
@@ -73,8 +74,9 @@ func (h *Hub) handleLocalPlayerAdd(c *Client, env protocol.Envelope) {
 		c.sendLocalPlayerFail(env.ID, name, reason)
 		return
 	}
-	if !isValidUsername(name) {
-		c.sendLocalPlayerFail(env.ID, name, protocol.ReasonInvalidName)
+	name, err := usernames.Normalize(name)
+	if err != nil {
+		c.sendLocalPlayerFail(env.ID, strings.TrimSpace(req.Name), protocol.ReasonInvalidName)
 		return
 	}
 	// Usernames are broadcast to the whole lobby — same filter as HELLO.

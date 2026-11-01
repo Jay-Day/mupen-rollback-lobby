@@ -2,6 +2,8 @@ package state
 
 import (
 	"strings"
+
+	"github.com/jay-day/rmgk-lobby/internal/usernames"
 	"sync"
 	"time"
 )
@@ -248,7 +250,7 @@ func (r *Room) MarkKicked(userID uint64, username string) {
 		r.kickedUsernames = make(map[string]struct{})
 	}
 	r.kickedUserIDs[userID] = struct{}{}
-	r.kickedUsernames[strings.ToLower(strings.TrimSpace(username))] = struct{}{}
+	r.kickedUsernames[usernames.Key(strings.TrimSpace(username))] = struct{}{}
 }
 
 // WasKicked reports whether a user is barred from this room. Username matching
@@ -260,7 +262,7 @@ func (r *Room) WasKicked(userID uint64, username string) bool {
 	if _, kicked := r.kickedUserIDs[userID]; kicked {
 		return true
 	}
-	_, kicked := r.kickedUsernames[strings.ToLower(strings.TrimSpace(username))]
+	_, kicked := r.kickedUsernames[usernames.Key(strings.TrimSpace(username))]
 	return kicked
 }
 

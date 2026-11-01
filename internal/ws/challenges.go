@@ -238,7 +238,7 @@ func (h *Hub) handleChallengeSend(c *Client, env protocol.Envelope) {
 		return
 	}
 
-	note := clipRunes(strings.TrimSpace(req.Note), challengeNoteMaxRunes)
+	note := clipRunes(strings.TrimSpace(cleanText(req.Note)), challengeNoteMaxRunes)
 	if note != "" && h.mod != nil {
 		if term, hit := h.mod.FilterMessage(note); hit {
 			refuse(protocol.ChallengeBlocked)

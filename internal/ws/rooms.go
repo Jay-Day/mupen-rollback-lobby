@@ -29,14 +29,11 @@ func (h *Hub) handleRoomCreate(c *Client, env protocol.Envelope) {
 		return
 	}
 
-	name := strings.TrimSpace(req.Name)
+	name := clipRunes(strings.TrimSpace(cleanText(req.Name)), roomNameMaxLen)
 	rom := strings.TrimSpace(req.Rom.Name)
 	if name == "" || rom == "" {
 		c.sendRoomCreateFail(env.ID, protocol.ReasonInvalidPayload)
 		return
-	}
-	if len(name) > roomNameMaxLen {
-		name = name[:roomNameMaxLen]
 	}
 	// Room names show up in every client's room list — filter them like chat.
 	if h.mod != nil {

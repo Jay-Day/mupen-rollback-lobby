@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coder/websocket"
 	"github.com/jay-day/rmgk-lobby/internal/config"
@@ -16,6 +17,7 @@ import (
 	"github.com/jay-day/rmgk-lobby/internal/moderation"
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
 	"github.com/jay-day/rmgk-lobby/internal/state"
+	"github.com/jay-day/rmgk-lobby/internal/usernames"
 )
 
 const (
@@ -268,10 +270,13 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request, ip string) {
 // clampString caps a client-supplied string to n bytes — these are echoed to
 // every peer, so don't let one client bloat presence broadcasts.
 func clampString(s string, n int) string {
-	if len(s) > n {
-		return s[:n]
+	if len(s) <= n {
+		return s
 	}
-	return s
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
@@ -288,14 +293,15 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		return errUnsupportedClientVersion
 	}
 
-	if !isValidUsername(req.Username) {
-		c.sendFail(protocol.TypeHelloFail, env.ID, protocol.ReasonInvalidPayload)
+	username, err := usernames.Normalize(req.Username)
+	if err != nil {
+		c.sendFail(protocol.TypeHelloFail, env.ID, protocol.ReasonInvalidName)
 		return errInvalidUsername
 	}
 	// Usernames are broadcast to the whole lobby — hold them to the same
 	// hate-speech filter as chat.
 	if h.mod != nil {
-		if term, hit := h.mod.FilterMessage(req.Username); hit {
+		if term, hit := h.mod.FilterMessage(username); hit {
 			c.sendFail(protocol.TypeHelloFail, env.ID, protocol.ReasonInvalidPayload)
 			slog.Info("username blocked by filter", "ip", c.ip, "term", term)
 			return errInvalidUsername
@@ -310,7 +316,7 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 
 	user := &state.User{
 		ID:            h.state.NextUserID(),
-		Username:      req.Username,
+		Username:      username,
 		State:         state.UserStateIdle,
 		PublicIP:      c.ip,
 		LocalIP:       req.LocalIP,
@@ -341,6 +347,7 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 
 	resp := protocol.HelloOKResponse{
 		UserID:     user.ID,
+		Username:   user.Username,
 		ObservedIP: c.ip,
 		UDPAnchor:  h.udpPublicAddr,
 		Region:     user.Region,
@@ -661,7 +668,7 @@ func (h *Hub) handleChatSend(c *Client, env protocol.Envelope) {
 	if !validChannel(req.Channel) {
 		return
 	}
-	msg := strings.TrimSpace(req.Message)
+	msg := strings.TrimSpace(cleanText(req.Message))
 	if msg == "" {
 		return
 	}

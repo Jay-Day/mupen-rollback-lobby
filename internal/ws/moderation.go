@@ -10,6 +10,7 @@ import (
 
 	"github.com/jay-day/rmgk-lobby/internal/moderation"
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
+	"github.com/jay-day/rmgk-lobby/internal/usernames"
 )
 
 // maxAuthFails is how many bad ADMIN_AUTH passwords one connection gets
@@ -178,7 +179,7 @@ func (h *Hub) handleModAction(c *Client, env protocol.Envelope) {
 	// happens next reaches the whole connection.
 	tname, tip := tc.user.Username, tc.ip
 	for _, u := range tc.user.Group() {
-		if strings.EqualFold(u.Username, target) {
+		if usernames.Same(u.Username, target) {
 			tname = u.Username
 		}
 	}
@@ -267,7 +268,7 @@ func (h *Hub) findClientByUsername(name string) *Client {
 			continue
 		}
 		for _, u := range cl.user.Group() {
-			if strings.EqualFold(u.Username, name) {
+			if usernames.Same(u.Username, name) {
 				return cl
 			}
 		}

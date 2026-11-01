@@ -389,7 +389,9 @@ type ChallengeGamesRequest struct {
 // -- Response payloads --
 
 type HelloOKResponse struct {
-	UserID     uint64           `json:"userId"`
+	UserID uint64 `json:"userId"`
+	// Username is the spelling the lobby kept, which can differ from HELLO's.
+	Username   string           `json:"username"`
 	ObservedIP string           `json:"observedIp"`
 	UDPAnchor  string           `json:"udpAnchor"`
 	Region     string           `json:"region"`

@@ -3,6 +3,8 @@ package state
 import (
 	"sync"
 	"sync/atomic"
+
+	"github.com/jay-day/rmgk-lobby/internal/usernames"
 )
 
 // State is the central in-memory store for all lobby data.
@@ -15,7 +17,8 @@ type State struct {
 	nextMatchID atomic.Uint64
 
 	users     map[uint64]*User
-	usernames map[string]*User
+	usernames map[string]*User          // by usernames.Key
+	lookalike map[string]lookalikeUsers // by usernames.Skeleton
 	rooms     map[uint64]*Room
 	matches   map[uint64]*Match
 }
@@ -24,6 +27,7 @@ func New() *State {
 	return &State{
 		users:     make(map[uint64]*User),
 		usernames: make(map[string]*User),
+		lookalike: make(map[string]lookalikeUsers),
 		rooms:     make(map[uint64]*Room),
 		matches:   make(map[uint64]*Match),
 	}
@@ -35,14 +39,32 @@ func (s *State) NextMatchID() uint64 { return s.nextMatchID.Add(1) }
 
 // -- Users --
 
+// lookalikeUsers counts the online names that share one skeleton.
+type lookalikeUsers struct{ ascii, other int }
+
 func (s *State) AddUser(u *User) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, exists := s.usernames[u.Username]; exists {
+	key := usernames.Key(u.Username)
+	if _, exists := s.usernames[key]; exists {
 		return ErrUsernameTaken
 	}
+	// A name that only looks like someone else's is theirs too. Two plain ASCII
+	// names are exempt: this rule isn't meant to split "Paul" from "PauI".
+	skeleton := usernames.Skeleton(u.Username)
+	alike := s.lookalike[skeleton]
+	ascii := usernames.IsASCII(u.Username)
+	if alike.other > 0 || (!ascii && alike.ascii > 0) {
+		return ErrUsernameTaken
+	}
+	if ascii {
+		alike.ascii++
+	} else {
+		alike.other++
+	}
+	s.lookalike[skeleton] = alike
 	s.users[u.ID] = u
-	s.usernames[u.Username] = u
+	s.usernames[key] = u
 	return nil
 }
 
@@ -54,7 +76,19 @@ func (s *State) RemoveUser(id uint64) *User {
 		return nil
 	}
 	delete(s.users, id)
-	delete(s.usernames, u.Username)
+	delete(s.usernames, usernames.Key(u.Username))
+	skeleton := usernames.Skeleton(u.Username)
+	alike := s.lookalike[skeleton]
+	if usernames.IsASCII(u.Username) {
+		alike.ascii--
+	} else {
+		alike.other--
+	}
+	if alike.ascii <= 0 && alike.other <= 0 {
+		delete(s.lookalike, skeleton)
+	} else {
+		s.lookalike[skeleton] = alike
+	}
 	return u
 }
 
@@ -67,7 +101,7 @@ func (s *State) GetUser(id uint64) *User {
 func (s *State) GetUserByName(name string) *User {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.usernames[name]
+	return s.usernames[usernames.Key(name)]
 }
 
 func (s *State) ListUsers() []*User {

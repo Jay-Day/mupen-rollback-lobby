@@ -3,6 +3,7 @@ package ws
 import (
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -53,10 +54,19 @@ func (h *chatHistory) Snapshot() []protocol.ChatMsgPayload {
 
 // truncateMessage clips overlong chat input. We do not reject — be lenient.
 func truncateMessage(s string) string {
-	if len(s) <= maxChatMessageLen {
-		return s
-	}
-	return s[:maxChatMessageLen]
+	return clipRunes(s, maxChatMessageLen)
+}
+
+// bidiControls reorder the text around them. In a line that also shows someone's
+// name, that lets a message rearrange what other players read.
+var bidiControls = strings.NewReplacer(
+	"\u202a", "", "\u202b", "", "\u202c", "", "\u202d", "", "\u202e", "",
+	"\u2066", "", "\u2067", "", "\u2068", "", "\u2069", "",
+)
+
+// cleanText makes free text a client sent safe to pass on to everyone else.
+func cleanText(s string) string {
+	return bidiControls.Replace(strings.ToValidUTF8(s, "\ufffd"))
 }
 
 // validChannel reports whether a channel name is accepted right now.
