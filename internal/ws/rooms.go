@@ -159,6 +159,10 @@ func (h *Hub) handleRoomJoin(c *Client, env protocol.Envelope) {
 		c.sendRoomJoinFail(env.ID, protocol.ReasonRoomNotFound)
 		return
 	}
+	if room.Private {
+		c.sendRoomJoinFail(env.ID, protocol.ReasonPrivateRoom)
+		return
+	}
 
 	// A kick is permanent for this room object. Destroying the room destroys the
 	// ban list, so the same user may join a newly created room normally.
@@ -197,6 +201,12 @@ func (h *Hub) handleRoomJoin(c *Client, env protocol.Envelope) {
 		}
 		return
 	}
+	h.announceRoomJoin(c, room, env.ID)
+}
+
+// announceRoomJoin tells everyone that c's PC just sat down in room.
+func (h *Hub) announceRoomJoin(c *Client, room *state.Room, id string) {
+	group := c.user.Group()
 	h.dequeueQuickMatch(c)
 
 	slog.Info("room joined",
@@ -204,7 +214,7 @@ func (h *Hub) handleRoomJoin(c *Client, env protocol.Envelope) {
 		"slot", len(room.Players), "of", room.MaxPlayers)
 
 	// Tell the joiner first so their UI flips into the room view.
-	c.sendEnvelope(protocol.TypeRoomJoinOK, env.ID, roomStatePayload(room))
+	c.sendEnvelope(protocol.TypeRoomJoinOK, id, roomStatePayload(room))
 
 	// Broadcast updated room state to everyone seated (including the joiner —
 	// keeps the joiner's view consistent with what other members see).
@@ -527,6 +537,13 @@ func (h *Hub) handleRoomKick(c *Client, env protocol.Envelope) {
 // host-driven ROOM_START flow and the auto-started Quick Match flow.
 // Callers are responsible for any validation that should happen first.
 func (h *Hub) startMatchInRoom(room *state.Room, initiator string) {
+	// Playing takes everyone seated out of any challenge they were part of.
+	for _, seat := range room.Players {
+		if seat.User != nil && seat.User.Owner == nil {
+			h.endChallengesFor(seat.User, protocol.ChallengeBusy)
+		}
+	}
+
 	match := &state.Match{
 		ID:        h.state.NextMatchID(),
 		RoomID:    room.ID,
@@ -919,7 +936,8 @@ func (h *Hub) buildRoomListPayload() protocol.RoomListPayload {
 			Broadcasting: broadcasting,
 			MatchID:      matchID,
 			ViewerCount:  viewerCount,
-			LateJoin:     players < max && roomAcceptsLateJoin(r),
+			LateJoin:     players < max && !r.Private && roomAcceptsLateJoin(r),
+			Private:      r.Private,
 		})
 	}
 	return payload
@@ -977,6 +995,7 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 		InGameSettings:    true,
 		LateJoin:          roomAcceptsLateJoin(r),
 		CanStartAlone:     roomCanStartAlone(r),
+		Private:           r.Private,
 		Rom: protocol.RomInfo{
 			Name:   r.RomName,
 			MD5:    r.RomMD5,

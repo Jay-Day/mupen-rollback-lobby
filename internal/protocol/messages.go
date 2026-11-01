@@ -63,8 +63,16 @@ const (
 	TypeSpectateStop      = "SPECTATE_STOP"  // spectator: stop watching
 
 	// Moderation (client → server).
-	TypeAdminAuth = "ADMIN_AUTH" // claim moderator role with a password
-	TypeModAction = "MOD_ACTION" // moderator: kick/mute/timeout/ban/unban/unmute/list
+	TypeAdminAuth   = "ADMIN_AUTH"   // claim moderator role with a password
+	TypeAdminLogout = "ADMIN_LOGOUT" // give the moderator role back
+	TypeModAction   = "MOD_ACTION"   // moderator: kick/mute/timeout/ban/unban/unmute/list/inspect
+
+	// Challenges: asking someone to play right now. Sent from a room it's an
+	// invite to that room; otherwise accepting makes a private room for both.
+	TypeChallengeSend    = "CHALLENGE_SEND"
+	TypeChallengeCancel  = "CHALLENGE_CANCEL"
+	TypeChallengeRespond = "CHALLENGE_RESPOND"
+	TypeChallengeGames   = "CHALLENGE_GAMES" // which of my games does this player have?
 )
 
 // Server → Client message types
@@ -73,6 +81,7 @@ const (
 	TypeHelloFail        = "HELLO_FAIL"
 	TypeHeartbeatAck     = "HEARTBEAT_ACK"
 	TypeChatMsg          = "CHAT_MSG"
+	TypeChatFail         = "CHAT_FAIL" // a private message couldn't be delivered
 	TypeChatHistoryReply = "CHAT_HISTORY_REPLY"
 	TypePresenceFull     = "PRESENCE_FULL"
 	TypePresenceDelta    = "PRESENCE_DELTA"
@@ -97,6 +106,13 @@ const (
 	TypeLocalPlayerAdded   = "LOCAL_PLAYER_ADDED"
 	TypeLocalPlayerRemoved = "LOCAL_PLAYER_REMOVED"
 	TypeLocalPlayerFail    = "LOCAL_PLAYER_FAIL"
+	// Challenges (server → client). CHALLENGE_SENT acknowledges the sender and
+	// CHALLENGE_INCOMING reaches the player it's for; CHALLENGE_RESULT ends it for
+	// both of them, or refuses a CHALLENGE_SEND.
+	TypeChallengeSent       = "CHALLENGE_SENT"
+	TypeChallengeIncoming   = "CHALLENGE_INCOMING"
+	TypeChallengeResult     = "CHALLENGE_RESULT"
+	TypeChallengeGamesReply = "CHALLENGE_GAMES_REPLY"
 	// Late join (server → client). MATCH_ADMIT_BEGIN goes to the match's
 	// players and the joiner; MATCH_ADMIT_FAIL answers a refused MATCH_ADMIT.
 	TypeMatchAdmitBegin = "MATCH_ADMIT_BEGIN"
@@ -114,10 +130,14 @@ const (
 	TypeBroadcastViewerCount = "BROADCAST_VIEWER_COUNT"
 
 	// Moderation (server → client).
-	TypeAdminAuthOK   = "ADMIN_AUTH_OK"   // moderator role granted
-	TypeAdminAuthFail = "ADMIN_AUTH_FAIL" // wrong password / no admins configured
-	TypeModNotice     = "MOD_NOTICE"      // system notice to a user (blocked/muted/kicked/info)
-	TypeModList       = "MOD_LIST"        // reply to a moderator's "list" action
+	TypeAdminAuthOK    = "ADMIN_AUTH_OK"    // moderator role granted
+	TypeAdminAuthFail  = "ADMIN_AUTH_FAIL"  // wrong password / no admins configured
+	TypeAdminLoggedOut = "ADMIN_LOGGED_OUT" // moderator role given back
+	TypeModNotice      = "MOD_NOTICE"       // system notice to a user (blocked/muted/kicked/info)
+	TypeModList        = "MOD_LIST"         // reply to a moderator's "list" action
+	TypeModResult      = "MOD_RESULT"       // a kick/mute/timeout/ban took effect
+	TypeModTargetInfo  = "MOD_TARGET_INFO"  // reply to a moderator's "inspect" action
+	TypeModPeers       = "MOD_PEERS"        // who is a moderator, to moderators
 )
 
 // Failure reason codes
@@ -151,6 +171,27 @@ const (
 	ReasonInRoom          = "in_room"
 	ReasonSearching       = "searching"
 	ReasonTooFast         = "too_fast"
+	// Refusals for private messages (ReasonNeedsUpdate too).
+	ReasonUserGone = "user_gone"
+	ReasonSamePC   = "same_pc"
+	// Refused joining a room made for a challenge.
+	ReasonPrivateRoom = "private_room"
+)
+
+// How a challenge ended, or why CHALLENGE_SEND was refused (ReasonNeedsUpdate
+// and ReasonTooFast too). ChallengeUnavailable says no more than that on purpose:
+// the real reason may be how many players are on someone's PC.
+const (
+	ChallengeAccepted    = "accepted"
+	ChallengeDeclined    = "declined"
+	ChallengeTimedOut    = "timeout"
+	ChallengeCancelled   = "cancelled"
+	ChallengeBusy        = "busy"         // in a match
+	ChallengeUnavailable = "unavailable"  // can't happen right now
+	ChallengeNoGame      = "no_game"      // they don't have the game
+	ChallengeCooldown    = "cooldown"     // they declined you moments ago
+	ChallengePending     = "pending"      // you already have one out
+	ChallengeBlocked     = "blocked_note" // the message hit the chat filter
 )
 
 // -- Request payloads --
@@ -181,6 +222,9 @@ type HelloRequest struct {
 	// PeerID. A room never mixes clients that don't with a PC holding several
 	// players, since they'd open a connection per seat.
 	LocalPlayers bool `json:"localPlayers,omitempty"`
+	// Advertises support for private messages and challenges. Peers are told
+	// through presence, so they don't offer them to a client that can't show them.
+	Social bool `json:"social,omitempty"`
 }
 
 type HeartbeatRequest struct {
@@ -194,6 +238,10 @@ type HeartbeatRequest struct {
 type ChatSendRequest struct {
 	Channel string `json:"channel"`
 	Message string `json:"message"`
+	// Private messages name who they're for. AsUserID picks who on this PC is
+	// talking; zero means the connection's owner.
+	ToUserID uint64 `json:"toUserId,omitempty"`
+	AsUserID uint64 `json:"asUserId,omitempty"`
 }
 
 type ChatHistoryRequest struct {
@@ -312,6 +360,28 @@ type LocalPlayerRemoveRequest struct {
 	UserID uint64 `json:"userId"`
 }
 
+// ChallengeSendRequest asks a player to play. Rom is ignored from inside a
+// room, where this invites them to it.
+type ChallengeSendRequest struct {
+	ToUserID   uint64  `json:"toUserId"`
+	Rom        RomInfo `json:"rom"`
+	Note       string  `json:"note,omitempty"`
+	LiveReplay bool    `json:"liveReplay,omitempty"`
+}
+
+type ChallengeCancelRequest struct {
+	ChallengeID uint64 `json:"challengeId"`
+}
+
+type ChallengeRespondRequest struct {
+	ChallengeID uint64 `json:"challengeId"`
+	Accept      bool   `json:"accept"`
+}
+
+type ChallengeGamesRequest struct {
+	ToUserID uint64 `json:"toUserId"`
+}
+
 // -- Response payloads --
 
 type HelloOKResponse struct {
@@ -322,6 +392,8 @@ type HelloOKResponse struct {
 	ICE        ICEConfiguration `json:"ice"`
 	// LocalPlayers tells the client LOCAL_PLAYER_ADD works here.
 	LocalPlayers bool `json:"localPlayers,omitempty"`
+	// Social tells the client private messages and challenges work here.
+	Social bool `json:"social,omitempty"`
 }
 
 type LocalPlayerAddedPayload struct {
@@ -368,6 +440,17 @@ type ChatMsgPayload struct {
 	// Sender was authenticated as a moderator (ADMIN_AUTH) when sending.
 	// Clients use this to trust admin-only chat directives like "@notify".
 	Admin bool `json:"admin,omitempty"`
+	// Private messages only: who it's for. It may be a local player, whose
+	// owner's connection receives it.
+	ToUserID   uint64 `json:"toUserId,omitempty"`
+	ToUsername string `json:"toUsername,omitempty"`
+}
+
+// ChatFailPayload says why a private message went nowhere.
+type ChatFailPayload struct {
+	Channel  string `json:"channel"`
+	ToUserID uint64 `json:"toUserId"`
+	Reason   string `json:"reason"`
 }
 
 type ChatHistoryReply struct {
@@ -388,6 +471,7 @@ type PresenceUser struct {
 	CurrentRoomID   uint64 `json:"currentRoomId,omitempty"`
 	CurrentRoomName string `json:"currentRoomName,omitempty"`
 	SearchingRom    string `json:"searchingRom,omitempty"` // ROM name while state == searching
+	Social          bool   `json:"social,omitempty"`       // can receive private messages and challenges
 }
 
 type PresenceFullPayload struct {
@@ -422,6 +506,8 @@ type RoomSummary struct {
 	// LateJoin marks an in-game room with a free seat that a late-join capable
 	// client may enter; the host can then add them to the running match.
 	LateJoin bool `json:"lateJoin,omitempty"`
+	// Private rooms were made for a challenge and refuse ROOM_JOIN.
+	Private bool `json:"private,omitempty"`
 }
 
 type RoomListPayload struct {
@@ -481,6 +567,7 @@ type RoomStatePayload struct {
 	// CanStartAlone tells the host ROOM_START works with nobody else seated.
 	// Older servers refuse it, so clients need this to offer the option.
 	CanStartAlone bool `json:"canStartAlone,omitempty"`
+	Private       bool `json:"private,omitempty"`
 }
 
 type RoomJoinFailPayload struct {
@@ -491,6 +578,48 @@ type RoomJoinFailPayload struct {
 // "kicked" (removed by host), or "host_left" (host dissolved the room).
 type RoomLeftPayload struct {
 	Reason string `json:"reason,omitempty"`
+}
+
+// ChallengeSentPayload acknowledges a CHALLENGE_SEND. ExpiresInMs counts from
+// now, so clients don't depend on their clocks agreeing with the server's.
+type ChallengeSentPayload struct {
+	ChallengeID uint64  `json:"challengeId"`
+	ToUserID    uint64  `json:"toUserId"`
+	ToUsername  string  `json:"toUsername"`
+	Rom         RomInfo `json:"rom"`
+	ExpiresInMs int64   `json:"expiresInMs"`
+	Invite      bool    `json:"invite,omitempty"`
+}
+
+// ChallengeIncomingPayload reaches the challenged player's connection. ToUserID
+// may be a local player. An invite names the room instead of proposing a new one.
+type ChallengeIncomingPayload struct {
+	ChallengeID  uint64  `json:"challengeId"`
+	FromUserID   uint64  `json:"fromUserId"`
+	FromUsername string  `json:"fromUsername"`
+	ToUserID     uint64  `json:"toUserId"`
+	ToUsername   string  `json:"toUsername"`
+	Rom          RomInfo `json:"rom"`
+	Note         string  `json:"note,omitempty"`
+	ExpiresInMs  int64   `json:"expiresInMs"`
+	Invite       bool    `json:"invite,omitempty"`
+	RoomName     string  `json:"roomName,omitempty"`
+	RoomPlayers  int     `json:"roomPlayers,omitempty"`
+	RoomMax      int     `json:"roomMaxPlayers,omitempty"`
+}
+
+// ChallengeResultPayload ends a challenge, or refuses a CHALLENGE_SEND, in which
+// case ChallengeID is zero and ToUserID says which one.
+type ChallengeResultPayload struct {
+	ChallengeID uint64 `json:"challengeId,omitempty"`
+	ToUserID    uint64 `json:"toUserId,omitempty"`
+	Result      string `json:"result"`
+}
+
+// ChallengeGamesReply lists the sender's games, by MD5, that the player has too.
+type ChallengeGamesReply struct {
+	ToUserID uint64   `json:"toUserId"`
+	MD5s     []string `json:"md5s"`
 }
 
 type PingProbeReplyPayload struct {
@@ -707,8 +836,10 @@ type AdminAuthOKResponse struct {
 }
 
 // ModActionRequest is a moderator command. Action is one of:
-// "kick", "mute", "timeout", "ban", "unban", "unmute", "list".
-// Target is a username for kick/mute/timeout/ban, or an IP for unban/unmute.
+// "kick", "mute", "timeout", "ban", "unban", "unmute", "list", "inspect",
+// "closeroom".
+// Target is a username for kick/mute/timeout/ban/inspect, or an IP for
+// unban/unmute.
 // Duration is a Go duration string ("10m", "1h", "30s"); empty/"0" = permanent.
 type ModActionRequest struct {
 	Action   string `json:"action"`
@@ -728,6 +859,7 @@ type ModNoticePayload struct {
 // ModSanction is one ban/mute entry surfaced to a moderator via MOD_LIST.
 type ModSanction struct {
 	IP     string `json:"ip"`
+	Name   string `json:"name,omitempty"` // who it was applied to; empty on older entries
 	Reason string `json:"reason"`
 	By     string `json:"by"`
 	Until  int64  `json:"until"` // unix ms; 0 = permanent
@@ -737,4 +869,28 @@ type ModSanction struct {
 type ModListReply struct {
 	Bans  []ModSanction `json:"bans"`
 	Mutes []ModSanction `json:"mutes"`
+}
+
+// ModResultPayload confirms a sanction with what's needed to undo it. It goes
+// with the MOD_NOTICE text older clients show.
+type ModResultPayload struct {
+	Action string `json:"action"`
+	Target string `json:"target"`
+	IP     string `json:"ip,omitempty"`
+	Until  int64  `json:"until,omitempty"` // unix ms; 0 = permanent
+}
+
+// ModTargetInfoPayload answers "inspect": what acting on Target would affect.
+// Others is everyone else on the same connection. Moderators are the only people
+// ever told that a PC is shared.
+type ModTargetInfoPayload struct {
+	Target    string   `json:"target"`
+	Others    []string `json:"others,omitempty"`
+	Moderator bool     `json:"moderator,omitempty"`
+}
+
+// ModPeersPayload lists the users moderators can't act on. Local players of a
+// moderator's connection are included. Only moderators receive it.
+type ModPeersPayload struct {
+	UserIDs []uint64 `json:"userIds"`
 }

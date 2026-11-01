@@ -109,6 +109,7 @@ func (h *Hub) handleLocalPlayerAdd(c *Client, env protocol.Envelope) {
 		ICESupported:  owner.ICESupported,
 		LateJoin:      owner.LateJoin,
 		LocalPlayers:  owner.LocalPlayers,
+		Social:        owner.Social,
 		PingToServer:  owner.PingToServer,
 		JoinedAt:      time.Now(),
 		LastSeen:      time.Now(),
@@ -124,6 +125,9 @@ func (h *Hub) handleLocalPlayerAdd(c *Client, env protocol.Envelope) {
 	// the presence update arrives.
 	c.sendEnvelope(protocol.TypeLocalPlayerAdded, env.ID, protocol.LocalPlayerAddedPayload{UserID: local.ID, Name: name})
 	h.broadcastPresenceAdded(local)
+	if c.isModerator {
+		h.broadcastModPeers()
+	}
 }
 
 func (h *Hub) handleLocalPlayerRemove(c *Client, env protocol.Envelope) {
@@ -145,9 +149,13 @@ func (h *Hub) handleLocalPlayerRemove(c *Client, env protocol.Envelope) {
 		return
 	}
 	h.state.RemoveUser(local.ID)
+	h.endChallengesTo(local, protocol.ChallengeUnavailable)
 	slog.Info("local player removed", "owner", c.user.Username, "name", local.Username, "id", local.ID)
 	c.sendEnvelope(protocol.TypeLocalPlayerRemoved, env.ID, protocol.LocalPlayerRemovedPayload{UserID: local.ID})
 	h.broadcastPresenceRemoved(local.ID)
+	if c.isModerator {
+		h.broadcastModPeers()
+	}
 }
 
 // localPlayersRefusal returns why u's PC can't sit in room, or "". A client that

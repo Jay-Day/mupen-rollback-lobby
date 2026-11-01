@@ -52,6 +52,7 @@ type Hub struct {
 
 	lobbyChat  *chatHistory
 	matchmaker *matchmaker
+	challenges *challengeManager
 	broadcasts *broadcastManager
 	mod        *moderation.Manager
 	settings   *config.Store // nil = built-in defaults
@@ -67,6 +68,7 @@ func NewHub(s *state.State, udpPublicAddr string, iceConfig protocol.ICEConfigur
 		unregister:    make(chan *Client, 32),
 		lobbyChat:     newChatHistory(),
 		matchmaker:    newMatchmaker(),
+		challenges:    newChallengeManager(),
 		mod:           mod,
 		settings:      settings,
 	}
@@ -124,6 +126,12 @@ func (h *Hub) cleanupClient(c *Client) {
 
 	// Drop from matchmaker queue if present.
 	h.matchmaker.remove(uid)
+
+	// Challenges to or from this PC are over.
+	h.endChallengesFor(c.user, protocol.ChallengeUnavailable)
+	if c.isModerator {
+		h.broadcastModPeers()
+	}
 
 	// End any broadcast this user was running and drop them from spectator sets.
 	h.broadcasts.onUserGone(uid)
@@ -314,6 +322,8 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		ICESupported:  req.ICESupported,
 		LateJoin:      req.LateJoin,
 		LocalPlayers:  req.LocalPlayers,
+		Social:        req.Social,
+		RomHashes:     romHashSet(req.RomHashes),
 		JoinedAt:      time.Now(),
 		LastSeen:      time.Now(),
 		Send:          c.send,
@@ -336,6 +346,7 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		ICE:        h.iceConfig,
 
 		LocalPlayers: true,
+		Social:       true,
 	}
 	c.sendEnvelope(protocol.TypeHelloOK, env.ID, resp)
 
@@ -396,6 +407,14 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleLocalPlayerAdd(c, env)
 	case protocol.TypeLocalPlayerRemove:
 		h.handleLocalPlayerRemove(c, env)
+	case protocol.TypeChallengeSend:
+		h.handleChallengeSend(c, env)
+	case protocol.TypeChallengeCancel:
+		h.handleChallengeCancel(c, env)
+	case protocol.TypeChallengeRespond:
+		h.handleChallengeRespond(c, env)
+	case protocol.TypeChallengeGames:
+		h.handleChallengeGames(c, env)
 	case protocol.TypeMatchAdmit:
 		h.handleMatchAdmit(c, env)
 	case protocol.TypeMatchAdmitSignal:
@@ -416,6 +435,8 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleSpectateStop(c, env)
 	case protocol.TypeAdminAuth:
 		h.handleAdminAuth(c, env)
+	case protocol.TypeAdminLogout:
+		h.handleAdminLogout(c, env)
 	case protocol.TypeModAction:
 		h.handleModAction(c, env)
 	default:
@@ -690,6 +711,8 @@ func (h *Hub) handleChatSend(c *Client, env protocol.Envelope) {
 	case channelSpectate:
 		// Only to the viewers of the live replay the sender is watching.
 		h.broadcasts.spectatorChat(c.user.ID, payload)
+	case channelPM:
+		h.deliverPrivateMessage(c, env.ID, req, payload)
 	}
 }
 
@@ -698,7 +721,7 @@ func (h *Hub) handleChatHistory(c *Client, env protocol.Envelope) {
 	if err := json.Unmarshal(env.Data, &req); err != nil {
 		return
 	}
-	if !validChannel(req.Channel) {
+	if !validChannel(req.Channel) || req.Channel == channelPM {
 		return
 	}
 	reply := protocol.ChatHistoryReply{
@@ -718,6 +741,7 @@ func (h *Hub) presenceUserFromState(u *state.User) protocol.PresenceUser {
 		ClientVersion: u.ClientVersion,
 		Connection:    u.Connection,
 		PingToServer:  u.PingToServer,
+		Social:        u.Social,
 	}
 	// Withholding happens here, at the single choke point every presence
 	// message flows through, so no other broadcast path can leak the country.

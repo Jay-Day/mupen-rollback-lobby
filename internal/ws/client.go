@@ -42,6 +42,9 @@ type Client struct {
 
 	// Local player add/remove flood window. Same read-loop-only rule.
 	rosterTimes []time.Time
+
+	// CHALLENGE_SEND flood window. Same read-loop-only rule.
+	challengeTimes []time.Time
 }
 
 const (

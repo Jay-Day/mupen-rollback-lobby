@@ -39,6 +39,11 @@ type User struct {
 	ICESupported  bool   // room-scoped libjuice signaling/transport support
 	LateJoin      bool   // can join a running match (MATCH_ADMIT_*)
 	LocalPlayers  bool   // reads the peerId routing that local players need
+	Social        bool   // can receive private messages and challenges
+
+	// The games this client has, by upper-case MD5, from HELLO. Set once and
+	// only read afterwards.
+	RomHashes map[string]struct{}
 
 	PingToServer uint16
 

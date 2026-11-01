@@ -50,6 +50,10 @@ type Room struct {
 	Password          string
 	// QuickMatch rooms are paired by the matchmaker; nobody joins them mid-match.
 	QuickMatch bool
+	// Private rooms were made for a challenge and hold exactly its players.
+	// ROOM_JOIN never gets into them, even into a seat someone left; only an invite
+	// from someone inside can fill that seat.
+	Private bool
 
 	Players    []*RoomSeat
 	Spectators []*User
