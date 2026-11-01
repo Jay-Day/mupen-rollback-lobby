@@ -39,6 +39,9 @@ type Client struct {
 	// each target. Same read-loop-only rule as chatTimes, so no lock.
 	probeTimes   []time.Time
 	introducedAt map[uint64]time.Time
+
+	// Local player add/remove flood window. Same read-loop-only rule.
+	rosterTimes []time.Time
 }
 
 const (

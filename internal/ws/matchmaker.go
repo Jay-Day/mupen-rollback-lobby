@@ -110,6 +110,15 @@ func (h *Hub) handleQuickMatchJoin(c *Client, env protocol.Envelope) {
 		slog.Debug("QUICK_MATCH_JOIN rejected: in a room", "user", c.user.Username)
 		return
 	}
+	// A Quick Match pairs two PCs into two seats.
+	if len(c.user.Group()) > 1 {
+		c.sendEnvelope(protocol.TypeQuickMatchStatus, env.ID, protocol.QuickMatchStatusPayload{
+			Searching: false,
+			QueueSize: h.matchmaker.size(),
+			Reason:    protocol.ReasonLocalPlayers,
+		})
+		return
+	}
 
 	var req protocol.QuickMatchJoinRequest
 	if len(env.Data) > 0 {

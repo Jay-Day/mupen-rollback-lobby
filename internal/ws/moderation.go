@@ -185,13 +185,20 @@ func (h *Hub) modConfirm(c *Client, text string) {
 }
 
 // findClientByUsername returns the connected client with a matching username
-// (case-insensitive), or nil. Usernames are unique among live connections.
+// (case-insensitive), or nil. Usernames are unique among live connections. A
+// local player's name finds the connection it shares: sanctions apply to the
+// whole PC.
 func (h *Hub) findClientByUsername(name string) *Client {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for _, cl := range h.clients {
-		if cl.user != nil && strings.EqualFold(cl.user.Username, name) {
-			return cl
+		if cl.user == nil {
+			continue
+		}
+		for _, u := range cl.user.Group() {
+			if strings.EqualFold(u.Username, name) {
+				return cl
+			}
 		}
 	}
 	return nil

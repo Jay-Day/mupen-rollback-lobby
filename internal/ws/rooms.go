@@ -100,7 +100,11 @@ func (h *Hub) handleRoomCreate(c *Client, env protocol.Envelope) {
 		CreatedAt:      time.Now(),
 	}
 	if err := h.seatUser(c.user, room, state.UserStateHosting); err != nil {
-		c.sendRoomCreateFail(env.ID, protocol.ReasonAlreadyInRoom)
+		if err == state.ErrNotEnoughSeats {
+			c.sendRoomCreateFail(env.ID, protocol.ReasonNotEnoughSeats)
+		} else {
+			c.sendRoomCreateFail(env.ID, protocol.ReasonAlreadyInRoom)
+		}
 		return
 	}
 
@@ -115,9 +119,11 @@ func (h *Hub) handleRoomCreate(c *Client, env protocol.Envelope) {
 	c.sendEnvelope(protocol.TypeRoomCreated, env.ID, protocol.RoomCreatedResponse{RoomID: room.ID})
 	c.sendEnvelope(protocol.TypeRoomState, "", roomStatePayload(room))
 
-	// 2) Broadcast the new room list and the host's state change
+	// 2) Broadcast the new room list and the state change of everyone seated
 	h.broadcastRoomList()
-	h.broadcastPresenceUpdated(c.user)
+	for _, u := range c.user.Group() {
+		h.broadcastPresenceUpdated(u)
+	}
 }
 
 func (h *Hub) handleRoomLeave(c *Client, env protocol.Envelope) {
@@ -156,8 +162,15 @@ func (h *Hub) handleRoomJoin(c *Client, env protocol.Envelope) {
 
 	// A kick is permanent for this room object. Destroying the room destroys the
 	// ban list, so the same user may join a newly created room normally.
-	if room.WasKicked(c.user.ID, c.user.Username) {
-		c.sendRoomJoinFail(env.ID, protocol.ReasonKickedFromRoom)
+	group := c.user.Group()
+	for _, u := range group {
+		if room.WasKicked(u.ID, u.Username) {
+			c.sendRoomJoinFail(env.ID, protocol.ReasonKickedFromRoom)
+			return
+		}
+	}
+	if reason := localPlayersRefusal(c.user, room); reason != "" {
+		c.sendRoomJoinFail(env.ID, reason)
 		return
 	}
 
@@ -174,9 +187,12 @@ func (h *Hub) handleRoomJoin(c *Client, env protocol.Envelope) {
 		return
 	}
 	if err := h.seatUser(c.user, room, state.UserStateInRoom); err != nil {
-		if err == state.ErrAlreadyInRoom {
+		switch err {
+		case state.ErrAlreadyInRoom:
 			c.sendRoomJoinFail(env.ID, protocol.ReasonAlreadyInRoom)
-		} else {
+		case state.ErrNotEnoughSeats:
+			c.sendRoomJoinFail(env.ID, protocol.ReasonNotEnoughSeats)
+		default:
 			c.sendRoomJoinFail(env.ID, protocol.ReasonRoomFull)
 		}
 		return
@@ -197,8 +213,10 @@ func (h *Hub) handleRoomJoin(c *Client, env protocol.Envelope) {
 	// Update the rooms list seen by everyone else (player count changed).
 	h.broadcastRoomList()
 
-	// And the joiner's presence state.
-	h.broadcastPresenceUpdated(c.user)
+	// And the presence state of everyone who just sat down.
+	for _, u := range group {
+		h.broadcastPresenceUpdated(u)
+	}
 
 	// Punch the joiner against everyone already seated, both directions at
 	// once. Start gating waits on these measurements, so leaving it to the
@@ -293,7 +311,7 @@ func (h *Hub) handleRoomUpdateSettings(c *Client, env protocol.Envelope) {
 		req.Pacing = maxPacing
 	}
 
-	seatChanged := room.SetPlayerDelay(c.user.ID, req.Delay, req.DelayAuto)
+	seatChanged := setGroupDelay(room, c.user, req.Delay, req.DelayAuto)
 	sharedUnchanged := room.Delay == req.Delay && room.Prediction == req.Prediction &&
 		room.Pacing == req.Pacing &&
 		room.DelayAuto == req.DelayAuto && room.PredictionAuto == req.PredictionAuto
@@ -334,7 +352,7 @@ func (h *Hub) handleRoomUpdateDelay(c *Client, env protocol.Envelope) {
 	} else if req.Delay > maxDelay {
 		req.Delay = maxDelay
 	}
-	if !room.SetPlayerDelay(c.user.ID, req.Delay, req.DelayAuto) {
+	if !setGroupDelay(room, c.user, req.Delay, req.DelayAuto) {
 		return
 	}
 	slog.Info("player frame delay updated", "room", room.ID, "delay", req.Delay,
@@ -359,7 +377,7 @@ func (h *Hub) handleRoomUpdatePlayerSettings(c *Client, env protocol.Envelope) {
 	} else if req.Delay > maxDelay {
 		req.Delay = maxDelay
 	}
-	delayChanged := room.SetPlayerDelay(c.user.ID, req.Delay, req.DelayAuto)
+	delayChanged := setGroupDelay(room, c.user, req.Delay, req.DelayAuto)
 	predictionChanged := false
 	if room.Host != nil && room.Host.ID == c.user.ID {
 		if req.Prediction < minPrediction {
@@ -474,7 +492,8 @@ func (h *Hub) handleRoomSwapSlots(c *Client, env protocol.Envelope) {
 
 // handleRoomKick lets the host remove another player from the room (and the
 // in-progress match, if any). Reuses removeUserFromRoom, so the target gets a
-// ROOM_LEFT{reason:"kicked"} and remaining players get MATCH_PEER_LEFT.
+// ROOM_LEFT{reason:"kicked"} and remaining players get MATCH_PEER_LEFT. Kicking
+// one player on a PC kicks all of them.
 func (h *Hub) handleRoomKick(c *Client, env protocol.Envelope) {
 	var req protocol.RoomKickRequest
 	if err := json.Unmarshal(env.Data, &req); err != nil {
@@ -488,17 +507,19 @@ func (h *Hub) handleRoomKick(c *Client, env protocol.Envelope) {
 		slog.Debug("ROOM_KICK rejected: not host", "user", c.user.Username, "room", room.ID)
 		return
 	}
-	if req.UserID == c.user.ID {
-		return // host can't kick themselves
-	}
 	target := h.state.GetUser(req.UserID)
 	if target == nil || target.CurrentRoom == nil || target.CurrentRoom.ID != room.ID {
 		slog.Debug("ROOM_KICK rejected: target not in this room",
 			"host", c.user.Username, "target", req.UserID, "room", room.ID)
 		return
 	}
+	if target.Primary().ID == c.user.ID {
+		return // host can't kick themselves, or anyone on their own PC
+	}
 	slog.Info("room kick", "host", c.user.Username, "target", target.Username, "room", room.ID)
-	room.MarkKicked(target.ID, target.Username)
+	for _, u := range target.Group() {
+		room.MarkKicked(u.ID, u.Username)
+	}
 	h.removeUserFromRoom(target, room, "kicked")
 }
 
@@ -523,16 +544,7 @@ func (h *Hub) startMatchInRoom(room *state.Room, initiator string) {
 		seat.User.CurrentMatch = match
 		seat.User.SetState(state.UserStatePlaying)
 
-		ip, port := seat.User.GetUDPEndpoint()
-		peers = append(peers, protocol.MatchPeer{
-			UserID:       seat.User.ID,
-			Username:     seat.User.Username,
-			PublicIP:     ip,
-			PublicPort:   port,
-			LocalIP:      seat.User.LocalIP,
-			Slot:         seat.Slot,
-			ICESupported: seat.User.ICESupported,
-		})
+		peers = append(peers, matchPeerFor(seat.User, seat.Slot))
 	}
 
 	h.state.AddMatch(match)
@@ -570,20 +582,32 @@ func (h *Hub) startMatchInRoom(room *state.Room, initiator string) {
 // other. Funneling every change through this pair makes the divergence
 // unrepresentable: seatUser refuses (loudly) to seat a user whose pointer is
 // already set elsewhere, and unseatUser always clears both sides together.
+//
+// seatUser seats u's local players with u, all of them or none, in the lowest
+// free slots. Only u takes state st; hosting is the owner's.
 func (h *Hub) seatUser(u *state.User, room *state.Room, st state.UserState) error {
 	if u.CurrentRoom == room {
 		return nil // already seated here; never double-seat
 	}
-	if u.CurrentRoom != nil {
-		slog.Warn("seatUser refused: user already in a room",
-			"user", u.Username, "in_room", u.CurrentRoom.ID, "target_room", room.ID)
-		return state.ErrAlreadyInRoom
+	group := u.Group()
+	for _, member := range group {
+		if member.CurrentRoom != nil {
+			slog.Warn("seatUser refused: user already in a room",
+				"user", member.Username, "in_room", member.CurrentRoom.ID, "target_room", room.ID)
+			return state.ErrAlreadyInRoom
+		}
 	}
-	if err := room.AddPlayer(u); err != nil {
+	if err := room.AddPlayers(group); err != nil {
 		return err
 	}
-	u.CurrentRoom = room
-	u.SetState(st)
+	for _, member := range group {
+		member.CurrentRoom = room
+		if member == u {
+			member.SetState(st)
+		} else {
+			member.SetState(state.UserStateInRoom)
+		}
+	}
 	return nil
 }
 
@@ -597,7 +621,11 @@ func (h *Hub) unseatUser(u *state.User, room *state.Room) {
 // removeUserFromRoom handles the bookkeeping for a user leaving a room
 // (by ROOM_LEAVE, by disconnect, or by host dissolving). reason is informational
 // for log lines and propagated when notifying peers of in-game departures.
+// Everyone on a PC leaves together, whichever of them u names.
 func (h *Hub) removeUserFromRoom(u *state.User, room *state.Room, reason string) {
+	u = u.Primary()
+	group := u.Group()
+
 	// A member leaving while the host adds them to the match cancels it.
 	h.abortAdmissionFor(room, u, protocol.ReasonJoinerLeft)
 
@@ -606,10 +634,14 @@ func (h *Hub) removeUserFromRoom(u *state.User, room *state.Room, reason string)
 	var matchID uint64
 	if room.State == state.RoomStateInGame && u.CurrentMatch != nil {
 		matchID = u.CurrentMatch.ID
-		h.broadcastMatchPeerLeft(room, u, matchID, reason)
+		for _, member := range group {
+			h.broadcastMatchPeerLeft(room, member, matchID, reason)
+		}
 	}
 
-	h.unseatUser(u, room)
+	for _, member := range group {
+		h.unseatUser(member, room)
+	}
 
 	// Dissolve only when the host leaves — the host owns the room. Any
 	// non-host drop leaves the room intact regardless of remaining seat count;
@@ -630,8 +662,8 @@ func (h *Hub) removeUserFromRoom(u *state.User, room *state.Room, reason string)
 		// Snapshot first: unseatUser mutates room.Players while we iterate.
 		seats := append([]*state.RoomSeat(nil), room.Players...)
 		for _, seat := range seats {
-			if seat.User == nil || seat.User.ID == u.ID {
-				continue // skip the user who triggered the dissolve
+			if seat.User == nil {
+				continue
 			}
 			member := seat.User
 			h.unseatUser(member, room)
@@ -656,7 +688,9 @@ func (h *Hub) removeUserFromRoom(u *state.User, room *state.Room, reason string)
 	}
 
 	h.broadcastRoomList()
-	h.broadcastPresenceUpdated(u)
+	for _, member := range group {
+		h.broadcastPresenceUpdated(member)
+	}
 
 	// Always tell the leaving user so their client can dismiss the room UI.
 	// In the dissolve loop above we explicitly skipped u; in the non-dissolve
@@ -668,8 +702,9 @@ func (h *Hub) removeUserFromRoom(u *state.User, room *state.Room, reason string)
 
 // sendRoomLeft pushes a ROOM_LEFT envelope to one user. reason lets the client
 // distinguish a self-leave from being kicked or the host dissolving the room.
+// A local player has no client to tell; its owner's ROOM_LEFT covers it.
 func sendRoomLeft(u *state.User, reason string) {
-	if u == nil {
+	if u == nil || u.Owner != nil {
 		return
 	}
 	if u.Send == nil {
@@ -718,7 +753,7 @@ func (h *Hub) broadcastMatchPeerLeft(room *state.Room, departing *state.User, ma
 		return
 	}
 	for _, seat := range room.Players {
-		if seat.User == nil || seat.User.ID == departing.ID || seat.User.Send == nil {
+		if seat.User == nil || seat.User.Primary() == departing.Primary() || seat.User.Send == nil {
 			continue
 		}
 		select {
@@ -759,6 +794,8 @@ func (h *Hub) sendRoomChatAs(room *state.Room, u *state.User, message string) {
 //     seat's CurrentMatch is cleared. Surviving clients see the ROOM_STATE
 //     flip and tear down their own emulation locally. Nobody leaves the room.
 //
+// A PC's local players drop with it.
+//
 // Dropping the room itself happens via ROOM_LEAVE, not MATCH_FINISHED.
 func (h *Hub) handleMatchFinished(c *Client, env protocol.Envelope) {
 	_ = env
@@ -773,14 +810,20 @@ func (h *Hub) handleMatchFinished(c *Client, env protocol.Envelope) {
 	isHost := room.Host != nil && room.Host.ID == c.user.ID
 	slog.Info("match drop", "match", match.ID, "user", c.user.Username, "room", room.ID, "host", isHost)
 
+	group := c.user.Group()
+
 	// Tell the other room members the dropper is out. Informational only —
 	// the dropper's seat row stays in the player list.
-	h.broadcastMatchPeerLeft(room, c.user, match.ID, "dropped")
+	for _, u := range group {
+		h.broadcastMatchPeerLeft(room, u, match.ID, "dropped")
+	}
 
 	// Dropper exits the match but stays seated.
-	c.user.CurrentMatch = nil
-	c.user.SetState(state.UserStateInRoom)
-	h.broadcastPresenceUpdated(c.user)
+	for _, u := range group {
+		u.CurrentMatch = nil
+		u.SetState(state.UserStateInRoom)
+		h.broadcastPresenceUpdated(u)
+	}
 
 	// If the dropper was the one broadcasting, the stream dies with them.
 	if h.broadcasts.endIfBroadcaster(match.ID, c.user.ID) {
@@ -808,7 +851,7 @@ func (h *Hub) handleMatchFinished(c *Client, env protocol.Envelope) {
 	h.broadcasts.endByMatch(match.ID) // host ended the match → stop any broadcast
 	room.SetState(state.RoomStateWaiting)
 	for _, seat := range room.Players {
-		if seat.User == nil || seat.User.ID == c.user.ID {
+		if seat.User == nil || seat.User.Primary() == c.user {
 			continue
 		}
 		seat.User.CurrentMatch = nil
@@ -959,6 +1002,7 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 			ICESupported:     seat.User.ICESupported,
 			InMatch:          seat.User.CurrentMatch != nil,
 			LateJoin:         canLateJoin(seat.User),
+			PeerID:           seat.User.Primary().ID,
 		})
 	}
 	return out

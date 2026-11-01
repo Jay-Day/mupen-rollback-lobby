@@ -137,6 +137,12 @@ func (h *Hub) cleanupClient(c *Client) {
 	// TODO: if user was in a match, send MATCH_PEER_LEFT to peers.
 
 	h.broadcastPresenceRemoved(uid)
+
+	// Local players go with their connection.
+	for _, local := range c.user.Group()[1:] {
+		h.state.RemoveUser(local.ID)
+		h.broadcastPresenceRemoved(local.ID)
+	}
 }
 
 // reapSilentClients force-closes connections that have been silent past
@@ -307,6 +313,7 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		Anonymous:     req.Anonymous,
 		ICESupported:  req.ICESupported,
 		LateJoin:      req.LateJoin,
+		LocalPlayers:  req.LocalPlayers,
 		JoinedAt:      time.Now(),
 		LastSeen:      time.Now(),
 		Send:          c.send,
@@ -327,6 +334,8 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		UDPAnchor:  h.udpPublicAddr,
 		Region:     user.Region,
 		ICE:        h.iceConfig,
+
+		LocalPlayers: true,
 	}
 	c.sendEnvelope(protocol.TypeHelloOK, env.ID, resp)
 
@@ -383,6 +392,10 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleQuickMatchJoin(c, env)
 	case protocol.TypeQuickMatchCancel:
 		h.handleQuickMatchCancel(c, env)
+	case protocol.TypeLocalPlayerAdd:
+		h.handleLocalPlayerAdd(c, env)
+	case protocol.TypeLocalPlayerRemove:
+		h.handleLocalPlayerRemove(c, env)
 	case protocol.TypeMatchAdmit:
 		h.handleMatchAdmit(c, env)
 	case protocol.TypeMatchAdmitSignal:
@@ -483,7 +496,12 @@ func (h *Hub) handlePingProbeRequest(c *Client, env protocol.Envelope) {
 	if err := json.Unmarshal(env.Data, &req); err != nil {
 		return
 	}
-	if req.TargetUserID == c.user.ID {
+	// A local player is reached through its owner's connection.
+	target := h.state.GetUser(req.TargetUserID)
+	if target != nil {
+		target = target.Primary()
+	}
+	if req.TargetUserID == c.user.ID || target == c.user {
 		return
 	}
 	// Dropped silently: a client over its budget is either buggy or hostile,
@@ -492,8 +510,6 @@ func (h *Hub) handlePingProbeRequest(c *Client, env protocol.Envelope) {
 		slog.Debug("ping probe rate limited", "user", c.user.Username, "target", req.TargetUserID)
 		return
 	}
-
-	target := h.state.GetUser(req.TargetUserID)
 
 	resp := protocol.PingProbeReplyPayload{TargetUserID: req.TargetUserID}
 	if target != nil {
@@ -537,8 +553,11 @@ func (h *Hub) handleHeartbeat(c *Client, env protocol.Envelope) {
 	if len(env.Data) > 0 {
 		_ = json.Unmarshal(env.Data, &req)
 	}
+	group := c.user.Group()
 	if req.PingToServer > 0 {
-		c.user.SetPingToServer(req.PingToServer)
+		for _, u := range group {
+			u.SetPingToServer(req.PingToServer)
+		}
 	}
 
 	// AFK presence. Only the two "doing nothing" states flip to away — a
@@ -546,13 +565,15 @@ func (h *Hub) handleHeartbeat(c *Client, env protocol.Envelope) {
 	// set and cleared by their own flows, and an AFK label would clobber
 	// them). Returning from away lands on idle; if they were actually
 	// browsing, the next room-list interaction restores that on its own.
-	switch st := c.user.GetState(); {
-	case req.Away && (st == state.UserStateIdle || st == state.UserStateBrowsing):
-		c.user.SetState(state.UserStateAway)
-		h.broadcastPresenceUpdated(c.user)
-	case !req.Away && st == state.UserStateAway:
-		c.user.SetState(state.UserStateIdle)
-		h.broadcastPresenceUpdated(c.user)
+	for _, u := range group {
+		switch st := u.GetState(); {
+		case req.Away && (st == state.UserStateIdle || st == state.UserStateBrowsing):
+			u.SetState(state.UserStateAway)
+			h.broadcastPresenceUpdated(u)
+		case !req.Away && st == state.UserStateAway:
+			u.SetState(state.UserStateIdle)
+			h.broadcastPresenceUpdated(u)
+		}
 	}
 
 	c.sendEnvelope(protocol.TypeHeartbeatAck, env.ID, protocol.HeartbeatAckResponse{

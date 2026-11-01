@@ -33,6 +33,10 @@ const (
 	TypeMatchFinished            = "MATCH_FINISHED"
 	TypeQuickMatchJoin           = "QUICK_MATCH_JOIN"
 	TypeQuickMatchCancel         = "QUICK_MATCH_CANCEL"
+	// Local players: extra lobby users sharing this connection. Added and
+	// removed from the lobby; they all take seats on room create or join.
+	TypeLocalPlayerAdd    = "LOCAL_PLAYER_ADD"
+	TypeLocalPlayerRemove = "LOCAL_PLAYER_REMOVE"
 	// ICE signaling is relayed over the authenticated lobby WebSocket. The
 	// server never sees gameplay datagrams and is not a TURN relay.
 	TypeICESignal = "ICE_SIGNAL"
@@ -89,6 +93,10 @@ const (
 	TypeMatchBegin        = "MATCH_BEGIN"
 	TypeMatchPeerLeft     = "MATCH_PEER_LEFT"
 	TypeQuickMatchStatus  = "QUICK_MATCH_STATUS"
+	// Replies to LOCAL_PLAYER_ADD / LOCAL_PLAYER_REMOVE, only to the owner.
+	TypeLocalPlayerAdded   = "LOCAL_PLAYER_ADDED"
+	TypeLocalPlayerRemoved = "LOCAL_PLAYER_REMOVED"
+	TypeLocalPlayerFail    = "LOCAL_PLAYER_FAIL"
 	// Late join (server → client). MATCH_ADMIT_BEGIN goes to the match's
 	// players and the joiner; MATCH_ADMIT_FAIL answers a refused MATCH_ADMIT.
 	TypeMatchAdmitBegin = "MATCH_ADMIT_BEGIN"
@@ -132,6 +140,17 @@ const (
 	ReasonAdmitBusy           = "admit_busy"
 	ReasonNotWaiting          = "not_waiting"
 	ReasonJoinerLeft          = "joiner_left"
+	// Local player refusals.
+	ReasonNotEnoughSeats  = "not_enough_seats"  // fewer free seats than players on this PC
+	ReasonNeedsUpdate     = "needs_update"      // this client can't share a room with local players
+	ReasonPeerNeedsUpdate = "peer_needs_update" // someone seated can't share a room with local players
+	ReasonLocalPlayers    = "local_players"     // Quick Match takes one player per PC
+	ReasonInvalidName     = "invalid_name"
+	ReasonNameTaken       = "name_taken"
+	ReasonTooManyPlayers  = "too_many"
+	ReasonInRoom          = "in_room"
+	ReasonSearching       = "searching"
+	ReasonTooFast         = "too_fast"
 )
 
 // -- Request payloads --
@@ -158,6 +177,10 @@ type HelloRequest struct {
 	// Advertises support for joining a running match (MATCH_ADMIT_*). A match
 	// only sizes itself for late joiners when every seated player sets it.
 	LateJoin bool `json:"lateJoin,omitempty"`
+	// Advertises support for local players: the client routes by each seat's
+	// PeerID. A room never mixes clients that don't with a PC holding several
+	// players, since they'd open a connection per seat.
+	LocalPlayers bool `json:"localPlayers,omitempty"`
 }
 
 type HeartbeatRequest struct {
@@ -279,6 +302,16 @@ type QuickMatchJoinRequest struct {
 	Rom RomInfo `json:"rom"`
 }
 
+// LocalPlayerAddRequest adds a player to this connection. Refused while in a
+// room or searching.
+type LocalPlayerAddRequest struct {
+	Name string `json:"name"`
+}
+
+type LocalPlayerRemoveRequest struct {
+	UserID uint64 `json:"userId"`
+}
+
 // -- Response payloads --
 
 type HelloOKResponse struct {
@@ -287,6 +320,22 @@ type HelloOKResponse struct {
 	UDPAnchor  string           `json:"udpAnchor"`
 	Region     string           `json:"region"`
 	ICE        ICEConfiguration `json:"ice"`
+	// LocalPlayers tells the client LOCAL_PLAYER_ADD works here.
+	LocalPlayers bool `json:"localPlayers,omitempty"`
+}
+
+type LocalPlayerAddedPayload struct {
+	UserID uint64 `json:"userId"`
+	Name   string `json:"name"`
+}
+
+type LocalPlayerRemovedPayload struct {
+	UserID uint64 `json:"userId"`
+}
+
+type LocalPlayerFailPayload struct {
+	Name   string `json:"name,omitempty"`
+	Reason string `json:"reason"`
 }
 
 type ICETransportServer struct {
@@ -397,6 +446,9 @@ type RoomSeatPayload struct {
 	// LateJoin mirrors the client's capability so the host's UI can tell
 	// whether it can add this member to a running match.
 	LateJoin bool `json:"lateJoin,omitempty"`
+	// PeerID is the user whose connection this seat plays through: UserID,
+	// unless the seat is a local player. Clients connect per PeerID.
+	PeerID uint64 `json:"peerId,omitempty"`
 }
 
 type RoomStatePayload struct {
@@ -464,6 +516,9 @@ type MatchPeer struct {
 	LocalIP      string `json:"localIp,omitempty"`
 	Slot         int    `json:"slot"`
 	ICESupported bool   `json:"iceSupported,omitempty"`
+	// PeerID is the user whose connection this seat plays through (see
+	// RoomSeatPayload.PeerID).
+	PeerID uint64 `json:"peerId,omitempty"`
 }
 
 type MatchBeginPayload struct {
@@ -503,6 +558,9 @@ type MatchAdmitBeginPayload struct {
 	HostID  uint64      `json:"hostId"`
 	Joiner  MatchPeer   `json:"joiner"`
 	Peers   []MatchPeer `json:"peers"`
+	// Joiners is every player the hand-off adds, Joiner first: a PC joins with
+	// all of its local players.
+	Joiners []MatchPeer `json:"joiners,omitempty"`
 }
 
 // Late join hand-off steps, in order. Each names who may send it and who
@@ -554,6 +612,8 @@ type MatchPeerLeftPayload struct {
 type QuickMatchStatusPayload struct {
 	Searching bool `json:"searching"`
 	QueueSize int  `json:"queueSize"`
+	// Reason says why a QUICK_MATCH_JOIN was refused.
+	Reason string `json:"reason,omitempty"`
 }
 
 // -- Broadcast / spectate payloads --

@@ -84,32 +84,45 @@ func (r *Room) Snapshot() (id, hostID uint64, name string, players, max int, st 
 }
 
 func (r *Room) AddPlayer(u *User) error {
+	return r.AddPlayers([]*User{u})
+}
+
+// AddPlayers seats users together or not at all, so a PC's local players never
+// end up split across a room's last free seat.
+func (r *Room) AddPlayers(users []*User) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.Players) >= r.MaxPlayers {
+	free := r.MaxPlayers - len(r.Players)
+	if free <= 0 {
 		return ErrRoomFull
+	}
+	if len(users) > free {
+		return ErrNotEnoughSeats
 	}
 	// Pick the lowest free slot in [1..MaxPlayers] so leavers' slots get
 	// reused without shifting the surviving players' slot numbers. Slot
 	// stability matters because GekkoNet keys actors by slot at MATCH_BEGIN,
 	// and clients render seat rows by slot.
-	used := make(map[int]bool, len(r.Players))
+	used := make(map[int]bool, len(r.Players)+len(users))
 	for _, seat := range r.Players {
 		used[seat.Slot] = true
 	}
-	slot := 0
-	for s := 1; s <= r.MaxPlayers; s++ {
-		if !used[s] {
-			slot = s
-			break
+	for _, u := range users {
+		slot := 0
+		for s := 1; s <= r.MaxPlayers; s++ {
+			if !used[s] {
+				slot = s
+				break
+			}
 		}
+		used[slot] = true
+		r.Players = append(r.Players, &RoomSeat{
+			User:       u,
+			Slot:       slot,
+			FrameDelay: r.Delay,
+			DelayAuto:  r.DelayAuto,
+		})
 	}
-	r.Players = append(r.Players, &RoomSeat{
-		User:       u,
-		Slot:       slot,
-		FrameDelay: r.Delay,
-		DelayAuto:  r.DelayAuto,
-	})
 	return nil
 }
 
