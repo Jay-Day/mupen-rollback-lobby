@@ -96,6 +96,61 @@ func TestViewerCountTracksJoinStopAndDisconnect(t *testing.T) {
 	waitViewerCount(t, player, matchID, 0)
 }
 
+func waitUserState(t *testing.T, u *state.User, want state.UserState) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for u.GetState() != want {
+		if time.Now().After(deadline) {
+			t.Fatalf("user %s state = %q, want %q", u.Username, u.GetState(), want)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestSpectatingPresenceFollowsSubscription(t *testing.T) {
+	const matchID uint64 = 78
+	broadcaster := &Client{user: &state.User{ID: 20, Username: "host", State: state.UserStatePlaying}, send: make(chan []byte, 64)}
+	idle := &Client{user: &state.User{ID: 21, Username: "idle", State: state.UserStateIdle}, send: make(chan []byte, 64)}
+	seated := &Client{user: &state.User{ID: 22, Username: "seated", State: state.UserStateInRoom}, send: make(chan []byte, 64)}
+	h := &Hub{clients: map[uint64]*Client{
+		broadcaster.user.ID: broadcaster,
+		idle.user.ID:        idle,
+		seated.user.ID:      seated,
+	}}
+	m := &broadcastManager{
+		hub:     h,
+		dir:     t.TempDir(),
+		byMatch: make(map[uint64]*broadcast),
+	}
+	h.broadcasts = m
+	if !m.begin(matchID, 1, broadcaster.user.ID, []uint64{broadcaster.user.ID}, "") {
+		t.Fatal("begin broadcast")
+	}
+	t.Cleanup(func() { m.endByMatch(matchID) })
+
+	m.spectateStart(idle, matchID)
+	m.spectateStart(seated, matchID)
+	waitUserState(t, idle.user, state.UserStateSpectating)
+	waitUserState(t, seated.user, state.UserStateInRoom)
+
+	// Re-subscribing replaces the old pump; its exit must not clear the state.
+	m.spectateStart(idle, matchID)
+	time.Sleep(50 * time.Millisecond)
+	waitUserState(t, idle.user, state.UserStateSpectating)
+
+	m.spectateStop(idle.user.ID, matchID)
+	waitUserState(t, idle.user, state.UserStateIdle)
+
+	m.spectateStart(idle, matchID)
+	waitUserState(t, idle.user, state.UserStateSpectating)
+	if !m.endByMatch(matchID) {
+		t.Fatal("end broadcast")
+	}
+	waitUserState(t, idle.user, state.UserStateIdle)
+	waitUserState(t, seated.user, state.UserStateInRoom)
+	waitUserState(t, broadcaster.user, state.UserStatePlaying)
+}
+
 func TestKeyframeAssemblyAcceptsManyPacedChunks(t *testing.T) {
 	m := &broadcastManager{
 		dir:     t.TempDir(),

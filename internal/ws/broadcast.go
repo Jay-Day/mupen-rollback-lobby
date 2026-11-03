@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
+	"github.com/jay-day/rmgk-lobby/internal/state"
 )
 
 // broadcast is one live stream of a match's .krec. A single player (the
@@ -394,6 +395,9 @@ func (m *broadcastManager) notifyViewerCount(matchID uint64) {
 func (m *broadcastManager) pumpSpectator(b *broadcast, userID uint64, sc *broadcastSpectator) {
 	ticker := time.NewTicker(spectateRetryInterval)
 	defer ticker.Stop()
+	// Every way a subscription ends (stop, match over, read error,
+	// replacement) ends this pump, so presence is reconciled here.
+	defer m.syncSpectatingPresence(userID)
 
 	for {
 		for {
@@ -575,8 +579,48 @@ func (m *broadcastManager) spectateStart(c *Client, matchID uint64) {
 	b.mu.Unlock()
 	m.notifyViewerCount(matchID)
 	go m.pumpSpectator(b, c.user.ID, sc)
+	m.syncSpectatingPresence(c.user.ID)
 	slog.Info("spectate start", "mode", mode, "match", matchID, "user", c.user.Username,
 		"history_bytes", historyBytes)
+}
+
+// syncSpectatingPresence shows a lobby-idle user as "spectating" while they
+// watch any live stream, and returns them to idle once they watch none. Like
+// AFK, it only takes over the "doing nothing" states: a seated, searching or
+// playing user keeps their real state. Call with no broadcast locks held.
+func (m *broadcastManager) syncSpectatingPresence(userID uint64) {
+	if m.hub == nil {
+		return
+	}
+	c := m.hub.getClient(userID)
+	if c == nil {
+		return // disconnected: presence removal already covers them
+	}
+
+	m.mu.Lock()
+	live := make([]*broadcast, 0, len(m.byMatch))
+	for _, b := range m.byMatch {
+		live = append(live, b)
+	}
+	m.mu.Unlock()
+	watching := false
+	for _, b := range live {
+		b.mu.Lock()
+		watching = !b.closed && b.spectators[userID] != nil
+		b.mu.Unlock()
+		if watching {
+			break
+		}
+	}
+
+	switch st := c.user.GetState(); {
+	case watching && (st == state.UserStateIdle || st == state.UserStateBrowsing || st == state.UserStateAway):
+		c.user.SetState(state.UserStateSpectating)
+		m.hub.broadcastPresenceUpdated(c.user)
+	case !watching && st == state.UserStateSpectating:
+		c.user.SetState(state.UserStateIdle)
+		m.hub.broadcastPresenceUpdated(c.user)
+	}
 }
 
 func (m *broadcastManager) spectateStop(userID, matchID uint64) {
