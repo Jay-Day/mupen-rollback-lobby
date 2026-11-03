@@ -440,6 +440,34 @@ func (h *Hub) handleRoomUpdateLiveReplay(c *Client, env protocol.Envelope) {
 	h.broadcastRoomState(room)
 }
 
+// handleRoomUpdateLateJoin turns late join on or off for the room's next
+// match. Host-only and waiting-only: a running match keeps the sizing it
+// started with (see matchSeatsFor).
+func (h *Hub) handleRoomUpdateLateJoin(c *Client, env protocol.Envelope) {
+	var req protocol.RoomUpdateLateJoinRequest
+	if err := json.Unmarshal(env.Data, &req); err != nil {
+		return
+	}
+	room := c.user.CurrentRoom
+	if room == nil {
+		return
+	}
+	if room.Host == nil || room.Host.ID != c.user.ID {
+		slog.Debug("ROOM_UPDATE_LATE_JOIN rejected: not host", "user", c.user.Username, "room", room.ID)
+		return
+	}
+	if room.State != state.RoomStateWaiting || room.QuickMatch {
+		slog.Debug("ROOM_UPDATE_LATE_JOIN rejected: not waiting, or quick match",
+			"room", room.ID, "state", room.State, "quick", room.QuickMatch)
+		return
+	}
+	if !room.SetLateJoinEnabled(req.Enabled) {
+		return
+	}
+	slog.Info("room late join updated", "room", room.ID, "enabled", req.Enabled, "by", c.user.Username)
+	h.broadcastRoomState(room)
+}
+
 // handleRoomSwapSlots lets the host re-order players by exchanging two seats
 // (P1-P4). Host-only and only while the room is waiting. Either slot may be
 // empty (the occupied player just moves to it). Rebroadcasts ROOM_STATE.
@@ -943,6 +971,10 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 	}
 	if r.Host != nil {
 		out.HostID = r.Host.ID
+	}
+	if !r.QuickMatch {
+		enabled := r.LateJoinEnabled
+		out.LateJoinEnabled = &enabled
 	}
 	for _, seat := range r.Players {
 		if seat.User == nil {

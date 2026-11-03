@@ -369,6 +369,8 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleRoomUpdatePrediction(c, env)
 	case protocol.TypeRoomUpdateLiveReplay:
 		h.handleRoomUpdateLiveReplay(c, env)
+	case protocol.TypeRoomUpdateLateJoin:
+		h.handleRoomUpdateLateJoin(c, env)
 	case protocol.TypeRoomSwapSlots:
 		h.handleRoomSwapSlots(c, env)
 	case protocol.TypePingProbeRequest:

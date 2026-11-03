@@ -26,6 +26,7 @@ const (
 	TypeRoomUpdatePlayerSettings = "ROOM_UPDATE_PLAYER_SETTINGS"
 	TypeRoomUpdatePrediction     = "ROOM_UPDATE_PREDICTION"
 	TypeRoomUpdateLiveReplay     = "ROOM_UPDATE_LIVE_REPLAY"
+	TypeRoomUpdateLateJoin       = "ROOM_UPDATE_LATE_JOIN"
 	TypeRoomSwapSlots            = "ROOM_SWAP_SLOTS"
 	TypePingProbeRequest         = "PING_PROBE_REQUEST"
 	TypeMatchConnected           = "MATCH_CONNECTED"
@@ -254,6 +255,13 @@ type RoomUpdateLiveReplayRequest struct {
 	Enabled bool `json:"enabled"`
 }
 
+// RoomUpdateLateJoinRequest changes whether the next match can take players
+// mid-game (MATCH_ADMIT). Host-only and waiting-room-only; the server
+// rebroadcasts the choice in ROOM_STATE as LateJoinEnabled.
+type RoomUpdateLateJoinRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
 type PingProbeRequestPayload struct {
 	TargetUserID uint64 `json:"targetUserId"`
 }
@@ -429,6 +437,11 @@ type RoomStatePayload struct {
 	// CanStartAlone tells the host ROOM_START works with nobody else seated.
 	// Older servers refuse it, so clients need this to offer the option.
 	CanStartAlone bool `json:"canStartAlone,omitempty"`
+	// LateJoinEnabled is the host's choice (ROOM_UPDATE_LATE_JOIN, off in a
+	// new room): only then is the next match sized for late joiners. Sent for
+	// every room that has the option (not quick match rooms), so clients can
+	// tell which rooms offer it.
+	LateJoinEnabled *bool `json:"lateJoinEnabled,omitempty"`
 }
 
 type RoomJoinFailPayload struct {
