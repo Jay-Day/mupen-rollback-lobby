@@ -101,6 +101,10 @@ type broadcastManager struct {
 
 	mu      sync.Mutex
 	byMatch map[uint64]*broadcast
+
+	// presenceMu orders spectating-presence decisions, so one that scanned
+	// subscriptions before a newer change can't land after one that saw it.
+	presenceMu sync.Mutex
 }
 
 func newBroadcastManager(hub *Hub) *broadcastManager {
@@ -592,35 +596,61 @@ func (m *broadcastManager) syncSpectatingPresence(userID uint64) {
 	if m.hub == nil {
 		return
 	}
+	m.presenceMu.Lock()
+	defer m.presenceMu.Unlock()
 	c := m.hub.getClient(userID)
 	if c == nil {
 		return // disconnected: presence removal already covers them
 	}
 
+	var changed bool
+	if m.isWatching(userID) {
+		changed = c.user.CompareAndSetState([]state.UserState{
+			state.UserStateIdle, state.UserStateBrowsing, state.UserStateAway,
+		}, state.UserStateSpectating)
+	} else {
+		changed = c.user.CompareAndSetState([]state.UserState{state.UserStateSpectating}, state.UserStateIdle)
+	}
+	if changed {
+		m.hub.broadcastPresenceUpdated(c.user)
+	}
+}
+
+// settleLobbyState is where a user lands when a room or search ends without
+// them: spectating if they still watch a live stream, idle otherwise. Call
+// with no broadcast locks held.
+func (m *broadcastManager) settleLobbyState(u *state.User) {
+	if m == nil {
+		u.SetState(state.UserStateIdle)
+		return
+	}
+	m.presenceMu.Lock()
+	defer m.presenceMu.Unlock()
+	if m.isWatching(u.ID) {
+		u.SetState(state.UserStateSpectating)
+	} else {
+		u.SetState(state.UserStateIdle)
+	}
+}
+
+// isWatching reports whether userID is subscribed to any live broadcast.
+// Call with no broadcast locks held.
+func (m *broadcastManager) isWatching(userID uint64) bool {
 	m.mu.Lock()
 	live := make([]*broadcast, 0, len(m.byMatch))
 	for _, b := range m.byMatch {
 		live = append(live, b)
 	}
 	m.mu.Unlock()
-	watching := false
 	for _, b := range live {
 		b.mu.Lock()
-		watching = !b.closed && b.spectators[userID] != nil
+		watching := !b.closed && b.spectators[userID] != nil
 		b.mu.Unlock()
 		if watching {
-			break
+			return true
 		}
 	}
-
-	switch st := c.user.GetState(); {
-	case watching && (st == state.UserStateIdle || st == state.UserStateBrowsing || st == state.UserStateAway):
-		c.user.SetState(state.UserStateSpectating)
-		m.hub.broadcastPresenceUpdated(c.user)
-	case !watching && st == state.UserStateSpectating:
-		c.user.SetState(state.UserStateIdle)
-		m.hub.broadcastPresenceUpdated(c.user)
-	}
+	return false
 }
 
 func (m *broadcastManager) spectateStop(userID, matchID uint64) {

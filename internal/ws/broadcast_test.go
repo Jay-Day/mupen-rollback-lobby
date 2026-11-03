@@ -151,6 +151,45 @@ func TestSpectatingPresenceFollowsSubscription(t *testing.T) {
 	waitUserState(t, broadcaster.user, state.UserStatePlaying)
 }
 
+func TestSpectatingPresenceSurvivesLeavingRoom(t *testing.T) {
+	const matchID uint64 = 79
+	broadcaster := &Client{user: &state.User{ID: 23, Username: "host", State: state.UserStatePlaying}, send: make(chan []byte, 64)}
+	viewer := &Client{user: &state.User{ID: 24, Username: "viewer", State: state.UserStateIdle}, send: make(chan []byte, 64)}
+	h := &Hub{clients: map[uint64]*Client{
+		broadcaster.user.ID: broadcaster,
+		viewer.user.ID:      viewer,
+	}}
+	m := &broadcastManager{
+		hub:     h,
+		dir:     t.TempDir(),
+		byMatch: make(map[uint64]*broadcast),
+	}
+	h.broadcasts = m
+	if !m.begin(matchID, 1, broadcaster.user.ID, []uint64{broadcaster.user.ID}, "") {
+		t.Fatal("begin broadcast")
+	}
+	t.Cleanup(func() { m.endByMatch(matchID) })
+
+	m.spectateStart(viewer, matchID)
+	waitUserState(t, viewer.user, state.UserStateSpectating)
+
+	// The client lets a viewer host a room without ending the watch.
+	room := &state.Room{ID: 9, MaxPlayers: 4}
+	if err := h.seatUser(viewer.user, room, state.UserStateHosting); err != nil {
+		t.Fatal(err)
+	}
+	h.unseatUser(viewer.user, room)
+	waitUserState(t, viewer.user, state.UserStateSpectating)
+
+	// With the stream gone, leaving lands on idle.
+	if err := h.seatUser(viewer.user, room, state.UserStateInRoom); err != nil {
+		t.Fatal(err)
+	}
+	m.endByMatch(matchID)
+	h.unseatUser(viewer.user, room)
+	waitUserState(t, viewer.user, state.UserStateIdle)
+}
+
 func TestKeyframeAssemblyAcceptsManyPacedChunks(t *testing.T) {
 	m := &broadcastManager{
 		dir:     t.TempDir(),
