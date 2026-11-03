@@ -68,10 +68,11 @@ func roomAcceptsLateJoin(room *state.Room) bool {
 	return m != nil && m.Seats > 0
 }
 
-// matchSeatsFor sizes a new match: every port the room can seat when all of
-// its players can take part in a late join, otherwise 0 (the older sizing).
+// matchSeatsFor sizes a new match: every port the room can seat when the host
+// turned late join on and all of its players can take part in one, otherwise
+// 0 (the older sizing).
 func matchSeatsFor(room *state.Room) int {
-	if room.QuickMatch || room.MaxPlayers < 2 {
+	if room.QuickMatch || room.MaxPlayers < 2 || !room.LateJoinEnabled {
 		return 0
 	}
 	for _, seat := range room.Players {

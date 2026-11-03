@@ -434,6 +434,8 @@ func TestMatchBeginCarriesEverySeatWithItsPeer(t *testing.T) {
 	f.capableUser("mira")
 	sam := f.addLocal("mira", "sam")
 	room := f.createRoom("host", 4)
+	// Late join is the host's choice, off in a new room.
+	f.send("host", protocol.TypeRoomUpdateLateJoin, protocol.RoomUpdateLateJoinRequest{Enabled: true})
 	f.send("mira", protocol.TypeRoomJoin, protocol.RoomJoinRequest{RoomID: room.ID})
 	f.drain("mira")
 	f.drain("host")
@@ -529,6 +531,8 @@ func TestAddingOneLocalPlayerToARunningMatchAddsThePC(t *testing.T) {
 			f.capableUser("mira")
 			sam := f.addLocal("mira", "sam")
 			room := f.createRoom("host", 4)
+			// Late join is the host's choice, off in a new room.
+			f.send("host", protocol.TypeRoomUpdateLateJoin, protocol.RoomUpdateLateJoinRequest{Enabled: true})
 			f.send("guest", protocol.TypeRoomJoin, protocol.RoomJoinRequest{RoomID: room.ID})
 			f.send("host", protocol.TypeRoomStart, nil)
 			match := f.users["host"].CurrentMatch
@@ -591,6 +595,8 @@ func TestAPCLeavingCancelsItsLateJoin(t *testing.T) {
 	f.capableUser("mira")
 	sam := f.addLocal("mira", "sam")
 	room := f.createRoom("host", 4)
+	// Late join is the host's choice, off in a new room.
+	f.send("host", protocol.TypeRoomUpdateLateJoin, protocol.RoomUpdateLateJoinRequest{Enabled: true})
 	f.send("host", protocol.TypeRoomStart, nil)
 	match := f.users["host"].CurrentMatch
 	f.send("mira", protocol.TypeRoomJoin, protocol.RoomJoinRequest{RoomID: room.ID})

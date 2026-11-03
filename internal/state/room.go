@@ -48,6 +48,7 @@ type Room struct {
 	DelayAuto         bool
 	PredictionAuto    bool
 	LiveReplayEnabled bool // host's room-wide choice for streaming the next match
+	LateJoinEnabled   bool // host's choice: the next match can take players mid-game
 	Visibility        Visibility
 	Password          string
 	// QuickMatch rooms are paired by the matchmaker; nobody joins them mid-match.
@@ -204,6 +205,18 @@ func (r *Room) SetLiveReplayEnabled(enabled bool) bool {
 		return false
 	}
 	r.LiveReplayEnabled = enabled
+	return true
+}
+
+// SetLateJoinEnabled updates the host's late join choice and reports whether
+// it changed. The caller is responsible for host/state checks.
+func (r *Room) SetLateJoinEnabled(enabled bool) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.LateJoinEnabled == enabled {
+		return false
+	}
+	r.LateJoinEnabled = enabled
 	return true
 }
 

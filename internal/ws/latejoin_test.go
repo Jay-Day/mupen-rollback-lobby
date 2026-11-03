@@ -101,16 +101,18 @@ func findEnvelope(envs []protocol.Envelope, msgType string) (protocol.Envelope, 
 	return protocol.Envelope{}, false
 }
 
-// startMatch seats the named users in a fresh room and starts its match.
+// startMatch seats the named users in a fresh room with late join on and
+// starts its match.
 func (f *lateJoinFixture) startMatch(maxPlayers int, names ...string) *state.Match {
 	f.t.Helper()
 	host := f.users[names[0]]
 	f.room = &state.Room{
-		ID:         f.h.state.NextRoomID(),
-		Name:       "room",
-		Host:       host,
-		MaxPlayers: maxPlayers,
-		State:      state.RoomStateWaiting,
+		ID:              f.h.state.NextRoomID(),
+		Name:            "room",
+		Host:            host,
+		MaxPlayers:      maxPlayers,
+		State:           state.RoomStateWaiting,
+		LateJoinEnabled: true,
 	}
 	f.h.state.AddRoom(f.room)
 	for _, name := range names {
@@ -278,15 +280,16 @@ func TestLateJoinHandOff(t *testing.T) {
 	}
 }
 
-// openRoom seats the named users in a fresh waiting room.
+// openRoom seats the named users in a fresh waiting room with late join on.
 func (f *lateJoinFixture) openRoom(maxPlayers int, names ...string) {
 	f.t.Helper()
 	f.room = &state.Room{
-		ID:         f.h.state.NextRoomID(),
-		Name:       "room",
-		Host:       f.users[names[0]],
-		MaxPlayers: maxPlayers,
-		State:      state.RoomStateWaiting,
+		ID:              f.h.state.NextRoomID(),
+		Name:            "room",
+		Host:            f.users[names[0]],
+		MaxPlayers:      maxPlayers,
+		State:           state.RoomStateWaiting,
+		LateJoinEnabled: true,
 	}
 	f.h.state.AddRoom(f.room)
 	for _, name := range names {
@@ -394,5 +397,79 @@ func TestLateJoinAbortsWhenJoinerLeaves(t *testing.T) {
 	f.send("host", protocol.TypeMatchAdmit, protocol.MatchAdmitRequest{MatchID: match.ID, UserID: f.users["other"].ID})
 	if match.CurrentAdmission() != nil {
 		t.Fatal("admitted a joiner on another build")
+	}
+}
+
+func TestLateJoinIsOffUntilTheHostTurnsItOn(t *testing.T) {
+	f := newLateJoinFixture(t, 3)
+	host := f.user("host", true)
+	f.user("guest", true)
+	late := f.user("late", true)
+	f.openRoom(3, "host", "guest")
+	f.room.LateJoinEnabled = false // as handleRoomCreate leaves a new room
+	initial := roomStatePayload(f.room)
+	if initial.LateJoinEnabled == nil || *initial.LateJoinEnabled || initial.CanStartAlone {
+		t.Fatalf("a new room offers late join: %+v", initial)
+	}
+	// On the wire even when off, so clients can tell the room has the option.
+	if raw, _ := json.Marshal(initial); !strings.Contains(string(raw), `"lateJoinEnabled":false`) {
+		t.Fatalf("room state JSON lacks lateJoinEnabled:false: %s", raw)
+	}
+
+	f.send("guest", protocol.TypeRoomUpdateLateJoin, protocol.RoomUpdateLateJoinRequest{Enabled: true})
+	if f.room.LateJoinEnabled {
+		t.Fatal("a non-host turned late join on")
+	}
+	f.drain("host")
+	f.drain("guest")
+	f.send("host", protocol.TypeRoomUpdateLateJoin, protocol.RoomUpdateLateJoinRequest{Enabled: true})
+	if !f.room.LateJoinEnabled {
+		t.Fatal("the host could not turn late join on")
+	}
+	for _, name := range []string{"host", "guest"} {
+		env, ok := findEnvelope(f.drain(name), protocol.TypeRoomState)
+		if !ok {
+			t.Fatalf("%s got no ROOM_STATE", name)
+		}
+		var st protocol.RoomStatePayload
+		if err := json.Unmarshal(env.Data, &st); err != nil {
+			t.Fatal(err)
+		}
+		if st.LateJoinEnabled == nil || !*st.LateJoinEnabled || !st.CanStartAlone {
+			t.Fatalf("%s room state = %+v", name, st)
+		}
+	}
+
+	// Turned off again, the match isn't sized for late joiners and nobody can
+	// enter it.
+	f.send("host", protocol.TypeRoomUpdateLateJoin, protocol.RoomUpdateLateJoinRequest{Enabled: false})
+	f.send("host", protocol.TypeRoomStart, struct{}{})
+	match := host.CurrentMatch
+	if match == nil || match.Seats != 0 {
+		t.Fatalf("match = %+v, want one with seats 0", match)
+	}
+	f.send("late", protocol.TypeRoomJoin, protocol.RoomJoinRequest{RoomID: f.room.ID})
+	if late.CurrentRoom != nil {
+		t.Fatal("joined a running match with late join off")
+	}
+
+	// The running match keeps its sizing.
+	f.send("host", protocol.TypeRoomUpdateLateJoin, protocol.RoomUpdateLateJoinRequest{Enabled: true})
+	if f.room.LateJoinEnabled {
+		t.Fatal("late join changed mid-match")
+	}
+
+	// Quick match rooms don't have the option at all.
+	g := newLateJoinFixture(t, 2)
+	g.user("host", true)
+	g.openRoom(2, "host")
+	g.room.QuickMatch = true
+	g.room.LateJoinEnabled = false
+	if roomStatePayload(g.room).LateJoinEnabled != nil {
+		t.Fatal("a quick match room offers late join")
+	}
+	g.send("host", protocol.TypeRoomUpdateLateJoin, protocol.RoomUpdateLateJoinRequest{Enabled: true})
+	if g.room.LateJoinEnabled {
+		t.Fatal("late join turned on in a quick match room")
 	}
 }
