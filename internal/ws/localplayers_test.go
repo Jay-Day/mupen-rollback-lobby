@@ -480,6 +480,24 @@ func TestStartWithOnlyOnePCsPlayers(t *testing.T) {
 	}
 }
 
+func TestLocalPlayersTakeTheirPCsSaveData(t *testing.T) {
+	f := newLateJoinFixture(t, 4)
+	f.capableUser("mira").SaveData = true
+	sam := f.addLocal("mira", "sam")
+	if !sam.SaveData {
+		t.Fatal("a local player didn't get its PC's save data support")
+	}
+	f.createRoom("mira", 4)
+	f.send("mira", protocol.TypeRoomUpdateSaveData, testSave)
+	f.drain("mira")
+
+	f.send("mira", protocol.TypeRoomStart, nil)
+
+	if _, ok := findEnvelope(f.drain("mira"), protocol.TypeMatchBegin); !ok {
+		t.Fatal("a PC with a local player couldn't start a save data match")
+	}
+}
+
 func TestDroppingTakesThePCOutButKeepsItsSeats(t *testing.T) {
 	f := newLateJoinFixture(t, 4)
 	f.capableUser("host")

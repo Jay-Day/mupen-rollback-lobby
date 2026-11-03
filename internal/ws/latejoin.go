@@ -180,7 +180,8 @@ func (h *Hub) handleMatchAdmit(c *Client, env protocol.Envelope) {
 			return
 		}
 		slot := seatSlotOf(room, u)
-		if !canLateJoin(u) || slot < 1 || slot > match.Seats {
+		if !canLateJoin(u) || slot < 1 || slot > match.Seats ||
+			(room.SaveData != nil && !u.SaveData) {
 			c.sendMatchAdmitFail(req.MatchID, req.UserID, protocol.ReasonLateJoinUnsupported)
 			return
 		}

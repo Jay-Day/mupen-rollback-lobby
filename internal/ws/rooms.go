@@ -278,6 +278,10 @@ func (h *Hub) handleRoomStart(c *Client, env protocol.Envelope) {
 		slog.Debug("ROOM_START rejected: need at least 2 players", "room", room.ID, "count", len(room.Players))
 		return
 	}
+	if !roomPlayersTakeSaveData(room) {
+		slog.Debug("ROOM_START rejected: a player can't play with save data", "room", room.ID)
+		return
+	}
 
 	h.startMatchInRoom(room, c.user.Username)
 }
@@ -493,6 +497,107 @@ func (h *Hub) handleRoomUpdateLateJoin(c *Client, env protocol.Envelope) {
 	h.broadcastRoomState(room)
 }
 
+// Save data limits, matching the client's: the cartridge saves a match can
+// start from, and the most they hold together (EEPROM, SRAM, FlashRAM).
+const (
+	saveDataLabelMax = 64
+	saveDataBytesMax = 0x800 + 0x8000 + 0x20000
+)
+
+var saveDataKinds = map[string]bool{"EEPROM": true, "SRAM": true, "FlashRAM": true}
+
+// handleRoomUpdateSaveData turns save data on or off for the room's next
+// match, with the host's description of the save. Host-only and
+// waiting-only: a running match keeps the save it started from.
+func (h *Hub) handleRoomUpdateSaveData(c *Client, env protocol.Envelope) {
+	var req protocol.RoomUpdateSaveDataRequest
+	if err := json.Unmarshal(env.Data, &req); err != nil {
+		return
+	}
+	room := c.user.CurrentRoom
+	if room == nil {
+		return
+	}
+	if room.Host == nil || room.Host.ID != c.user.ID {
+		slog.Debug("ROOM_UPDATE_SAVE_DATA rejected: not host", "user", c.user.Username, "room", room.ID)
+		return
+	}
+	if room.State != state.RoomStateWaiting || room.QuickMatch {
+		slog.Debug("ROOM_UPDATE_SAVE_DATA rejected: not waiting, or quick match",
+			"room", room.ID, "state", room.State, "quick", room.QuickMatch)
+		return
+	}
+
+	var info *state.SaveDataInfo
+	if req.Enabled {
+		info = &state.SaveDataInfo{
+			Label: clampRunes(strings.TrimSpace(req.Label), saveDataLabelMax),
+			Bytes: req.Bytes,
+			Hash:  req.Hash,
+		}
+		// The label shows in every member's room chat: filter it like a room
+		// name, but keep the save, since the label is only a description.
+		if h.mod != nil {
+			if term, hit := h.mod.FilterMessage(info.Label); hit {
+				slog.Info("save data label blocked by filter", "user", c.user.Username, "term", term)
+				info.Label = "Save data"
+			}
+		}
+		seen := map[string]bool{}
+		for _, kind := range req.Kinds {
+			if saveDataKinds[kind] && !seen[kind] {
+				seen[kind] = true
+				info.Kinds = append(info.Kinds, kind)
+			}
+		}
+		if len(info.Kinds) == 0 || info.Bytes <= 0 || info.Bytes > saveDataBytesMax || !isHex(info.Hash, 16) {
+			slog.Debug("ROOM_UPDATE_SAVE_DATA rejected: bad description", "room", room.ID)
+			return
+		}
+	}
+	if !room.SetSaveData(info) {
+		return
+	}
+	slog.Info("room save data updated", "room", room.ID, "enabled", req.Enabled, "by", c.user.Username)
+	h.broadcastRoomState(room)
+}
+
+// roomPlayersTakeSaveData reports whether every seated player can play the
+// room's next match: with save data on, a client without it would refuse the
+// pre-match manifest and fail the start for everyone.
+func roomPlayersTakeSaveData(room *state.Room) bool {
+	if room.SaveData == nil {
+		return true
+	}
+	for _, seat := range room.Players {
+		if seat.User != nil && !seat.User.SaveData {
+			return false
+		}
+	}
+	return true
+}
+
+// clampRunes caps s at n characters without splitting one.
+func clampRunes(s string, n int) string {
+	runes := []rune(s)
+	if len(runes) > n {
+		return string(runes[:n])
+	}
+	return s
+}
+
+func isHex(s string, length int) bool {
+	if len(s) != length {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
 // handleRoomSwapSlots lets the host re-order players by exchanging two seats
 // (P1-P4). Host-only and only while the room is waiting. Either slot may be
 // empty (the occupied player just moves to it). Rebroadcasts ROOM_STATE.
@@ -657,7 +762,7 @@ func (h *Hub) unseatUser(u *state.User, room *state.Room) {
 	room.RemovePlayer(u.ID)
 	u.CurrentRoom = nil
 	u.CurrentMatch = nil
-	u.SetState(state.UserStateIdle)
+	h.broadcasts.settleLobbyState(u)
 }
 
 // removeUserFromRoom handles the bookkeeping for a user leaving a room
@@ -1034,6 +1139,16 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 	if !r.QuickMatch {
 		enabled := r.LateJoinEnabled
 		out.LateJoinEnabled = &enabled
+		out.SaveData = &protocol.RoomSaveDataPayload{}
+		if r.SaveData != nil {
+			out.SaveData = &protocol.RoomSaveDataPayload{
+				Enabled: true,
+				Label:   r.SaveData.Label,
+				Kinds:   r.SaveData.Kinds,
+				Bytes:   r.SaveData.Bytes,
+				Hash:    r.SaveData.Hash,
+			}
+		}
 	}
 	for _, seat := range r.Players {
 		if seat.User == nil {
@@ -1051,6 +1166,7 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 			InMatch:          seat.User.CurrentMatch != nil,
 			LateJoin:         canLateJoin(seat.User),
 			PeerID:           seat.User.Primary().ID,
+			SaveData:         seat.User.SaveData,
 		})
 	}
 	return out

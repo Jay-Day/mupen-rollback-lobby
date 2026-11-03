@@ -331,6 +331,7 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		Social:        req.Social,
 		SpectatorChat: req.SpectatorChat,
 		RomHashes:     romHashSet(req.RomHashes),
+		SaveData:      req.SaveData,
 		JoinedAt:      time.Now(),
 		LastSeen:      time.Now(),
 		Send:          c.send,
@@ -400,6 +401,8 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleRoomUpdateLiveReplay(c, env)
 	case protocol.TypeRoomUpdateLateJoin:
 		h.handleRoomUpdateLateJoin(c, env)
+	case protocol.TypeRoomUpdateSaveData:
+		h.handleRoomUpdateSaveData(c, env)
 	case protocol.TypeRoomSwapSlots:
 		h.handleRoomSwapSlots(c, env)
 	case protocol.TypePingProbeRequest:
