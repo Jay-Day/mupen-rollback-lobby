@@ -170,7 +170,8 @@ func (h *Hub) handleMatchAdmit(c *Client, env protocol.Envelope) {
 		c.sendMatchAdmitFail(req.MatchID, req.UserID, protocol.ReasonNotWaiting)
 		return
 	}
-	if !canLateJoin(joiner) || joinerSlot < 1 || joinerSlot > match.Seats {
+	if !canLateJoin(joiner) || joinerSlot < 1 || joinerSlot > match.Seats ||
+		(room.SaveData != nil && !joiner.SaveData) {
 		c.sendMatchAdmitFail(req.MatchID, req.UserID, protocol.ReasonLateJoinUnsupported)
 		return
 	}

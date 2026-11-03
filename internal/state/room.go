@@ -51,6 +51,10 @@ type Room struct {
 	Password          string
 	// QuickMatch rooms are paired by the matchmaker; nobody joins them mid-match.
 	QuickMatch bool
+	// SaveData describes the host's pick of starting save for the next match;
+	// nil when the match starts blank. The save itself never passes through
+	// the server.
+	SaveData *SaveDataInfo
 
 	Players    []*RoomSeat
 	Spectators []*User
@@ -198,6 +202,41 @@ func (r *Room) SetLateJoinEnabled(enabled bool) bool {
 		return false
 	}
 	r.LateJoinEnabled = enabled
+	return true
+}
+
+// SaveDataInfo is what the room is told about the host's starting save.
+type SaveDataInfo struct {
+	Label string
+	Kinds []string
+	Bytes int
+	Hash  string
+}
+
+// SetSaveData updates the host's save data choice (nil turns it off) and
+// reports whether it changed. The caller is responsible for host/state checks.
+func (r *Room) SetSaveData(info *SaveDataInfo) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if saveDataEqual(r.SaveData, info) {
+		return false
+	}
+	r.SaveData = info
+	return true
+}
+
+func saveDataEqual(a, b *SaveDataInfo) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if a.Label != b.Label || a.Bytes != b.Bytes || a.Hash != b.Hash || len(a.Kinds) != len(b.Kinds) {
+		return false
+	}
+	for i := range a.Kinds {
+		if a.Kinds[i] != b.Kinds[i] {
+			return false
+		}
+	}
 	return true
 }
 
