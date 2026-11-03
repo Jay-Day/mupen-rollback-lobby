@@ -27,6 +27,7 @@ const (
 	TypeRoomUpdatePrediction     = "ROOM_UPDATE_PREDICTION"
 	TypeRoomUpdateLiveReplay     = "ROOM_UPDATE_LIVE_REPLAY"
 	TypeRoomUpdateLateJoin       = "ROOM_UPDATE_LATE_JOIN"
+	TypeRoomUpdateSaveData       = "ROOM_UPDATE_SAVE_DATA"
 	TypeRoomSwapSlots            = "ROOM_SWAP_SLOTS"
 	TypePingProbeRequest         = "PING_PROBE_REQUEST"
 	TypeMatchConnected           = "MATCH_CONNECTED"
@@ -159,6 +160,9 @@ type HelloRequest struct {
 	// Advertises support for joining a running match (MATCH_ADMIT_*). A match
 	// only sizes itself for late joiners when every seated player sets it.
 	LateJoin bool `json:"lateJoin,omitempty"`
+	// Advertises support for matches that start from the host's save data.
+	// Such a match can't start, or take a late joiner, without it.
+	SaveData bool `json:"saveData,omitempty"`
 }
 
 type HeartbeatRequest struct {
@@ -260,6 +264,27 @@ type RoomUpdateLiveReplayRequest struct {
 // rebroadcasts the choice in ROOM_STATE as LateJoinEnabled.
 type RoomUpdateLateJoinRequest struct {
 	Enabled bool `json:"enabled"`
+}
+
+// RoomUpdateSaveDataRequest turns save data on or off for the room's next
+// match and describes the host's pick. Host-only and waiting-room-only. The
+// save itself goes from the host to the players in the pre-match manifest;
+// the server only relays this description in ROOM_STATE.
+type RoomUpdateSaveDataRequest struct {
+	Enabled bool     `json:"enabled"`
+	Label   string   `json:"label,omitempty"`
+	Kinds   []string `json:"kinds,omitempty"`
+	Bytes   int      `json:"bytes,omitempty"`
+	Hash    string   `json:"hash,omitempty"`
+}
+
+// RoomSaveDataPayload is ROOM_STATE's view of the room's save data option.
+type RoomSaveDataPayload struct {
+	Enabled bool     `json:"enabled"`
+	Label   string   `json:"label,omitempty"`
+	Kinds   []string `json:"kinds,omitempty"`
+	Bytes   int      `json:"bytes,omitempty"`
+	Hash    string   `json:"hash,omitempty"`
 }
 
 type PingProbeRequestPayload struct {
@@ -405,6 +430,9 @@ type RoomSeatPayload struct {
 	// LateJoin mirrors the client's capability so the host's UI can tell
 	// whether it can add this member to a running match.
 	LateJoin bool `json:"lateJoin,omitempty"`
+	// SaveData mirrors the client's capability, so the host can see who
+	// keeps a save data match from starting.
+	SaveData bool `json:"saveData,omitempty"`
 }
 
 type RoomStatePayload struct {
@@ -442,6 +470,10 @@ type RoomStatePayload struct {
 	// every room that has the option (not quick match rooms), so clients can
 	// tell which rooms offer it.
 	LateJoinEnabled *bool `json:"lateJoinEnabled,omitempty"`
+	// SaveData is the host's choice of starting save (ROOM_UPDATE_SAVE_DATA,
+	// off in a new room). Sent for every room that has the option (not quick
+	// match rooms), so clients can tell which rooms offer it.
+	SaveData *RoomSaveDataPayload `json:"saveData,omitempty"`
 }
 
 type RoomJoinFailPayload struct {

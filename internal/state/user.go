@@ -38,6 +38,7 @@ type User struct {
 	Connection    string // self-reported transport medium ("wifi"/"lan"/...)
 	ICESupported  bool   // room-scoped libjuice signaling/transport support
 	LateJoin      bool   // can join a running match (MATCH_ADMIT_*)
+	SaveData      bool   // can play a match that starts from the host's save data
 
 	PingToServer uint16
 
