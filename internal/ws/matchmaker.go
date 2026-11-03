@@ -147,7 +147,7 @@ func (h *Hub) handleQuickMatchCancel(c *Client, env protocol.Envelope) {
 		return
 	}
 	h.matchmaker.remove(c.user.ID)
-	c.user.SetState(state.UserStateIdle)
+	h.broadcasts.settleLobbyState(c.user)
 	h.broadcastPresenceUpdated(c.user)
 
 	c.sendEnvelope(protocol.TypeQuickMatchStatus, env.ID, protocol.QuickMatchStatusPayload{

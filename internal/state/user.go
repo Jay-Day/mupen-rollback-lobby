@@ -65,6 +65,21 @@ func (u *User) SetState(s UserState) {
 	u.State = s
 }
 
+// CompareAndSetState sets to only if the current state is one of from, and
+// reports whether it did. Check and write share one lock, so a concurrent
+// SetState from another flow is never overwritten.
+func (u *User) CompareAndSetState(from []UserState, to UserState) bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	for _, s := range from {
+		if u.State == s {
+			u.State = to
+			return true
+		}
+	}
+	return false
+}
+
 func (u *User) GetUDPEndpoint() (string, uint16) {
 	u.mu.RLock()
 	defer u.mu.RUnlock()

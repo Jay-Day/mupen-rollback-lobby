@@ -724,7 +724,7 @@ func (h *Hub) unseatUser(u *state.User, room *state.Room) {
 	room.RemovePlayer(u.ID)
 	u.CurrentRoom = nil
 	u.CurrentMatch = nil
-	u.SetState(state.UserStateIdle)
+	h.broadcasts.settleLobbyState(u)
 }
 
 // removeUserFromRoom handles the bookkeeping for a user leaving a room

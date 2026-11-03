@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
+	"github.com/jay-day/rmgk-lobby/internal/state"
 )
 
 // broadcast is one live stream of a match's .krec. A single player (the
@@ -100,6 +101,10 @@ type broadcastManager struct {
 
 	mu      sync.Mutex
 	byMatch map[uint64]*broadcast
+
+	// presenceMu orders spectating-presence decisions, so one that scanned
+	// subscriptions before a newer change can't land after one that saw it.
+	presenceMu sync.Mutex
 }
 
 func newBroadcastManager(hub *Hub) *broadcastManager {
@@ -394,6 +399,9 @@ func (m *broadcastManager) notifyViewerCount(matchID uint64) {
 func (m *broadcastManager) pumpSpectator(b *broadcast, userID uint64, sc *broadcastSpectator) {
 	ticker := time.NewTicker(spectateRetryInterval)
 	defer ticker.Stop()
+	// Every way a subscription ends (stop, match over, read error,
+	// replacement) ends this pump, so presence is reconciled here.
+	defer m.syncSpectatingPresence(userID)
 
 	for {
 		for {
@@ -575,8 +583,74 @@ func (m *broadcastManager) spectateStart(c *Client, matchID uint64) {
 	b.mu.Unlock()
 	m.notifyViewerCount(matchID)
 	go m.pumpSpectator(b, c.user.ID, sc)
+	m.syncSpectatingPresence(c.user.ID)
 	slog.Info("spectate start", "mode", mode, "match", matchID, "user", c.user.Username,
 		"history_bytes", historyBytes)
+}
+
+// syncSpectatingPresence shows a lobby-idle user as "spectating" while they
+// watch any live stream, and returns them to idle once they watch none. Like
+// AFK, it only takes over the "doing nothing" states: a seated, searching or
+// playing user keeps their real state. Call with no broadcast locks held.
+func (m *broadcastManager) syncSpectatingPresence(userID uint64) {
+	if m.hub == nil {
+		return
+	}
+	m.presenceMu.Lock()
+	defer m.presenceMu.Unlock()
+	c := m.hub.getClient(userID)
+	if c == nil {
+		return // disconnected: presence removal already covers them
+	}
+
+	var changed bool
+	if m.isWatching(userID) {
+		changed = c.user.CompareAndSetState([]state.UserState{
+			state.UserStateIdle, state.UserStateBrowsing, state.UserStateAway,
+		}, state.UserStateSpectating)
+	} else {
+		changed = c.user.CompareAndSetState([]state.UserState{state.UserStateSpectating}, state.UserStateIdle)
+	}
+	if changed {
+		m.hub.broadcastPresenceUpdated(c.user)
+	}
+}
+
+// settleLobbyState is where a user lands when a room or search ends without
+// them: spectating if they still watch a live stream, idle otherwise. Call
+// with no broadcast locks held.
+func (m *broadcastManager) settleLobbyState(u *state.User) {
+	if m == nil {
+		u.SetState(state.UserStateIdle)
+		return
+	}
+	m.presenceMu.Lock()
+	defer m.presenceMu.Unlock()
+	if m.isWatching(u.ID) {
+		u.SetState(state.UserStateSpectating)
+	} else {
+		u.SetState(state.UserStateIdle)
+	}
+}
+
+// isWatching reports whether userID is subscribed to any live broadcast.
+// Call with no broadcast locks held.
+func (m *broadcastManager) isWatching(userID uint64) bool {
+	m.mu.Lock()
+	live := make([]*broadcast, 0, len(m.byMatch))
+	for _, b := range m.byMatch {
+		live = append(live, b)
+	}
+	m.mu.Unlock()
+	for _, b := range live {
+		b.mu.Lock()
+		watching := !b.closed && b.spectators[userID] != nil
+		b.mu.Unlock()
+		if watching {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *broadcastManager) spectateStop(userID, matchID uint64) {
