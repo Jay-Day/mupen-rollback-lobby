@@ -90,6 +90,8 @@ func TestSaveDataRejectsABadDescription(t *testing.T) {
 	bad := []protocol.RoomUpdateSaveDataRequest{
 		{Enabled: true, Label: "x", Kinds: []string{"Rumble"}, Bytes: 10, Hash: testSave.Hash},
 		{Enabled: true, Label: "x", Kinds: []string{"SRAM"}, Bytes: 0, Hash: testSave.Hash},
+		{Enabled: true, Label: "x", Bytes: 10, Hash: testSave.Hash},
+		{Enabled: true, Label: "x", Bytes: -1, Hash: testSave.Hash},
 		{Enabled: true, Label: "x", Kinds: []string{"SRAM"}, Bytes: saveDataBytesMax + 1, Hash: testSave.Hash},
 		{Enabled: true, Label: "x", Kinds: []string{"SRAM"}, Bytes: 10, Hash: "not-hex-at-all!!"},
 	}
@@ -112,6 +114,31 @@ func TestSaveDataRejectsABadDescription(t *testing.T) {
 	}
 	if strings.Join(f.room.SaveData.Kinds, ",") != "SRAM,EEPROM" {
 		t.Fatalf("kinds = %v", f.room.SaveData.Kinds)
+	}
+}
+
+func TestSaveDataTakesABlankSave(t *testing.T) {
+	f := newLateJoinFixture(t, 2)
+	f.user("host", true).SaveData = true
+	f.user("guest", true).SaveData = true
+	f.openRoom(2, "host", "guest")
+	f.drain("guest")
+
+	// A new cartridge: save data on, nothing in it yet.
+	blank := protocol.RoomUpdateSaveDataRequest{Enabled: true, Label: "Blank save", Hash: testSave.Hash}
+	f.send("host", protocol.TypeRoomUpdateSaveData, blank)
+	if f.room.SaveData == nil || len(f.room.SaveData.Kinds) != 0 || f.room.SaveData.Bytes != 0 {
+		t.Fatalf("blank save = %+v", f.room.SaveData)
+	}
+	st := roomStateFrom(t, f.drain("guest"))
+	if st.SaveData == nil || !st.SaveData.Enabled || st.SaveData.Label != "Blank save" || len(st.SaveData.Kinds) != 0 {
+		t.Fatalf("guest room state save data = %+v", st.SaveData)
+	}
+
+	// The match saved, and the next one continues from it.
+	f.send("host", protocol.TypeRoomUpdateSaveData, testSave)
+	if f.room.SaveData == nil || f.room.SaveData.Bytes != testSave.Bytes {
+		t.Fatalf("save after the blank one = %+v", f.room.SaveData)
 	}
 }
 
