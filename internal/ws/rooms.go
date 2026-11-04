@@ -550,7 +550,10 @@ func (h *Hub) handleRoomUpdateSaveData(c *Client, env protocol.Envelope) {
 				info.Kinds = append(info.Kinds, kind)
 			}
 		}
-		if len(info.Kinds) == 0 || info.Bytes <= 0 || info.Bytes > saveDataBytesMax || !isHex(info.Hash, 16) {
+		// A blank save (a new cartridge) holds no kinds and no bytes; any
+		// other save holds both.
+		if (len(info.Kinds) == 0) != (info.Bytes == 0) || info.Bytes < 0 || info.Bytes > saveDataBytesMax ||
+			!isHex(info.Hash, 16) {
 			slog.Debug("ROOM_UPDATE_SAVE_DATA rejected: bad description", "room", room.ID)
 			return
 		}
