@@ -61,13 +61,15 @@ func TestRankedRoomRefusesLocalPlayers(t *testing.T) {
 	}
 }
 
-// Ranked rooms have no late join or save data: turning ranked on drops both,
-// the options leave the room state, and updates to them are ignored.
+// Ranked rooms have no late join, save data or join limits (ranked has its own
+// maximum ping): turning ranked on drops them, the options leave the room
+// state, and updates to them are ignored.
 func TestRankedRoomHasNoLateJoinOrSaveData(t *testing.T) {
 	f := newRankedFixture(t)
 	host := f.connect("host", true)
 	f.hub.handleRoomCreate(host, envelope(t, protocol.RoomCreateRequest{
 		Name: "casual", Rom: protocol.RomInfo{Name: "Remix", MD5: testRomMD5}, MaxPlayers: 2, Delay: 2, Prediction: 7,
+		MaxPing: 100, WiredOnly: true,
 	}))
 	room := host.user.CurrentRoom
 	if room == nil {
@@ -87,14 +89,22 @@ func TestRankedRoomHasNoLateJoinOrSaveData(t *testing.T) {
 	if room.LateJoinEnabled || room.SaveData != nil {
 		t.Fatalf("ranked room kept late join %v, save data %+v", room.LateJoinEnabled, room.SaveData)
 	}
-	if rs := f.hub.roomState(room); rs.LateJoinEnabled != nil || rs.SaveData != nil {
-		t.Fatalf("ranked room state offers late join %v / save data %+v", rs.LateJoinEnabled, rs.SaveData)
+	if maxPing, wiredOnly := room.JoinLimits(); maxPing != 0 || wiredOnly {
+		t.Fatalf("ranked room kept join limits %d ms, wired only %v", maxPing, wiredOnly)
+	}
+	if rs := f.hub.roomState(room); rs.LateJoinEnabled != nil || rs.SaveData != nil || rs.JoinLimits != nil {
+		t.Fatalf("ranked room state offers late join %v / save data %+v / join limits %+v",
+			rs.LateJoinEnabled, rs.SaveData, rs.JoinLimits)
 	}
 
 	f.hub.handleRoomUpdateLateJoin(host, envelope(t, protocol.RoomUpdateLateJoinRequest{Enabled: true}))
 	f.hub.handleRoomUpdateSaveData(host, envelope(t, saveData))
+	f.hub.handleRoomUpdateJoinLimits(host, envelope(t, protocol.RoomUpdateJoinLimitsRequest{MaxPing: 80, WiredOnly: true}))
 	if room.LateJoinEnabled || room.SaveData != nil || matchSeatsFor(room) != 0 {
 		t.Fatalf("ranked room took late join %v, save data %+v", room.LateJoinEnabled, room.SaveData)
+	}
+	if maxPing, wiredOnly := room.JoinLimits(); maxPing != 0 || wiredOnly {
+		t.Fatalf("ranked room took join limits %d ms, wired only %v", maxPing, wiredOnly)
 	}
 
 	// back to casual, the options return, off
@@ -102,6 +112,9 @@ func TestRankedRoomHasNoLateJoinOrSaveData(t *testing.T) {
 	rs := f.hub.roomState(room)
 	if rs.LateJoinEnabled == nil || *rs.LateJoinEnabled || rs.SaveData == nil || rs.SaveData.Enabled {
 		t.Fatalf("casual again: late join %v, save data %+v", rs.LateJoinEnabled, rs.SaveData)
+	}
+	if rs.JoinLimits == nil || rs.JoinLimits.MaxPing != 0 || rs.JoinLimits.WiredOnly {
+		t.Fatalf("casual again: join limits %+v", rs.JoinLimits)
 	}
 }
 

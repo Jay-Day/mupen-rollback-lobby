@@ -20,7 +20,43 @@ const (
 	maxPacing      = 1 // 1 = smooth/asymmetric
 	minRoomPlayers = 2
 	maxRoomPlayers = 4
+	// The highest a room's join limit can be set to, in ms.
+	maxJoinPing = 1000
 )
+
+// clampJoinPing keeps a requested join limit in range; 0 takes any ping.
+func clampJoinPing(ms int) int {
+	if ms < 0 {
+		return 0
+	}
+	if ms > maxJoinPing {
+		return maxJoinPing
+	}
+	return ms
+}
+
+// onWiFi reports whether u says it plays over a wireless link.
+func onWiFi(u *state.User) bool {
+	return u.Connection == "wifi" || u.Connection == "cellular"
+}
+
+// joinLimitsRefusal says why u's PC may not join room, or "" when it may.
+// pingMs is the joiner's own report (0 when unknown, which passes): the
+// server can't measure the path between two players.
+func joinLimitsRefusal(u *state.User, room *state.Room, pingMs int) string {
+	maxPing, wiredOnly := room.JoinLimits()
+	if wiredOnly {
+		for _, member := range u.Group() {
+			if onWiFi(member) {
+				return protocol.ReasonWiredOnly
+			}
+		}
+	}
+	if maxPing > 0 && pingMs > maxPing {
+		return protocol.ReasonPingTooHigh
+	}
+	return ""
+}
 
 func (h *Hub) handleRoomCreate(c *Client, env protocol.Envelope) {
 	var req protocol.RoomCreateRequest
@@ -92,6 +128,8 @@ func (h *Hub) handleRoomCreate(c *Client, env protocol.Envelope) {
 		PredictionAuto: true,
 		Visibility:     visibility,
 		Password:       req.Password,
+		MaxPing:        clampJoinPing(req.MaxPing),
+		WiredOnly:      req.WiredOnly,
 		Players:        nil,
 		State:          state.RoomStateWaiting,
 		CreatedAt:      time.Now(),
@@ -196,6 +234,11 @@ func (h *Hub) handleRoomJoin(c *Client, env protocol.Envelope) {
 	if room.State != state.RoomStateWaiting &&
 		!(roomAcceptsLateJoin(room) && canLateJoin(c.user)) {
 		c.sendRoomJoinFail(env.ID, protocol.ReasonAlreadyStarted)
+		return
+	}
+	// Before the password: the limits are public, so there's no point asking.
+	if reason := joinLimitsRefusal(c.user, room, req.PingMs); reason != "" {
+		c.sendRoomJoinFail(env.ID, reason)
 		return
 	}
 	if room.Password != "" && req.Password != room.Password {
@@ -527,6 +570,36 @@ func (h *Hub) handleRoomUpdateLateJoin(c *Client, env protocol.Envelope) {
 	}
 	slog.Info("room late join updated", "room", room.ID, "enabled", req.Enabled, "by", c.user.Username)
 	h.broadcastRoomState(room)
+}
+
+// handleRoomUpdateJoinLimits changes who may join the room from now on.
+// Host-only, in any state: it only affects joins, so a running match is no
+// reason to wait. Players already seated stay.
+func (h *Hub) handleRoomUpdateJoinLimits(c *Client, env protocol.Envelope) {
+	var req protocol.RoomUpdateJoinLimitsRequest
+	if err := json.Unmarshal(env.Data, &req); err != nil {
+		return
+	}
+	room := c.user.CurrentRoom
+	if room == nil {
+		return
+	}
+	if room.Host == nil || room.Host.ID != c.user.ID {
+		slog.Debug("ROOM_UPDATE_JOIN_LIMITS rejected: not host", "user", c.user.Username, "room", room.ID)
+		return
+	}
+	// Ranked rooms keep the ranked maximum ping instead.
+	if room.QuickMatch || room.Private || room.GetRanked() != nil {
+		return
+	}
+	maxPing := clampJoinPing(req.MaxPing)
+	if !room.SetJoinLimits(maxPing, req.WiredOnly) {
+		return
+	}
+	slog.Info("room join limits updated", "room", room.ID, "maxPing", maxPing, "wiredOnly", req.WiredOnly,
+		"by", c.user.Username)
+	h.broadcastRoomState(room)
+	h.broadcastRoomList()
 }
 
 // Save data limits, matching the client's: the cartridge saves a match can
@@ -1105,6 +1178,7 @@ func (h *Hub) buildRoomListPayload() protocol.RoomListPayload {
 			hostName = r.Host.Username
 		}
 		matchID, broadcasting, viewerCount := h.broadcasts.roomBroadcast(id)
+		maxPing, wiredOnly := r.JoinLimits()
 		payload.Rooms = append(payload.Rooms, protocol.RoomSummary{
 			ID:       id,
 			Name:     r.Name,
@@ -1126,6 +1200,8 @@ func (h *Hub) buildRoomListPayload() protocol.RoomListPayload {
 			ViewerCount:  viewerCount,
 			LateJoin:     players < max && !r.Private && roomAcceptsLateJoin(r),
 			Private:      r.Private,
+			MaxPing:      maxPing,
+			WiredOnly:    wiredOnly,
 		})
 		if settings := r.GetRanked(); settings != nil {
 			payload.Rooms[len(payload.Rooms)-1].Ranked = true
@@ -1212,6 +1288,10 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 				Bytes:   r.SaveData.Bytes,
 				Hash:    r.SaveData.Hash,
 			}
+		}
+		if !r.Private {
+			maxPing, wiredOnly := r.JoinLimits()
+			out.JoinLimits = &protocol.RoomJoinLimitsPayload{MaxPing: maxPing, WiredOnly: wiredOnly}
 		}
 	}
 	for _, seat := range r.Players {

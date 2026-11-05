@@ -228,6 +228,10 @@ func (h *Hub) handleChallengeSend(c *Client, env protocol.Envelope) {
 		refuse(protocol.ReasonNeedsUpdate)
 		return
 	}
+	if target.ChallengesOff() {
+		refuse(protocol.ChallengeOff)
+		return
+	}
 	if target.Primary().CurrentMatch != nil {
 		refuse(protocol.ChallengeBusy)
 		return
@@ -472,6 +476,29 @@ func (h *Hub) endChallengesFor(u *state.User, result string) {
 		} else {
 			h.finishChallenge(ch, result)
 		}
+	}
+}
+
+// handleChallengeSettings turns challenges to the sender's PC off or back on.
+// Off also ends the ones waiting for an answer there. Everyone hears through
+// presence, so their clients stop offering to send one.
+func (h *Hub) handleChallengeSettings(c *Client, env protocol.Envelope) {
+	var req protocol.ChallengeSettingsRequest
+	if err := json.Unmarshal(env.Data, &req); err != nil {
+		return
+	}
+	if !c.user.SetChallengesOff(req.Off) {
+		return
+	}
+	slog.Info("challenge setting changed", "user", c.user.Username, "off", req.Off)
+	group := c.user.Group()
+	if req.Off {
+		for _, u := range group {
+			h.endChallengesTo(u, protocol.ChallengeOff)
+		}
+	}
+	for _, u := range group {
+		h.broadcastPresenceUpdated(u)
 	}
 }
 

@@ -61,6 +61,11 @@ type Room struct {
 	// nil when the match starts blank. The save itself never passes through
 	// the server.
 	SaveData *SaveDataInfo
+	// Join limits, set by the host: the highest ping to the host a joiner may
+	// have (0 takes any), and whether a PC on Wi-Fi may join at all. Players
+	// already seated stay when they change.
+	MaxPing   int
+	WiredOnly bool
 
 	Players    []*RoomSeat
 	Spectators []*User
@@ -150,6 +155,9 @@ func (r *Room) SetRanked(settings *RankedSettings) {
 		r.MaxPlayers = settings.Players()
 		r.LateJoinEnabled = false
 		r.SaveData = nil
+		// Ranked has its own maximum ping and takes any logged-in player.
+		r.MaxPing = 0
+		r.WiredOnly = false
 	}
 }
 
@@ -301,6 +309,27 @@ func (r *Room) SetLateJoinEnabled(enabled bool) bool {
 		return false
 	}
 	r.LateJoinEnabled = enabled
+	return true
+}
+
+// JoinLimits returns the room's maximum ping (0 for any) and whether it's
+// wired only.
+func (r *Room) JoinLimits() (maxPing int, wiredOnly bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.MaxPing, r.WiredOnly
+}
+
+// SetJoinLimits updates who may join and reports whether it changed. The
+// caller is responsible for host checks and for clamping maxPing.
+func (r *Room) SetJoinLimits(maxPing int, wiredOnly bool) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.MaxPing == maxPing && r.WiredOnly == wiredOnly {
+		return false
+	}
+	r.MaxPing = maxPing
+	r.WiredOnly = wiredOnly
 	return true
 }
 

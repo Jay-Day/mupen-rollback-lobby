@@ -376,6 +376,7 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		SaveData:      req.SaveData,
 		AccountID:     accountID,
 		SessionToken:  auth.token,
+		NoChallenges:  req.NoChallenges,
 		JoinedAt:      time.Now(),
 		LastSeen:      time.Now(),
 		Send:          c.send,
@@ -400,9 +401,10 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		ICE:        h.iceConfig,
 		Ladders:    h.ladderInfo(),
 
-		LocalPlayers:  true,
-		Social:        true,
-		SpectatorChat: true,
+		LocalPlayers:      true,
+		Social:            true,
+		SpectatorChat:     true,
+		ChallengeSettings: true,
 	}
 	if user.Verified() {
 		resp.Account = h.accountInfo(user)
@@ -452,6 +454,8 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleRoomUpdateLateJoin(c, env)
 	case protocol.TypeRoomUpdateSaveData:
 		h.handleRoomUpdateSaveData(c, env)
+	case protocol.TypeRoomUpdateJoinLimits:
+		h.handleRoomUpdateJoinLimits(c, env)
 	case protocol.TypeRoomSwapSlots:
 		h.handleRoomSwapSlots(c, env)
 	case protocol.TypeRoomUpdateRanked:
@@ -504,6 +508,8 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleChallengeRespond(c, env)
 	case protocol.TypeChallengeGames:
 		h.handleChallengeGames(c, env)
+	case protocol.TypeChallengeSettings:
+		h.handleChallengeSettings(c, env)
 	case protocol.TypeMatchAdmit:
 		h.handleMatchAdmit(c, env)
 	case protocol.TypeMatchAdmitSignal:
@@ -842,6 +848,7 @@ func (h *Hub) presenceUserFromState(u *state.User) protocol.PresenceUser {
 		PingToServer:  u.PingToServer,
 		Verified:      u.Verified(),
 		Social:        u.Social,
+		NoChallenges:  u.ChallengesOff(),
 	}
 	// Withholding happens here, at the single choke point every presence
 	// message flows through, so no other broadcast path can leak the country.

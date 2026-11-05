@@ -28,6 +28,7 @@ const (
 	TypeRoomUpdateLiveReplay     = "ROOM_UPDATE_LIVE_REPLAY"
 	TypeRoomUpdateLateJoin       = "ROOM_UPDATE_LATE_JOIN"
 	TypeRoomUpdateSaveData       = "ROOM_UPDATE_SAVE_DATA"
+	TypeRoomUpdateJoinLimits     = "ROOM_UPDATE_JOIN_LIMITS"
 	TypeRoomSwapSlots            = "ROOM_SWAP_SLOTS"
 	// Host-only, waiting-room-only: turn ranked on/off and pick its settings.
 	TypeRoomUpdateRanked = "ROOM_UPDATE_RANKED"
@@ -121,6 +122,9 @@ const (
 	TypeChallengeCancel  = "CHALLENGE_CANCEL"
 	TypeChallengeRespond = "CHALLENGE_RESPOND"
 	TypeChallengeGames   = "CHALLENGE_GAMES" // which of my games does this player have?
+	// Whether this PC takes challenges at all. Everyone sees the choice in
+	// presence, so nobody sends one that would only be refused.
+	TypeChallengeSettings = "CHALLENGE_SETTINGS"
 )
 
 // Server → Client message types
@@ -270,6 +274,10 @@ const (
 	ReasonSamePC   = "same_pc"
 	// Refused joining a room made for a challenge.
 	ReasonPrivateRoom = "private_room"
+	// Refused by the room's join limits: someone on the joining PC is on
+	// Wi-Fi, or the joiner's ping to the host is over the room's maximum.
+	ReasonWiredOnly   = "wired_only"
+	ReasonPingTooHigh = "ping_too_high"
 )
 
 // How a challenge ended, or why CHALLENGE_SEND was refused (ReasonNeedsUpdate
@@ -280,12 +288,13 @@ const (
 	ChallengeDeclined    = "declined"
 	ChallengeTimedOut    = "timeout"
 	ChallengeCancelled   = "cancelled"
-	ChallengeBusy        = "busy"         // in a match
-	ChallengeUnavailable = "unavailable"  // can't happen right now
-	ChallengeNoGame      = "no_game"      // they don't have the game
-	ChallengeCooldown    = "cooldown"     // they declined you moments ago
-	ChallengePending     = "pending"      // you already have one out
-	ChallengeBlocked     = "blocked_note" // the message hit the chat filter
+	ChallengeBusy        = "busy"           // in a match
+	ChallengeUnavailable = "unavailable"    // can't happen right now
+	ChallengeNoGame      = "no_game"        // they don't have the game
+	ChallengeCooldown    = "cooldown"       // they declined you moments ago
+	ChallengePending     = "pending"        // you already have one out
+	ChallengeBlocked     = "blocked_note"   // the message hit the chat filter
+	ChallengeOff         = "challenges_off" // they don't take challenges
 )
 
 // -- Request payloads --
@@ -326,6 +335,9 @@ type HelloRequest struct {
 	// Advertises support for matches that start from the host's save data.
 	// Such a match can't start, or take a late joiner, without it.
 	SaveData bool `json:"saveData,omitempty"`
+	// This PC doesn't take challenges (CHALLENGE_SETTINGS changes it later).
+	// Sent here too, so no challenge can slip in before the first update.
+	NoChallenges bool `json:"noChallenges,omitempty"`
 	// Optional account authentication; guests omit it.
 	Auth *HelloAuth `json:"auth,omitempty"`
 	// Ranked game modules the client has installed.
@@ -436,6 +448,9 @@ type RoomCreateRequest struct {
 	Pacing     int     `json:"pacing,omitempty"`
 	Visibility string  `json:"visibility,omitempty"`
 	Password   string  `json:"password,omitempty"`
+	// Join limits (see RoomJoinLimitsPayload). Zero and false take anyone.
+	MaxPing   int  `json:"maxPing,omitempty"`
+	WiredOnly bool `json:"wiredOnly,omitempty"`
 	// Optional: create the room as ranked.
 	Ranked *RankedRoomRequest `json:"ranked,omitempty"`
 }
@@ -464,6 +479,10 @@ type RomInfo struct {
 type RoomJoinRequest struct {
 	RoomID   uint64 `json:"roomId"`
 	Password string `json:"password,omitempty"`
+	// The joiner's ping to the host in ms: measured if it can be, otherwise
+	// estimated from regions. Zero when unknown. Only a room with a maximum
+	// ping reads it; the server has no way to measure it itself.
+	PingMs int `json:"pingMs,omitempty"`
 }
 
 type RoomKickRequest struct {
@@ -538,6 +557,21 @@ type RoomUpdateSaveDataRequest struct {
 	Kinds   []string `json:"kinds,omitempty"`
 	Bytes   int      `json:"bytes,omitempty"`
 	Hash    string   `json:"hash,omitempty"`
+}
+
+// RoomUpdateJoinLimitsRequest changes who may join the room from now on.
+// Host-only, in any state; players already seated stay.
+type RoomUpdateJoinLimitsRequest struct {
+	MaxPing   int  `json:"maxPing"`
+	WiredOnly bool `json:"wiredOnly"`
+}
+
+// RoomJoinLimitsPayload is ROOM_STATE's view of the room's join limits.
+// MaxPing is the highest ping to the host a joiner may have, in ms (0 takes
+// any); WiredOnly turns away a PC whose player is on Wi-Fi or cellular.
+type RoomJoinLimitsPayload struct {
+	MaxPing   int  `json:"maxPing"`
+	WiredOnly bool `json:"wiredOnly"`
 }
 
 // RoomSaveDataPayload is ROOM_STATE's view of the room's save data option.
@@ -755,6 +789,12 @@ type ChallengeGamesRequest struct {
 	ToUserID uint64 `json:"toUserId"`
 }
 
+// ChallengeSettingsRequest turns challenges to this PC off or back on. Off
+// also ends the ones waiting for an answer.
+type ChallengeSettingsRequest struct {
+	Off bool `json:"off"`
+}
+
 // -- Response payloads --
 
 type HelloOKResponse struct {
@@ -771,6 +811,8 @@ type HelloOKResponse struct {
 	Social bool `json:"social,omitempty"`
 	// SpectatorChat tells the client a match's players share its spectators' chat here.
 	SpectatorChat bool `json:"spectatorChat,omitempty"`
+	// ChallengeSettings tells the client CHALLENGE_SETTINGS works here.
+	ChallengeSettings bool `json:"challengeSettings,omitempty"`
 	// Present when the HELLO authenticated an account; Username is then the
 	// account's registered spelling.
 	Account *AccountInfo `json:"account,omitempty"`
@@ -907,6 +949,7 @@ type PresenceUser struct {
 	WatchingMatchID uint64 `json:"watchingMatchId,omitempty"` // live replay watched while state == spectating
 	Verified        bool   `json:"verified,omitempty"`        // logged into a registered account
 	Social          bool   `json:"social,omitempty"`          // can receive private messages and challenges
+	NoChallenges    bool   `json:"noChallenges,omitempty"`    // their PC doesn't take challenges
 }
 
 type PresenceFullPayload struct {
@@ -945,6 +988,9 @@ type RoomSummary struct {
 	Ladder   string `json:"ladder,omitempty"` // ladder id while ranked
 	// Private rooms were made for a challenge and refuse ROOM_JOIN.
 	Private bool `json:"private,omitempty"`
+	// Join limits, so the list can say who a room takes before anyone tries.
+	MaxPing   int  `json:"maxPing,omitempty"`
+	WiredOnly bool `json:"wiredOnly,omitempty"`
 }
 
 type RoomListPayload struct {
@@ -1020,6 +1066,10 @@ type RoomStatePayload struct {
 	// off in a new room). Sent for every room that has the option (not quick
 	// match or ranked rooms), so clients can tell which rooms offer it.
 	SaveData *RoomSaveDataPayload `json:"saveData,omitempty"`
+	// JoinLimits says who may join (ROOM_UPDATE_JOIN_LIMITS). Sent for every
+	// room that has them (not quick match rooms), so clients can tell which
+	// rooms offer the option.
+	JoinLimits *RoomJoinLimitsPayload `json:"joinLimits,omitempty"`
 	// Present while the room is ranked.
 	Ranked *RankedRoomState `json:"ranked,omitempty"`
 }
