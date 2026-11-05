@@ -45,6 +45,11 @@ type broadcast struct {
 	kfAsmGot    int
 	kfAsmBytes  int
 	kfAsmChunks [][]byte
+
+	// Ranked write journal chunks, all kept: every spectator needs the whole
+	// journal (a keyframe joiner skips what precedes its keyframe itself).
+	journal      [][]byte
+	journalBytes int
 }
 
 // broadcastSpectator owns an ordered cursor into the broadcast spool. Logical
@@ -65,6 +70,7 @@ type broadcastSpectator struct {
 	keyframeFrame int
 	keyframeData  []byte
 	keyframeChunk int
+	journalSent   int // journal chunks delivered
 	beginSent     bool
 	stopped       bool // protected by broadcast.mu
 }
@@ -84,6 +90,12 @@ const (
 // an hours-long 4-player match is a few MB — so hitting this means a hostile or
 // runaway broadcaster, and the broadcast is ended rather than filling the disk.
 const maxSpoolBytes = 64 << 20
+
+// Write journal limits. A ranked set's journal is a few hundred KB at most.
+const (
+	maxJournalChunkBytes = 512 << 10
+	maxJournalBytes      = 16 << 20
+)
 
 // History is paced through the ordinary client send queue. Smaller chunks cap
 // queued replay memory, while the reserve prevents a large catch-up from
@@ -227,6 +239,40 @@ func (m *broadcastManager) data(senderID, matchID uint64, b64 string, frame int)
 		}
 	}
 	b.mu.Unlock()
+}
+
+// journal appends a write journal chunk and wakes the spectators' pumps,
+// which deliver journal chunks ahead of further krec data. Only the
+// registered broadcaster may write.
+func (m *broadcastManager) journal(senderID, matchID uint64, b64 string) {
+	m.mu.Lock()
+	b := m.byMatch[matchID]
+	m.mu.Unlock()
+	if b == nil {
+		return
+	}
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil || len(raw) == 0 || len(raw) > maxJournalChunkBytes {
+		return
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed || b.broadcasterID != senderID {
+		return
+	}
+	if b.journalBytes+len(raw) > maxJournalBytes {
+		slog.Warn("broadcast: journal size limit hit, dropping chunk", "match", matchID)
+		return
+	}
+	b.journal = append(b.journal, raw)
+	b.journalBytes += len(raw)
+	for _, sc := range b.spectators {
+		select {
+		case sc.wake <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // keyframe reassembles a chunked savestate keyframe uploaded by the broadcaster
@@ -471,6 +517,21 @@ func (m *broadcastManager) pumpSpectatorChunk(b *broadcast, userID uint64, sc *b
 		sc.keyframeData = nil
 	}
 
+	// Journal chunks go first: they must reach the spectator before the
+	// inputs of the frames they apply to.
+	if sc.journalSent < len(b.journal) {
+		if !sc.client.trySendEnvelopeReserved(protocol.TypeSpectateJournal, "",
+			protocol.SpectateJournalPayload{
+				MatchID: b.matchID,
+				Seq:     sc.journalSent,
+				Data:    base64.StdEncoding.EncodeToString(b.journal[sc.journalSent]),
+			}, spectateQueueReserve) {
+			return false, true
+		}
+		sc.journalSent++
+		return true, true
+	}
+
 	// A keyframe stream first reproduces the krec header, then jumps its spool
 	// cursor to the keyframe's input record. Its public stream offset remains
 	// contiguous across that intentional source-file jump.
@@ -591,7 +652,8 @@ func (m *broadcastManager) spectateStart(c *Client, matchID uint64) {
 // syncSpectatingPresence shows a lobby-idle user as "spectating" while they
 // watch any live stream, and returns them to idle once they watch none. Like
 // AFK, it only takes over the "doing nothing" states: a seated, searching or
-// playing user keeps their real state. Call with no broadcast locks held.
+// playing user keeps their real state. Local players watch with the PC they
+// sit at, as they go AFK with it. Call with no broadcast locks held.
 func (m *broadcastManager) syncSpectatingPresence(userID uint64) {
 	if m.hub == nil {
 		return
@@ -603,16 +665,19 @@ func (m *broadcastManager) syncSpectatingPresence(userID uint64) {
 		return // disconnected: presence removal already covers them
 	}
 
-	var changed bool
-	if m.isWatching(userID) {
-		changed = c.user.CompareAndSetState([]state.UserState{
-			state.UserStateIdle, state.UserStateBrowsing, state.UserStateAway,
-		}, state.UserStateSpectating)
-	} else {
-		changed = c.user.CompareAndSetState([]state.UserState{state.UserStateSpectating}, state.UserStateIdle)
-	}
-	if changed {
-		m.hub.broadcastPresenceUpdated(c.user)
+	watching := m.watchedMatch(userID)
+	for _, u := range c.user.Group() {
+		var changed bool
+		if watching != 0 {
+			changed = u.CompareAndSetState([]state.UserState{
+				state.UserStateIdle, state.UserStateBrowsing, state.UserStateAway,
+			}, state.UserStateSpectating)
+		} else {
+			changed = u.CompareAndSetState([]state.UserState{state.UserStateSpectating}, state.UserStateIdle)
+		}
+		if u.SetWatchingMatch(watching) || changed {
+			m.hub.broadcastPresenceUpdated(u)
+		}
 	}
 }
 
@@ -626,31 +691,34 @@ func (m *broadcastManager) settleLobbyState(u *state.User) {
 	}
 	m.presenceMu.Lock()
 	defer m.presenceMu.Unlock()
-	if m.isWatching(u.ID) {
+	watching := m.watchedMatch(u.Primary().ID)
+	u.SetWatchingMatch(watching)
+	if watching != 0 {
 		u.SetState(state.UserStateSpectating)
 	} else {
 		u.SetState(state.UserStateIdle)
 	}
 }
 
-// isWatching reports whether userID is subscribed to any live broadcast.
-// Call with no broadcast locks held.
-func (m *broadcastManager) isWatching(userID uint64) bool {
+// watchedMatch returns the live broadcast userID is subscribed to, the newest
+// if several, or 0 for none. Call with no broadcast locks held.
+func (m *broadcastManager) watchedMatch(userID uint64) uint64 {
 	m.mu.Lock()
 	live := make([]*broadcast, 0, len(m.byMatch))
 	for _, b := range m.byMatch {
 		live = append(live, b)
 	}
 	m.mu.Unlock()
+	var newest uint64
 	for _, b := range live {
 		b.mu.Lock()
 		watching := !b.closed && b.spectators[userID] != nil
 		b.mu.Unlock()
-		if watching {
-			return true
+		if watching && b.matchID > newest {
+			newest = b.matchID
 		}
 	}
-	return false
+	return newest
 }
 
 func (m *broadcastManager) spectateStop(userID, matchID uint64) {
@@ -673,33 +741,76 @@ func (m *broadcastManager) spectateStop(userID, matchID uint64) {
 	}
 }
 
-// spectatorChat relays a chat line from a spectator to every viewer of the
-// broadcast they're watching, the sender included so it echoes like room chat.
-// The match's players aren't spectators, so they never receive it. A sender
-// who isn't watching anything is ignored.
-func (m *broadcastManager) spectatorChat(senderID uint64, payload protocol.ChatMsgPayload) {
-	m.mu.Lock()
-	all := make([]*broadcast, 0, len(m.byMatch))
-	for _, b := range m.byMatch {
-		all = append(all, b)
+// spectatorChat relays a chat line to everyone on a live replay's chat: its
+// viewers, the sender included so it echoes like room chat, and the match's
+// players, who can answer. A viewer whose client still says the players can't read
+// this keeps that promise: their lines reach the other viewers only. A sender who's
+// neither watching nor playing a match being broadcast is ignored.
+func (m *broadcastManager) spectatorChat(c *Client, payload protocol.ChatMsgPayload) {
+	b, fromPlayer := m.chatBroadcastOf(c)
+	if b == nil {
+		return
 	}
-	m.mu.Unlock()
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return
+	}
+	recipients := make(map[*Client]struct{}, len(b.spectators)+maxRoomPlayers)
+	for _, sc := range b.spectators {
+		recipients[sc.client] = struct{}{}
+	}
+	b.mu.Unlock()
+	if c.user.SpectatorChat {
+		for _, player := range m.chatPlayersOf(b) {
+			recipients[player] = struct{}{}
+		}
+	}
+	payload.FromPlayer = fromPlayer
+	for recipient := range recipients {
+		recipient.sendEnvelope(protocol.TypeChatMsg, "", payload)
+	}
+}
 
-	for _, b := range all {
+// chatBroadcastOf finds the broadcast whose chat c is on, and whether c is on it as
+// one of the match's players rather than as a viewer.
+func (m *broadcastManager) chatBroadcastOf(c *Client) (*broadcast, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if match := c.user.CurrentMatch; match != nil && c.user.SpectatorChat {
+		if b := m.byMatch[match.ID]; b != nil {
+			return b, true
+		}
+	}
+	for _, b := range m.byMatch {
 		b.mu.Lock()
-		if b.closed || b.spectators[senderID] == nil {
-			b.mu.Unlock()
+		watching := b.spectators[c.user.ID] != nil
+		b.mu.Unlock()
+		if watching {
+			return b, false
+		}
+	}
+	return nil, false
+}
+
+// chatPlayersOf returns the connections playing b's match right now whose clients
+// can show its chat. Local players go through their owner's connection.
+func (m *broadcastManager) chatPlayersOf(b *broadcast) []*Client {
+	room := m.hub.state.GetRoom(b.roomID)
+	if room == nil {
+		return nil
+	}
+	var out []*Client
+	for _, seat := range room.Players {
+		u := seat.User
+		if u == nil || u.Owner != nil || !u.SpectatorChat || u.CurrentMatch == nil || u.CurrentMatch.ID != b.matchID {
 			continue
 		}
-		viewers := make([]*Client, 0, len(b.spectators))
-		for _, sc := range b.spectators {
-			viewers = append(viewers, sc.client)
-		}
-		b.mu.Unlock()
-		for _, c := range viewers {
-			c.sendEnvelope(protocol.TypeChatMsg, "", payload)
+		if player := m.hub.getClient(u.ID); player != nil {
+			out = append(out, player)
 		}
 	}
+	return out
 }
 
 // endByMatch ends a broadcast regardless of who triggered it (match is over).
@@ -871,6 +982,14 @@ func (h *Hub) handleBroadcastKeyframe(c *Client, env protocol.Envelope) {
 		return
 	}
 	h.broadcasts.keyframe(c.user.ID, req.MatchID, req.Frame, req.ChunkIndex, req.ChunkCount, req.Data)
+}
+
+func (h *Hub) handleBroadcastJournal(c *Client, env protocol.Envelope) {
+	var req protocol.BroadcastJournalRequest
+	if err := json.Unmarshal(env.Data, &req); err != nil {
+		return
+	}
+	h.broadcasts.journal(c.user.ID, req.MatchID, req.Data)
 }
 
 func (h *Hub) handleBroadcastEnd(c *Client, env protocol.Envelope) {

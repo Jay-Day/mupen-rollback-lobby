@@ -96,6 +96,79 @@ func TestViewerCountTracksJoinStopAndDisconnect(t *testing.T) {
 	waitViewerCount(t, player, matchID, 0)
 }
 
+// waitPresence returns the next presence update for userID that c receives.
+func waitPresence(t *testing.T, c *Client, userID uint64) protocol.PresenceUser {
+	t.Helper()
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case raw := <-c.send:
+			var env protocol.Envelope
+			if err := json.Unmarshal(raw, &env); err != nil {
+				t.Fatalf("decode envelope: %v", err)
+			}
+			if env.Type != protocol.TypePresenceDelta {
+				continue
+			}
+			var payload protocol.PresenceDeltaPayload
+			if err := json.Unmarshal(env.Data, &payload); err != nil {
+				t.Fatalf("decode presence payload: %v", err)
+			}
+			for _, u := range payload.Updated {
+				if u.ID == userID {
+					return u
+				}
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for presence of user %d", userID)
+		}
+	}
+}
+
+func TestSpectatorPresenceShowsWatchedMatch(t *testing.T) {
+	const matchID uint64 = 78
+	broadcaster := &Client{user: &state.User{ID: 20, Username: "host", State: state.UserStatePlaying}, send: make(chan []byte, 64)}
+	viewer := &Client{user: &state.User{ID: 21, Username: "viewer", State: state.UserStateIdle}, send: make(chan []byte, 64)}
+	seated := &Client{user: &state.User{ID: 22, Username: "seated", State: state.UserStateInRoom}, send: make(chan []byte, 64)}
+	browser := &Client{user: &state.User{ID: 23, Username: "browser", State: state.UserStateIdle}, send: make(chan []byte, 64)}
+	h := &Hub{clients: map[uint64]*Client{
+		broadcaster.user.ID: broadcaster,
+		viewer.user.ID:      viewer,
+		seated.user.ID:      seated,
+		browser.user.ID:     browser,
+	}}
+	m := &broadcastManager{hub: h, dir: t.TempDir(), byMatch: make(map[uint64]*broadcast)}
+	h.broadcasts = m
+	if !m.begin(matchID, 1, broadcaster.user.ID, []uint64{broadcaster.user.ID}, "") {
+		t.Fatal("begin broadcast")
+	}
+
+	m.spectateStart(viewer, matchID)
+	if got := waitPresence(t, browser, viewer.user.ID); got.State != string(state.UserStateSpectating) || got.WatchingMatchID != matchID {
+		t.Fatalf("after start: state %q watching %d, want spectating %d", got.State, got.WatchingMatchID, matchID)
+	}
+
+	m.spectateStop(viewer.user.ID, matchID)
+	if got := waitPresence(t, browser, viewer.user.ID); got.State != string(state.UserStateIdle) || got.WatchingMatchID != 0 {
+		t.Fatalf("after stop: state %q watching %d, want idle", got.State, got.WatchingMatchID)
+	}
+
+	// a seated user keeps their state while watching
+	m.spectateStart(seated, matchID)
+	if st := seated.user.GetState(); st != state.UserStateInRoom {
+		t.Fatalf("seated spectator state = %q, want in_room", st)
+	}
+
+	m.spectateStart(viewer, matchID)
+	waitPresence(t, browser, viewer.user.ID)
+	if !m.endByMatch(matchID) {
+		t.Fatal("end broadcast")
+	}
+	if got := waitPresence(t, browser, viewer.user.ID); got.State != string(state.UserStateIdle) || got.WatchingMatchID != 0 {
+		t.Fatalf("after broadcast end: state %q watching %d, want idle", got.State, got.WatchingMatchID)
+	}
+}
+
 func waitUserState(t *testing.T, u *state.User, want state.UserState) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
@@ -188,6 +261,49 @@ func TestSpectatingPresenceSurvivesLeavingRoom(t *testing.T) {
 	m.endByMatch(matchID)
 	h.unseatUser(viewer.user, room)
 	waitUserState(t, viewer.user, state.UserStateIdle)
+}
+
+func TestSpectatingPresenceCoversLocalPlayers(t *testing.T) {
+	const matchID uint64 = 80
+	broadcaster := &Client{user: &state.User{ID: 25, Username: "host", State: state.UserStatePlaying}, send: make(chan []byte, 64)}
+	viewer := &Client{user: &state.User{ID: 26, Username: "viewer", State: state.UserStateIdle}, send: make(chan []byte, 64)}
+	local := &state.User{ID: 27, Username: "couch", State: state.UserStateIdle}
+	viewer.user.AddLocal(local)
+	h := &Hub{clients: map[uint64]*Client{
+		broadcaster.user.ID: broadcaster,
+		viewer.user.ID:      viewer,
+	}}
+	m := &broadcastManager{
+		hub:     h,
+		dir:     t.TempDir(),
+		byMatch: make(map[uint64]*broadcast),
+	}
+	h.broadcasts = m
+	if !m.begin(matchID, 1, broadcaster.user.ID, []uint64{broadcaster.user.ID}, "") {
+		t.Fatal("begin broadcast")
+	}
+	t.Cleanup(func() { m.endByMatch(matchID) })
+
+	// The PC watches, so everyone sitting at it does.
+	m.spectateStart(viewer, matchID)
+	waitUserState(t, viewer.user, state.UserStateSpectating)
+	waitUserState(t, local, state.UserStateSpectating)
+
+	// Leaving a room lands every seat of the PC back on spectating.
+	room := &state.Room{ID: 10, MaxPlayers: 4}
+	if err := h.seatUser(viewer.user, room, state.UserStateHosting); err != nil {
+		t.Fatal(err)
+	}
+	waitUserState(t, local, state.UserStateInRoom)
+	for _, u := range viewer.user.Group() {
+		h.unseatUser(u, room)
+	}
+	waitUserState(t, viewer.user, state.UserStateSpectating)
+	waitUserState(t, local, state.UserStateSpectating)
+
+	m.spectateStop(viewer.user.ID, matchID)
+	waitUserState(t, viewer.user, state.UserStateIdle)
+	waitUserState(t, local, state.UserStateIdle)
 }
 
 func TestKeyframeAssemblyAcceptsManyPacedChunks(t *testing.T) {
@@ -533,7 +649,8 @@ func TestSpectatorChatReachesOnlyThatBroadcastsViewers(t *testing.T) {
 	send(viewer1, "nice combo")
 	expect(map[*Client]bool{viewer1: true, viewer2: true}, "nice combo")
 
-	// Players, lobby users and viewers of another match can't post into it.
+	// Players on clients that can't show it, lobby users and viewers of another
+	// match can't post into it.
 	send(host, "from the match")
 	send(player, "from the match")
 	send(browser, "from the lobby")
@@ -542,4 +659,75 @@ func TestSpectatorChatReachesOnlyThatBroadcastsViewers(t *testing.T) {
 	m.spectateStop(viewer2.user.ID, matchA)
 	send(viewer1, "anyone here?")
 	expect(map[*Client]bool{viewer1: true}, "anyone here?")
+}
+
+func TestSpectatorReceivesJournalBeforeData(t *testing.T) {
+	m := &broadcastManager{
+		dir:     t.TempDir(),
+		byMatch: make(map[uint64]*broadcast),
+	}
+	const matchID uint64 = 12
+	const broadcasterID uint64 = 22
+	if !m.begin(matchID, 1, broadcasterID, nil, "") {
+		t.Fatal("begin broadcast")
+	}
+	b := m.byMatch[matchID]
+	t.Cleanup(func() {
+		m.spectateStop(33, matchID)
+		b.mu.Lock()
+		_ = b.file.Close()
+		_ = os.Remove(b.path)
+		b.mu.Unlock()
+	})
+
+	enc := base64.StdEncoding.EncodeToString
+	m.journal(broadcasterID, matchID, enc([]byte("journal-0")))
+	m.journal(99, matchID, enc([]byte("not the broadcaster")))
+	m.data(broadcasterID, matchID, enc([]byte("KRC1-history")), 10)
+
+	c := &Client{user: &state.User{ID: 33, Username: "viewer"}, send: make(chan []byte, 64)}
+	m.spectateStart(c, matchID)
+
+	next := func() protocol.Envelope {
+		t.Helper()
+		select {
+		case raw := <-c.send:
+			var env protocol.Envelope
+			if err := json.Unmarshal(raw, &env); err != nil {
+				t.Fatalf("decode envelope: %v", err)
+			}
+			return env
+		case <-time.After(3 * time.Second):
+			t.Fatal("timed out waiting for a spectate message")
+		}
+		return protocol.Envelope{}
+	}
+	journalChunk := func(env protocol.Envelope, seq int, want string) {
+		t.Helper()
+		if env.Type != protocol.TypeSpectateJournal {
+			t.Fatalf("got %s, want SPECTATE_JOURNAL %d", env.Type, seq)
+		}
+		var p protocol.SpectateJournalPayload
+		json.Unmarshal(env.Data, &p)
+		data, _ := base64.StdEncoding.DecodeString(p.Data)
+		if p.Seq != seq || string(data) != want {
+			t.Fatalf("journal chunk = %d %q, want %d %q", p.Seq, data, seq, want)
+		}
+	}
+
+	if env := next(); env.Type != protocol.TypeSpectateBegin {
+		t.Fatalf("first message %s", env.Type)
+	}
+	journalChunk(next(), 0, "journal-0")
+	if env := next(); env.Type != protocol.TypeSpectateData {
+		t.Fatalf("history message %s", env.Type)
+	}
+
+	// live: a new journal chunk is delivered ahead of later krec data
+	m.journal(broadcasterID, matchID, enc([]byte("journal-1")))
+	m.data(broadcasterID, matchID, enc([]byte("live")), 11)
+	journalChunk(next(), 1, "journal-1")
+	if env := next(); env.Type != protocol.TypeSpectateData {
+		t.Fatalf("live message %s", env.Type)
+	}
 }

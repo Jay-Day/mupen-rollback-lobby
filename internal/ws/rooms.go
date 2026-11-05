@@ -20,7 +20,43 @@ const (
 	maxPacing      = 1 // 1 = smooth/asymmetric
 	minRoomPlayers = 2
 	maxRoomPlayers = 4
+	// The highest a room's join limit can be set to, in ms.
+	maxJoinPing = 1000
 )
+
+// clampJoinPing keeps a requested join limit in range; 0 takes any ping.
+func clampJoinPing(ms int) int {
+	if ms < 0 {
+		return 0
+	}
+	if ms > maxJoinPing {
+		return maxJoinPing
+	}
+	return ms
+}
+
+// onWiFi reports whether u says it plays over a wireless link.
+func onWiFi(u *state.User) bool {
+	return u.Connection == "wifi" || u.Connection == "cellular"
+}
+
+// joinLimitsRefusal says why u's PC may not join room, or "" when it may.
+// pingMs is the joiner's own report (0 when unknown, which passes): the
+// server can't measure the path between two players.
+func joinLimitsRefusal(u *state.User, room *state.Room, pingMs int) string {
+	maxPing, wiredOnly := room.JoinLimits()
+	if wiredOnly {
+		for _, member := range u.Group() {
+			if onWiFi(member) {
+				return protocol.ReasonWiredOnly
+			}
+		}
+	}
+	if maxPing > 0 && pingMs > maxPing {
+		return protocol.ReasonPingTooHigh
+	}
+	return ""
+}
 
 func (h *Hub) handleRoomCreate(c *Client, env protocol.Envelope) {
 	var req protocol.RoomCreateRequest
@@ -29,14 +65,11 @@ func (h *Hub) handleRoomCreate(c *Client, env protocol.Envelope) {
 		return
 	}
 
-	name := strings.TrimSpace(req.Name)
+	name := clipRunes(strings.TrimSpace(cleanText(req.Name)), roomNameMaxLen)
 	rom := strings.TrimSpace(req.Rom.Name)
 	if name == "" || rom == "" {
 		c.sendRoomCreateFail(env.ID, protocol.ReasonInvalidPayload)
 		return
-	}
-	if len(name) > roomNameMaxLen {
-		name = name[:roomNameMaxLen]
 	}
 	// Room names show up in every client's room list — filter them like chat.
 	if h.mod != nil {
@@ -95,12 +128,33 @@ func (h *Hub) handleRoomCreate(c *Client, env protocol.Envelope) {
 		PredictionAuto: true,
 		Visibility:     visibility,
 		Password:       req.Password,
+		MaxPing:        clampJoinPing(req.MaxPing),
+		WiredOnly:      req.WiredOnly,
 		Players:        nil,
 		State:          state.RoomStateWaiting,
 		CreatedAt:      time.Now(),
 	}
+	if req.Ranked != nil && req.Ranked.Enabled {
+		settings, reason, message := h.resolveRankedSettings(room.RomMD5, req.Ranked)
+		if reason == "" && len(c.user.Group()) > 1 {
+			reason, message = protocol.ReasonLocalPlayers, rankedLocalPlayersMessage
+		}
+		if reason == "" {
+			reason, message = h.rankedEligibility(c.user, settings, nil)
+		}
+		if reason != "" {
+			c.notice("warn", message)
+			c.sendRoomCreateFail(env.ID, reason)
+			return
+		}
+		room.SetRanked(settings)
+	}
 	if err := h.seatUser(c.user, room, state.UserStateHosting); err != nil {
-		c.sendRoomCreateFail(env.ID, protocol.ReasonAlreadyInRoom)
+		if err == state.ErrNotEnoughSeats {
+			c.sendRoomCreateFail(env.ID, protocol.ReasonNotEnoughSeats)
+		} else {
+			c.sendRoomCreateFail(env.ID, protocol.ReasonAlreadyInRoom)
+		}
 		return
 	}
 
@@ -113,11 +167,13 @@ func (h *Hub) handleRoomCreate(c *Client, env protocol.Envelope) {
 
 	// 1) Tell the host
 	c.sendEnvelope(protocol.TypeRoomCreated, env.ID, protocol.RoomCreatedResponse{RoomID: room.ID})
-	c.sendEnvelope(protocol.TypeRoomState, "", roomStatePayload(room))
+	c.sendEnvelope(protocol.TypeRoomState, "", h.roomState(room))
 
-	// 2) Broadcast the new room list and the host's state change
+	// 2) Broadcast the new room list and the state change of everyone seated
 	h.broadcastRoomList()
-	h.broadcastPresenceUpdated(c.user)
+	for _, u := range c.user.Group() {
+		h.broadcastPresenceUpdated(u)
+	}
 }
 
 func (h *Hub) handleRoomLeave(c *Client, env protocol.Envelope) {
@@ -153,11 +209,22 @@ func (h *Hub) handleRoomJoin(c *Client, env protocol.Envelope) {
 		c.sendRoomJoinFail(env.ID, protocol.ReasonRoomNotFound)
 		return
 	}
+	if room.Private {
+		c.sendRoomJoinFail(env.ID, protocol.ReasonPrivateRoom)
+		return
+	}
 
 	// A kick is permanent for this room object. Destroying the room destroys the
 	// ban list, so the same user may join a newly created room normally.
-	if room.WasKicked(c.user.ID, c.user.Username) {
-		c.sendRoomJoinFail(env.ID, protocol.ReasonKickedFromRoom)
+	group := c.user.Group()
+	for _, u := range group {
+		if room.WasKicked(u.ID, u.Username) {
+			c.sendRoomJoinFail(env.ID, protocol.ReasonKickedFromRoom)
+			return
+		}
+	}
+	if reason := localPlayersRefusal(c.user, room); reason != "" {
+		c.sendRoomJoinFail(env.ID, reason)
 		return
 	}
 
@@ -169,18 +236,43 @@ func (h *Hub) handleRoomJoin(c *Client, env protocol.Envelope) {
 		c.sendRoomJoinFail(env.ID, protocol.ReasonAlreadyStarted)
 		return
 	}
+	// Before the password: the limits are public, so there's no point asking.
+	if reason := joinLimitsRefusal(c.user, room, req.PingMs); reason != "" {
+		c.sendRoomJoinFail(env.ID, reason)
+		return
+	}
 	if room.Password != "" && req.Password != room.Password {
 		c.sendRoomJoinFail(env.ID, protocol.ReasonWrongPassword)
 		return
 	}
+	if settings := room.GetRanked(); settings != nil {
+		reason, message := h.rankedEligibility(c.user, settings, room.Host)
+		if len(group) > 1 {
+			reason, message = protocol.ReasonLocalPlayers, rankedLocalPlayersMessage
+		}
+		if reason != "" {
+			c.notice("warn", message)
+			c.sendRoomJoinFail(env.ID, reason)
+			return
+		}
+	}
 	if err := h.seatUser(c.user, room, state.UserStateInRoom); err != nil {
-		if err == state.ErrAlreadyInRoom {
+		switch err {
+		case state.ErrAlreadyInRoom:
 			c.sendRoomJoinFail(env.ID, protocol.ReasonAlreadyInRoom)
-		} else {
+		case state.ErrNotEnoughSeats:
+			c.sendRoomJoinFail(env.ID, protocol.ReasonNotEnoughSeats)
+		default:
 			c.sendRoomJoinFail(env.ID, protocol.ReasonRoomFull)
 		}
 		return
 	}
+	h.announceRoomJoin(c, room, env.ID)
+}
+
+// announceRoomJoin tells everyone that c's PC just sat down in room.
+func (h *Hub) announceRoomJoin(c *Client, room *state.Room, id string) {
+	group := c.user.Group()
 	h.dequeueQuickMatch(c)
 
 	slog.Info("room joined",
@@ -188,7 +280,7 @@ func (h *Hub) handleRoomJoin(c *Client, env protocol.Envelope) {
 		"slot", len(room.Players), "of", room.MaxPlayers)
 
 	// Tell the joiner first so their UI flips into the room view.
-	c.sendEnvelope(protocol.TypeRoomJoinOK, env.ID, roomStatePayload(room))
+	c.sendEnvelope(protocol.TypeRoomJoinOK, id, h.roomState(room))
 
 	// Broadcast updated room state to everyone seated (including the joiner —
 	// keeps the joiner's view consistent with what other members see).
@@ -197,8 +289,10 @@ func (h *Hub) handleRoomJoin(c *Client, env protocol.Envelope) {
 	// Update the rooms list seen by everyone else (player count changed).
 	h.broadcastRoomList()
 
-	// And the joiner's presence state.
-	h.broadcastPresenceUpdated(c.user)
+	// And the presence state of everyone who just sat down.
+	for _, u := range group {
+		h.broadcastPresenceUpdated(u)
+	}
 
 	// Punch the joiner against everyone already seated, both directions at
 	// once. Start gating waits on these measurements, so leaving it to the
@@ -253,6 +347,12 @@ func (h *Hub) handleRoomStart(c *Client, env protocol.Envelope) {
 		slog.Debug("ROOM_START rejected: need at least 2 players", "room", room.ID, "count", len(room.Players))
 		return
 	}
+	if settings := room.GetRanked(); settings != nil {
+		if problem := h.rankedStartCheck(room, settings); problem != "" {
+			c.notice("warn", problem)
+			return
+		}
+	}
 	if !roomPlayersTakeSaveData(room) {
 		slog.Debug("ROOM_START rejected: a player can't play with save data", "room", room.ID)
 		return
@@ -297,7 +397,7 @@ func (h *Hub) handleRoomUpdateSettings(c *Client, env protocol.Envelope) {
 		req.Pacing = maxPacing
 	}
 
-	seatChanged := room.SetPlayerDelay(c.user.ID, req.Delay, req.DelayAuto)
+	seatChanged := setGroupDelay(room, c.user, req.Delay, req.DelayAuto)
 	sharedUnchanged := room.Delay == req.Delay && room.Prediction == req.Prediction &&
 		room.Pacing == req.Pacing &&
 		room.DelayAuto == req.DelayAuto && room.PredictionAuto == req.PredictionAuto
@@ -338,7 +438,7 @@ func (h *Hub) handleRoomUpdateDelay(c *Client, env protocol.Envelope) {
 	} else if req.Delay > maxDelay {
 		req.Delay = maxDelay
 	}
-	if !room.SetPlayerDelay(c.user.ID, req.Delay, req.DelayAuto) {
+	if !setGroupDelay(room, c.user, req.Delay, req.DelayAuto) {
 		return
 	}
 	slog.Info("player frame delay updated", "room", room.ID, "delay", req.Delay,
@@ -363,7 +463,7 @@ func (h *Hub) handleRoomUpdatePlayerSettings(c *Client, env protocol.Envelope) {
 	} else if req.Delay > maxDelay {
 		req.Delay = maxDelay
 	}
-	delayChanged := room.SetPlayerDelay(c.user.ID, req.Delay, req.DelayAuto)
+	delayChanged := setGroupDelay(room, c.user, req.Delay, req.DelayAuto)
 	predictionChanged := false
 	if room.Host != nil && room.Host.ID == c.user.ID {
 		if req.Prediction < minPrediction {
@@ -460,8 +560,8 @@ func (h *Hub) handleRoomUpdateLateJoin(c *Client, env protocol.Envelope) {
 		slog.Debug("ROOM_UPDATE_LATE_JOIN rejected: not host", "user", c.user.Username, "room", room.ID)
 		return
 	}
-	if room.State != state.RoomStateWaiting || room.QuickMatch {
-		slog.Debug("ROOM_UPDATE_LATE_JOIN rejected: not waiting, or quick match",
+	if room.State != state.RoomStateWaiting || room.QuickMatch || room.GetRanked() != nil {
+		slog.Debug("ROOM_UPDATE_LATE_JOIN rejected: not waiting, or quick match or ranked",
 			"room", room.ID, "state", room.State, "quick", room.QuickMatch)
 		return
 	}
@@ -470,6 +570,36 @@ func (h *Hub) handleRoomUpdateLateJoin(c *Client, env protocol.Envelope) {
 	}
 	slog.Info("room late join updated", "room", room.ID, "enabled", req.Enabled, "by", c.user.Username)
 	h.broadcastRoomState(room)
+}
+
+// handleRoomUpdateJoinLimits changes who may join the room from now on.
+// Host-only, in any state: it only affects joins, so a running match is no
+// reason to wait. Players already seated stay.
+func (h *Hub) handleRoomUpdateJoinLimits(c *Client, env protocol.Envelope) {
+	var req protocol.RoomUpdateJoinLimitsRequest
+	if err := json.Unmarshal(env.Data, &req); err != nil {
+		return
+	}
+	room := c.user.CurrentRoom
+	if room == nil {
+		return
+	}
+	if room.Host == nil || room.Host.ID != c.user.ID {
+		slog.Debug("ROOM_UPDATE_JOIN_LIMITS rejected: not host", "user", c.user.Username, "room", room.ID)
+		return
+	}
+	// Ranked rooms keep the ranked maximum ping instead.
+	if room.QuickMatch || room.Private || room.GetRanked() != nil {
+		return
+	}
+	maxPing := clampJoinPing(req.MaxPing)
+	if !room.SetJoinLimits(maxPing, req.WiredOnly) {
+		return
+	}
+	slog.Info("room join limits updated", "room", room.ID, "maxPing", maxPing, "wiredOnly", req.WiredOnly,
+		"by", c.user.Username)
+	h.broadcastRoomState(room)
+	h.broadcastRoomList()
 }
 
 // Save data limits, matching the client's: the cartridge saves a match can
@@ -497,8 +627,8 @@ func (h *Hub) handleRoomUpdateSaveData(c *Client, env protocol.Envelope) {
 		slog.Debug("ROOM_UPDATE_SAVE_DATA rejected: not host", "user", c.user.Username, "room", room.ID)
 		return
 	}
-	if room.State != state.RoomStateWaiting || room.QuickMatch {
-		slog.Debug("ROOM_UPDATE_SAVE_DATA rejected: not waiting, or quick match",
+	if room.State != state.RoomStateWaiting || room.QuickMatch || room.GetRanked() != nil {
+		slog.Debug("ROOM_UPDATE_SAVE_DATA rejected: not waiting, or quick match or ranked",
 			"room", room.ID, "state", room.State, "quick", room.QuickMatch)
 		return
 	}
@@ -610,7 +740,8 @@ func (h *Hub) handleRoomSwapSlots(c *Client, env protocol.Envelope) {
 
 // handleRoomKick lets the host remove another player from the room (and the
 // in-progress match, if any). Reuses removeUserFromRoom, so the target gets a
-// ROOM_LEFT{reason:"kicked"} and remaining players get MATCH_PEER_LEFT.
+// ROOM_LEFT{reason:"kicked"} and remaining players get MATCH_PEER_LEFT. Kicking
+// one player on a PC kicks all of them.
 func (h *Hub) handleRoomKick(c *Client, env protocol.Envelope) {
 	var req protocol.RoomKickRequest
 	if err := json.Unmarshal(env.Data, &req); err != nil {
@@ -624,17 +755,19 @@ func (h *Hub) handleRoomKick(c *Client, env protocol.Envelope) {
 		slog.Debug("ROOM_KICK rejected: not host", "user", c.user.Username, "room", room.ID)
 		return
 	}
-	if req.UserID == c.user.ID {
-		return // host can't kick themselves
-	}
 	target := h.state.GetUser(req.UserID)
 	if target == nil || target.CurrentRoom == nil || target.CurrentRoom.ID != room.ID {
 		slog.Debug("ROOM_KICK rejected: target not in this room",
 			"host", c.user.Username, "target", req.UserID, "room", room.ID)
 		return
 	}
+	if target.Primary().ID == c.user.ID {
+		return // host can't kick themselves, or anyone on their own PC
+	}
 	slog.Info("room kick", "host", c.user.Username, "target", target.Username, "room", room.ID)
-	room.MarkKicked(target.ID, target.Username)
+	for _, u := range target.Group() {
+		room.MarkKicked(u.ID, u.Username)
+	}
 	h.removeUserFromRoom(target, room, "kicked")
 }
 
@@ -642,6 +775,13 @@ func (h *Hub) handleRoomKick(c *Client, env protocol.Envelope) {
 // host-driven ROOM_START flow and the auto-started Quick Match flow.
 // Callers are responsible for any validation that should happen first.
 func (h *Hub) startMatchInRoom(room *state.Room, initiator string) {
+	// Playing takes everyone seated out of any challenge they were part of.
+	for _, seat := range room.Players {
+		if seat.User != nil && seat.User.Owner == nil {
+			h.endChallengesFor(seat.User, protocol.ChallengeBusy)
+		}
+	}
+
 	match := &state.Match{
 		ID:        h.state.NextMatchID(),
 		RoomID:    room.ID,
@@ -659,16 +799,7 @@ func (h *Hub) startMatchInRoom(room *state.Room, initiator string) {
 		seat.User.CurrentMatch = match
 		seat.User.SetState(state.UserStatePlaying)
 
-		ip, port := seat.User.GetUDPEndpoint()
-		peers = append(peers, protocol.MatchPeer{
-			UserID:       seat.User.ID,
-			Username:     seat.User.Username,
-			PublicIP:     ip,
-			PublicPort:   port,
-			LocalIP:      seat.User.LocalIP,
-			Slot:         seat.Slot,
-			ICESupported: seat.User.ICESupported,
-		})
+		peers = append(peers, matchPeerFor(seat.User, seat.Slot))
 	}
 
 	h.state.AddMatch(match)
@@ -683,6 +814,9 @@ func (h *Hub) startMatchInRoom(room *state.Room, initiator string) {
 		Peers:               peers,
 		KeyframeIntervalSec: h.cfg().LiveReplayKeyframeSeconds,
 		Seats:               match.Seats,
+	}
+	if settings := room.GetRanked(); settings != nil {
+		payload.Ranked = h.beginRankedSet(match, room, settings)
 	}
 	h.broadcastToRoom(room, protocol.TypeMatchBegin, payload)
 
@@ -706,20 +840,32 @@ func (h *Hub) startMatchInRoom(room *state.Room, initiator string) {
 // other. Funneling every change through this pair makes the divergence
 // unrepresentable: seatUser refuses (loudly) to seat a user whose pointer is
 // already set elsewhere, and unseatUser always clears both sides together.
+//
+// seatUser seats u's local players with u, all of them or none, in the lowest
+// free slots. Only u takes state st; hosting is the owner's.
 func (h *Hub) seatUser(u *state.User, room *state.Room, st state.UserState) error {
 	if u.CurrentRoom == room {
 		return nil // already seated here; never double-seat
 	}
-	if u.CurrentRoom != nil {
-		slog.Warn("seatUser refused: user already in a room",
-			"user", u.Username, "in_room", u.CurrentRoom.ID, "target_room", room.ID)
-		return state.ErrAlreadyInRoom
+	group := u.Group()
+	for _, member := range group {
+		if member.CurrentRoom != nil {
+			slog.Warn("seatUser refused: user already in a room",
+				"user", member.Username, "in_room", member.CurrentRoom.ID, "target_room", room.ID)
+			return state.ErrAlreadyInRoom
+		}
 	}
-	if err := room.AddPlayer(u); err != nil {
+	if err := room.AddPlayers(group); err != nil {
 		return err
 	}
-	u.CurrentRoom = room
-	u.SetState(st)
+	for _, member := range group {
+		member.CurrentRoom = room
+		if member == u {
+			member.SetState(st)
+		} else {
+			member.SetState(state.UserStateInRoom)
+		}
+	}
 	return nil
 }
 
@@ -733,7 +879,11 @@ func (h *Hub) unseatUser(u *state.User, room *state.Room) {
 // removeUserFromRoom handles the bookkeeping for a user leaving a room
 // (by ROOM_LEAVE, by disconnect, or by host dissolving). reason is informational
 // for log lines and propagated when notifying peers of in-game departures.
+// Everyone on a PC leaves together, whichever of them u names.
 func (h *Hub) removeUserFromRoom(u *state.User, room *state.Room, reason string) {
+	u = u.Primary()
+	group := u.Group()
+
 	// A member leaving while the host adds them to the match cancels it.
 	h.abortAdmissionFor(room, u, protocol.ReasonJoinerLeft)
 
@@ -742,17 +892,25 @@ func (h *Hub) removeUserFromRoom(u *state.User, room *state.Room, reason string)
 	var matchID uint64
 	if room.State == state.RoomStateInGame && u.CurrentMatch != nil {
 		matchID = u.CurrentMatch.ID
-		h.broadcastMatchPeerLeft(room, u, matchID, reason)
+		for _, member := range group {
+			h.broadcastMatchPeerLeft(room, member, matchID, reason)
+		}
 	}
 
-	h.unseatUser(u, room)
+	for _, member := range group {
+		h.unseatUser(member, room)
+	}
+
+	// A quick-match room that loses a player during the warmup closes, and
+	// the others search again; after its set, everyone moves on.
+	qmLeft := h.matchmaker.leaveRoom(room.ID, u.ID)
 
 	// Dissolve only when the host leaves — the host owns the room. Any
 	// non-host drop leaves the room intact regardless of remaining seat count;
 	// the surviving players (even just the host alone) keep playing and the
 	// host can end the room themselves when they're done. GekkoNet feeds zero
 	// input for the dropped actor(s) so the abandoned slots simply go idle.
-	dissolve := room.Host != nil && room.Host.ID == u.ID
+	dissolve := (room.Host != nil && room.Host.ID == u.ID) || qmLeft.warmup
 	if dissolve {
 		slog.Info("dissolving room",
 			"id", room.ID, "trigger", u.Username, "reason", reason,
@@ -762,12 +920,19 @@ func (h *Hub) removeUserFromRoom(u *state.User, room *state.Room, reason string)
 		memberReason := "host_left"
 		if reason == "admin_closed" {
 			memberReason = "admin_closed"
+		} else if qmLeft.warmup {
+			memberReason = "quick_match_cancelled"
+		} else if qmLeft.quickMatch {
+			// A quick match's host is only whoever queued first: its players move
+			// on rather than being told a host closed their room. That also holds
+			// for a ranked set still being judged; its result follows.
+			memberReason = "quick_match_next"
 		}
 		// Snapshot first: unseatUser mutates room.Players while we iterate.
 		seats := append([]*state.RoomSeat(nil), room.Players...)
 		for _, seat := range seats {
-			if seat.User == nil || seat.User.ID == u.ID {
-				continue // skip the user who triggered the dissolve
+			if seat.User == nil {
+				continue
 			}
 			member := seat.User
 			h.unseatUser(member, room)
@@ -792,7 +957,9 @@ func (h *Hub) removeUserFromRoom(u *state.User, room *state.Room, reason string)
 	}
 
 	h.broadcastRoomList()
-	h.broadcastPresenceUpdated(u)
+	for _, member := range group {
+		h.broadcastPresenceUpdated(member)
+	}
 
 	// Always tell the leaving user so their client can dismiss the room UI.
 	// In the dissolve loop above we explicitly skipped u; in the non-dissolve
@@ -800,12 +967,17 @@ func (h *Hub) removeUserFromRoom(u *state.User, room *state.Room, reason string)
 	// For host-disconnect cleanup, u.Send may be on a dying queue — the
 	// non-blocking select inside sendRoomLeft makes that harmless.
 	sendRoomLeft(u, reason)
+
+	if qmLeft.quickMatch {
+		h.quickMatchRoomLeft(u, room, qmLeft, dissolve)
+	}
 }
 
 // sendRoomLeft pushes a ROOM_LEFT envelope to one user. reason lets the client
 // distinguish a self-leave from being kicked or the host dissolving the room.
+// A local player has no client to tell; its owner's ROOM_LEFT covers it.
 func sendRoomLeft(u *state.User, reason string) {
-	if u == nil {
+	if u == nil || u.Owner != nil {
 		return
 	}
 	if u.Send == nil {
@@ -854,7 +1026,7 @@ func (h *Hub) broadcastMatchPeerLeft(room *state.Room, departing *state.User, ma
 		return
 	}
 	for _, seat := range room.Players {
-		if seat.User == nil || seat.User.ID == departing.ID || seat.User.Send == nil {
+		if seat.User == nil || seat.User.Primary() == departing.Primary() || seat.User.Send == nil {
 			continue
 		}
 		select {
@@ -872,6 +1044,8 @@ func (h *Hub) broadcastMatchPeerLeft(room *state.Room, departing *state.User, ma
 	if reason != "kicked" {
 		h.sendRoomChatAs(room, departing, "I dropped from the game.")
 	}
+
+	h.rankedPlayerLeft(matchID, departing.ID, reason)
 }
 
 // sendRoomChatAs pushes a chat line to a room attributed to a specific user, so
@@ -895,6 +1069,8 @@ func (h *Hub) sendRoomChatAs(room *state.Room, u *state.User, message string) {
 //     seat's CurrentMatch is cleared. Surviving clients see the ROOM_STATE
 //     flip and tear down their own emulation locally. Nobody leaves the room.
 //
+// A PC's local players drop with it.
+//
 // Dropping the room itself happens via ROOM_LEAVE, not MATCH_FINISHED.
 func (h *Hub) handleMatchFinished(c *Client, env protocol.Envelope) {
 	_ = env
@@ -909,14 +1085,23 @@ func (h *Hub) handleMatchFinished(c *Client, env protocol.Envelope) {
 	isHost := room.Host != nil && room.Host.ID == c.user.ID
 	slog.Info("match drop", "match", match.ID, "user", c.user.Username, "room", room.ID, "host", isHost)
 
+	group := c.user.Group()
+
 	// Tell the other room members the dropper is out. Informational only —
 	// the dropper's seat row stays in the player list.
-	h.broadcastMatchPeerLeft(room, c.user, match.ID, "dropped")
+	for _, u := range group {
+		h.broadcastMatchPeerLeft(room, u, match.ID, "dropped")
+	}
 
 	// Dropper exits the match but stays seated.
-	c.user.CurrentMatch = nil
-	c.user.SetState(state.UserStateInRoom)
-	h.broadcastPresenceUpdated(c.user)
+	for _, u := range group {
+		u.CurrentMatch = nil
+		u.SetState(state.UserStateInRoom)
+		h.broadcastPresenceUpdated(u)
+	}
+
+	// A casual quick match is over once anyone closes the game.
+	h.quickMatchCasualOver(room, 0)
 
 	// If the dropper was the one broadcasting, the stream dies with them.
 	if h.broadcasts.endIfBroadcaster(match.ID, c.user.ID) {
@@ -944,7 +1129,7 @@ func (h *Hub) handleMatchFinished(c *Client, env protocol.Envelope) {
 	h.broadcasts.endByMatch(match.ID) // host ended the match → stop any broadcast
 	room.SetState(state.RoomStateWaiting)
 	for _, seat := range room.Players {
-		if seat.User == nil || seat.User.ID == c.user.ID {
+		if seat.User == nil || seat.User.Primary() == c.user {
 			continue
 		}
 		seat.User.CurrentMatch = nil
@@ -993,6 +1178,7 @@ func (h *Hub) buildRoomListPayload() protocol.RoomListPayload {
 			hostName = r.Host.Username
 		}
 		matchID, broadcasting, viewerCount := h.broadcasts.roomBroadcast(id)
+		maxPing, wiredOnly := r.JoinLimits()
 		payload.Rooms = append(payload.Rooms, protocol.RoomSummary{
 			ID:       id,
 			Name:     r.Name,
@@ -1012,8 +1198,15 @@ func (h *Hub) buildRoomListPayload() protocol.RoomListPayload {
 			Broadcasting: broadcasting,
 			MatchID:      matchID,
 			ViewerCount:  viewerCount,
-			LateJoin:     players < max && roomAcceptsLateJoin(r),
+			LateJoin:     players < max && !r.Private && roomAcceptsLateJoin(r),
+			Private:      r.Private,
+			MaxPing:      maxPing,
+			WiredOnly:    wiredOnly,
 		})
+		if settings := r.GetRanked(); settings != nil {
+			payload.Rooms[len(payload.Rooms)-1].Ranked = true
+			payload.Rooms[len(payload.Rooms)-1].Ladder = settings.LadderID
+		}
 	}
 	return payload
 }
@@ -1032,7 +1225,7 @@ func (h *Hub) sendRoomListTo(c *Client) {
 
 // broadcastRoomState sends the full room state to every user currently in it.
 func (h *Hub) broadcastRoomState(room *state.Room) {
-	h.broadcastToRoom(room, protocol.TypeRoomState, roomStatePayload(room))
+	h.broadcastToRoom(room, protocol.TypeRoomState, h.roomState(room))
 }
 
 // broadcastToRoom sends a message to every seated player in the given room.
@@ -1070,6 +1263,7 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 		InGameSettings:    true,
 		LateJoin:          roomAcceptsLateJoin(r),
 		CanStartAlone:     roomCanStartAlone(r),
+		Private:           r.Private,
 		Rom: protocol.RomInfo{
 			Name:   r.RomName,
 			MD5:    r.RomMD5,
@@ -1080,7 +1274,9 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 	if r.Host != nil {
 		out.HostID = r.Host.ID
 	}
-	if !r.QuickMatch {
+	// A ranked set has fixed players and boots every game blank, like a
+	// quick match: those rooms don't have the options.
+	if !r.QuickMatch && r.Ranked == nil {
 		enabled := r.LateJoinEnabled
 		out.LateJoinEnabled = &enabled
 		out.SaveData = &protocol.RoomSaveDataPayload{}
@@ -1092,6 +1288,10 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 				Bytes:   r.SaveData.Bytes,
 				Hash:    r.SaveData.Hash,
 			}
+		}
+		if !r.Private {
+			maxPing, wiredOnly := r.JoinLimits()
+			out.JoinLimits = &protocol.RoomJoinLimitsPayload{MaxPing: maxPing, WiredOnly: wiredOnly}
 		}
 	}
 	for _, seat := range r.Players {
@@ -1109,10 +1309,41 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 			ICESupported:     seat.User.ICESupported,
 			InMatch:          seat.User.CurrentMatch != nil,
 			LateJoin:         canLateJoin(seat.User),
+			Verified:         seat.User.Verified(),
+			PeerID:           seat.User.Primary().ID,
 			SaveData:         seat.User.SaveData,
 		})
 	}
+	if settings := r.Ranked; settings != nil {
+		out.Ranked = &protocol.RankedRoomState{
+			Ladder:    settings.LadderID,
+			ModuleID:  settings.ModuleID,
+			RulesetID: settings.RulesetID,
+			BestOf:    settings.BestOf,
+			TeamSize:  settings.TeamSize,
+			MaxPing:   settings.MaxPing,
+		}
+	}
 	return out
+}
+
+// handleRoomPeerPing stores a player's measured ping to another player in
+// the same room (ranked rooms check it against their max ping).
+func (h *Hub) handleRoomPeerPing(c *Client, env protocol.Envelope) {
+	var req protocol.RoomPeerPingRequest
+	if err := json.Unmarshal(env.Data, &req); err != nil || req.RTTMs < 0 || req.RTTMs > 10000 {
+		return
+	}
+	room := c.user.CurrentRoom
+	if room == nil || req.UserID == c.user.ID {
+		return
+	}
+	for _, seat := range room.Players {
+		if seat.User != nil && seat.User.ID == req.UserID {
+			room.SetPeerPing(c.user.ID, req.UserID, req.RTTMs)
+			return
+		}
+	}
 }
 
 func mustMarshal(v any) json.RawMessage {

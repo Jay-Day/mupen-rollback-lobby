@@ -281,7 +281,7 @@ func TestMatchBeginCarriesConfiguredKeyframeInterval(t *testing.T) {
 		}
 		user.CurrentRoom = room
 	}
-	h := &Hub{state: state.New(), settings: settings}
+	h := &Hub{state: state.New(), settings: settings, challenges: newChallengeManager()}
 	h.startMatchInRoom(room, "test")
 
 	for name, messages := range map[string]chan []byte{"host": hostMessages, "guest": guestMessages} {
