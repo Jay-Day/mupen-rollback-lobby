@@ -12,6 +12,7 @@ import (
 
 	"github.com/jay-day/rmgk-lobby/internal/accounts"
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
+	"github.com/jay-day/rmgk-lobby/internal/usernames"
 )
 
 // Moderator tools for ranked accounts and sets (see handleModAction):
@@ -101,7 +102,7 @@ func (h *Hub) modResolveSet(c *Client, target, note string) {
 	winnerName := ""
 	if !strings.EqualFold(fields[1], "void") {
 		for _, p := range set.Players {
-			if strings.EqualFold(p.Username, fields[1]) {
+			if usernames.Same(p.Username, fields[1]) {
 				winnerID, winnerName = p.AccountID, p.Username
 			}
 		}

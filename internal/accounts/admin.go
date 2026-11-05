@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/jay-day/rmgk-lobby/internal/usernames"
 )
 
 // AccountStatus is an account as moderators see it, disabled ones included.
@@ -32,11 +34,11 @@ func scanAccountStatus(scan func(...any) error) (AccountStatus, error) {
 	return status, err
 }
 
-// AccountStatusByName looks up an account (case-insensitive), disabled or not.
+// AccountStatusByName looks up an account (by usernames.Key), disabled or not.
 func (s *Store) AccountStatusByName(name string) (AccountStatus, error) {
 	now := s.now().Unix()
-	status, err := scanAccountStatus(s.db.QueryRow(accountStatusQuery+` WHERE a.username = ?`,
-		now, now, strings.TrimSpace(name)).Scan)
+	status, err := scanAccountStatus(s.db.QueryRow(accountStatusQuery+` WHERE a.username_key = ?`,
+		now, now, usernames.Key(strings.TrimSpace(name))).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return AccountStatus{}, ErrNotFound
 	}
@@ -48,9 +50,9 @@ func (s *Store) SearchAccounts(query string, limit int) ([]AccountStatus, error)
 	if limit <= 0 || limit > 100 {
 		limit = 25
 	}
-	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(strings.TrimSpace(query))
+	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(usernames.Key(strings.TrimSpace(query)))
 	now := s.now().Unix()
-	rows, err := s.db.Query(accountStatusQuery+` WHERE a.username LIKE ? ESCAPE '\' ORDER BY a.username LIMIT ?`,
+	rows, err := s.db.Query(accountStatusQuery+` WHERE a.username_key LIKE ? ESCAPE '\' ORDER BY a.username LIMIT ?`,
 		now, now, "%"+escaped+"%", limit)
 	if err != nil {
 		return nil, err

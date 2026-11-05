@@ -18,6 +18,7 @@ import (
 
 	"github.com/jay-day/rmgk-lobby/internal/accounts"
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
+	"github.com/jay-day/rmgk-lobby/internal/usernames"
 )
 
 // Admin pages: moderators (admins.json, the same credentials as the lobby's
@@ -308,7 +309,7 @@ func (s *Server) handleAdminResolve(w http.ResponseWriter, r *http.Request, admi
 	}
 	var winnerID int64
 	for _, p := range set.Players {
-		if !req.Void && strings.EqualFold(p.Username, req.Winner) {
+		if !req.Void && usernames.Same(p.Username, req.Winner) {
 			winnerID = p.AccountID
 			req.Winner = p.Username
 		}

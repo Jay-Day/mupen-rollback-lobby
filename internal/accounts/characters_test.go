@@ -104,6 +104,8 @@ func TestMigrationBackfillsSetCharacters(t *testing.T) {
 		ALTER TABLE set_players DROP COLUMN team; ALTER TABLE sets DROP COLUMN winner_team;
 		ALTER TABLE set_players DROP COLUMN region; DROP TABLE discord_links;
 		DROP TABLE email_confirmations; ALTER TABLE accounts DROP COLUMN email;
+		DROP INDEX accounts_username_key; DROP INDEX accounts_username_skeleton;
+		ALTER TABLE accounts DROP COLUMN username_key; ALTER TABLE accounts DROP COLUMN username_skeleton;
 		PRAGMA user_version = 5`); err != nil {
 		t.Fatal(err)
 	}

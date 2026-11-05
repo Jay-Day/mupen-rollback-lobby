@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
+	"github.com/jay-day/rmgk-lobby/internal/state"
 )
 
 // broadcast is one live stream of a match's .krec. A single player (the
@@ -112,6 +113,10 @@ type broadcastManager struct {
 
 	mu      sync.Mutex
 	byMatch map[uint64]*broadcast
+
+	// presenceMu orders spectating-presence decisions, so one that scanned
+	// subscriptions before a newer change can't land after one that saw it.
+	presenceMu sync.Mutex
 }
 
 func newBroadcastManager(hub *Hub) *broadcastManager {
@@ -401,17 +406,6 @@ func krecFrameOffset(data []byte, frame int) int64 {
 	return -1
 }
 
-// stopWatching returns a spectator's presence to idle once they no longer
-// watch matchID. Call without broadcast locks.
-func (m *broadcastManager) stopWatching(userID, matchID uint64) {
-	if m.hub == nil {
-		return
-	}
-	if c := m.hub.getClient(userID); c != nil && c.user.StopWatching(matchID) {
-		m.hub.broadcastPresenceUpdated(c.user)
-	}
-}
-
 func stopBroadcastSpectator(sc *broadcastSpectator) {
 	if sc == nil || sc.stopped {
 		return
@@ -451,6 +445,9 @@ func (m *broadcastManager) notifyViewerCount(matchID uint64) {
 func (m *broadcastManager) pumpSpectator(b *broadcast, userID uint64, sc *broadcastSpectator) {
 	ticker := time.NewTicker(spectateRetryInterval)
 	defer ticker.Stop()
+	// Every way a subscription ends (stop, match over, read error,
+	// replacement) ends this pump, so presence is reconciled here.
+	defer m.syncSpectatingPresence(userID)
 
 	for {
 		for {
@@ -482,7 +479,6 @@ func (m *broadcastManager) pumpSpectatorChunk(b *broadcast, userID uint64, sc *b
 		b.mu.Unlock()
 		if viewersChanged {
 			m.notifyViewerCount(b.matchID)
-			m.stopWatching(userID, b.matchID)
 		}
 	}()
 	if b.closed || sc.stopped || b.spectators[userID] != sc {
@@ -647,12 +643,82 @@ func (m *broadcastManager) spectateStart(c *Client, matchID uint64) {
 	b.spectators[c.user.ID] = sc
 	b.mu.Unlock()
 	m.notifyViewerCount(matchID)
-	if m.hub != nil && c.user.StartWatching(matchID) {
-		m.hub.broadcastPresenceUpdated(c.user)
-	}
 	go m.pumpSpectator(b, c.user.ID, sc)
+	m.syncSpectatingPresence(c.user.ID)
 	slog.Info("spectate start", "mode", mode, "match", matchID, "user", c.user.Username,
 		"history_bytes", historyBytes)
+}
+
+// syncSpectatingPresence shows a lobby-idle user as "spectating" while they
+// watch any live stream, and returns them to idle once they watch none. Like
+// AFK, it only takes over the "doing nothing" states: a seated, searching or
+// playing user keeps their real state. Local players watch with the PC they
+// sit at, as they go AFK with it. Call with no broadcast locks held.
+func (m *broadcastManager) syncSpectatingPresence(userID uint64) {
+	if m.hub == nil {
+		return
+	}
+	m.presenceMu.Lock()
+	defer m.presenceMu.Unlock()
+	c := m.hub.getClient(userID)
+	if c == nil {
+		return // disconnected: presence removal already covers them
+	}
+
+	watching := m.watchedMatch(userID)
+	for _, u := range c.user.Group() {
+		var changed bool
+		if watching != 0 {
+			changed = u.CompareAndSetState([]state.UserState{
+				state.UserStateIdle, state.UserStateBrowsing, state.UserStateAway,
+			}, state.UserStateSpectating)
+		} else {
+			changed = u.CompareAndSetState([]state.UserState{state.UserStateSpectating}, state.UserStateIdle)
+		}
+		if u.SetWatchingMatch(watching) || changed {
+			m.hub.broadcastPresenceUpdated(u)
+		}
+	}
+}
+
+// settleLobbyState is where a user lands when a room or search ends without
+// them: spectating if they still watch a live stream, idle otherwise. Call
+// with no broadcast locks held.
+func (m *broadcastManager) settleLobbyState(u *state.User) {
+	if m == nil {
+		u.SetState(state.UserStateIdle)
+		return
+	}
+	m.presenceMu.Lock()
+	defer m.presenceMu.Unlock()
+	watching := m.watchedMatch(u.Primary().ID)
+	u.SetWatchingMatch(watching)
+	if watching != 0 {
+		u.SetState(state.UserStateSpectating)
+	} else {
+		u.SetState(state.UserStateIdle)
+	}
+}
+
+// watchedMatch returns the live broadcast userID is subscribed to, the newest
+// if several, or 0 for none. Call with no broadcast locks held.
+func (m *broadcastManager) watchedMatch(userID uint64) uint64 {
+	m.mu.Lock()
+	live := make([]*broadcast, 0, len(m.byMatch))
+	for _, b := range m.byMatch {
+		live = append(live, b)
+	}
+	m.mu.Unlock()
+	var newest uint64
+	for _, b := range live {
+		b.mu.Lock()
+		watching := !b.closed && b.spectators[userID] != nil
+		b.mu.Unlock()
+		if watching && b.matchID > newest {
+			newest = b.matchID
+		}
+	}
+	return newest
 }
 
 func (m *broadcastManager) spectateStop(userID, matchID uint64) {
@@ -673,36 +739,78 @@ func (m *broadcastManager) spectateStop(userID, matchID uint64) {
 	if viewersChanged {
 		m.notifyViewerCount(matchID)
 	}
-	m.stopWatching(userID, matchID)
 }
 
-// spectatorChat relays a chat line from a spectator to every viewer of the
-// broadcast they're watching, the sender included so it echoes like room chat.
-// The match's players aren't spectators, so they never receive it. A sender
-// who isn't watching anything is ignored.
-func (m *broadcastManager) spectatorChat(senderID uint64, payload protocol.ChatMsgPayload) {
-	m.mu.Lock()
-	all := make([]*broadcast, 0, len(m.byMatch))
-	for _, b := range m.byMatch {
-		all = append(all, b)
+// spectatorChat relays a chat line to everyone on a live replay's chat: its
+// viewers, the sender included so it echoes like room chat, and the match's
+// players, who can answer. A viewer whose client still says the players can't read
+// this keeps that promise: their lines reach the other viewers only. A sender who's
+// neither watching nor playing a match being broadcast is ignored.
+func (m *broadcastManager) spectatorChat(c *Client, payload protocol.ChatMsgPayload) {
+	b, fromPlayer := m.chatBroadcastOf(c)
+	if b == nil {
+		return
 	}
-	m.mu.Unlock()
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return
+	}
+	recipients := make(map[*Client]struct{}, len(b.spectators)+maxRoomPlayers)
+	for _, sc := range b.spectators {
+		recipients[sc.client] = struct{}{}
+	}
+	b.mu.Unlock()
+	if c.user.SpectatorChat {
+		for _, player := range m.chatPlayersOf(b) {
+			recipients[player] = struct{}{}
+		}
+	}
+	payload.FromPlayer = fromPlayer
+	for recipient := range recipients {
+		recipient.sendEnvelope(protocol.TypeChatMsg, "", payload)
+	}
+}
 
-	for _, b := range all {
+// chatBroadcastOf finds the broadcast whose chat c is on, and whether c is on it as
+// one of the match's players rather than as a viewer.
+func (m *broadcastManager) chatBroadcastOf(c *Client) (*broadcast, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if match := c.user.CurrentMatch; match != nil && c.user.SpectatorChat {
+		if b := m.byMatch[match.ID]; b != nil {
+			return b, true
+		}
+	}
+	for _, b := range m.byMatch {
 		b.mu.Lock()
-		if b.closed || b.spectators[senderID] == nil {
-			b.mu.Unlock()
+		watching := b.spectators[c.user.ID] != nil
+		b.mu.Unlock()
+		if watching {
+			return b, false
+		}
+	}
+	return nil, false
+}
+
+// chatPlayersOf returns the connections playing b's match right now whose clients
+// can show its chat. Local players go through their owner's connection.
+func (m *broadcastManager) chatPlayersOf(b *broadcast) []*Client {
+	room := m.hub.state.GetRoom(b.roomID)
+	if room == nil {
+		return nil
+	}
+	var out []*Client
+	for _, seat := range room.Players {
+		u := seat.User
+		if u == nil || u.Owner != nil || !u.SpectatorChat || u.CurrentMatch == nil || u.CurrentMatch.ID != b.matchID {
 			continue
 		}
-		viewers := make([]*Client, 0, len(b.spectators))
-		for _, sc := range b.spectators {
-			viewers = append(viewers, sc.client)
-		}
-		b.mu.Unlock()
-		for _, c := range viewers {
-			c.sendEnvelope(protocol.TypeChatMsg, "", payload)
+		if player := m.hub.getClient(u.ID); player != nil {
+			out = append(out, player)
 		}
 	}
+	return out
 }
 
 // endByMatch ends a broadcast regardless of who triggered it (match is over).
@@ -779,9 +887,6 @@ func (m *broadcastManager) finish(b *broadcast, reason string) bool {
 			}
 		}
 		m.hub.roomListMu.Unlock()
-	}
-	for userID := range specs {
-		m.stopWatching(userID, b.matchID)
 	}
 	slog.Info("broadcast end", "match", b.matchID, "reason", reason, "spectators", len(specs))
 	return true

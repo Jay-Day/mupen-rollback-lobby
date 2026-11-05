@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jay-day/rmgk-lobby/internal/rating"
+	"github.com/jay-day/rmgk-lobby/internal/usernames"
 )
 
 // Read-only queries behind the public rankings page.
@@ -140,15 +141,15 @@ func (s *Store) queryHomeRegions() (map[int64]string, error) {
 	return out, rows.Err()
 }
 
-// AccountByName looks an account up by username (case-insensitive).
+// AccountByName looks an account up by username (by usernames.Key).
 func (s *Store) AccountByName(name string) (Account, error) {
 	var (
 		account  Account
 		created  int64
 		disabled bool
 	)
-	err := s.db.QueryRow(`SELECT id, username, created_at, disabled FROM accounts WHERE username = ?`,
-		strings.TrimSpace(name)).Scan(&account.ID, &account.Username, &created, &disabled)
+	err := s.db.QueryRow(`SELECT id, username, created_at, disabled FROM accounts WHERE username_key = ?`,
+		usernames.Key(strings.TrimSpace(name))).Scan(&account.ID, &account.Username, &created, &disabled)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && disabled) {
 		return Account{}, ErrNotFound
 	}

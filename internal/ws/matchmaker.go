@@ -12,6 +12,7 @@ import (
 	"github.com/jay-day/rmgk-lobby/internal/geo"
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
 	"github.com/jay-day/rmgk-lobby/internal/state"
+	"github.com/jay-day/rmgk-lobby/internal/usernames"
 )
 
 const (
@@ -379,8 +380,8 @@ func (m *matchmaker) matchTeammateRequests(userID uint64) teammateRequests {
 		if id == userID {
 			continue
 		}
-		wanted := e.wantTeammate != "" && strings.EqualFold(o.username, e.wantTeammate)
-		asksBack := o.waiting() && strings.EqualFold(o.wantTeammate, e.username)
+		wanted := e.wantTeammate != "" && usernames.Same(o.username, e.wantTeammate)
+		asksBack := o.waiting() && usernames.Same(o.wantTeammate, e.username)
 		switch {
 		case wanted && asksBack && e.samePool(o):
 			e.partner, o.partner = id, userID
@@ -611,6 +612,15 @@ func (h *Hub) handleQuickMatchJoin(c *Client, env protocol.Envelope) {
 		slog.Debug("QUICK_MATCH_JOIN rejected: in a room", "user", c.user.Username)
 		return
 	}
+	// A Quick Match pairs two PCs into two seats.
+	if len(c.user.Group()) > 1 {
+		c.sendEnvelope(protocol.TypeQuickMatchStatus, env.ID, protocol.QuickMatchStatusPayload{
+			Searching: false,
+			QueueSize: h.matchmaker.size(),
+			Reason:    protocol.ReasonLocalPlayers,
+		})
+		return
+	}
 
 	var req protocol.QuickMatchJoinRequest
 	if len(env.Data) > 0 {
@@ -666,7 +676,7 @@ func (h *Hub) handleQuickMatchJoin(c *Client, env protocol.Envelope) {
 // wantedTeammate checks a teammate request: an account other than the
 // searcher's own. Returns the account's name as registered, or why not.
 func (h *Hub) wantedTeammate(u *state.User, name string) (string, string) {
-	if strings.EqualFold(name, u.Username) {
+	if usernames.Same(name, u.Username) {
 		return "", "You can't pick yourself as your teammate."
 	}
 	if h.accounts == nil {
@@ -742,7 +752,7 @@ func (h *Hub) handleQuickMatchCancel(c *Client, env protocol.Envelope) {
 		return
 	}
 	h.matchmaker.remove(c.user.ID)
-	c.user.SetState(state.UserStateIdle)
+	h.broadcasts.settleLobbyState(c.user)
 	h.broadcastPresenceUpdated(c.user)
 
 	c.sendEnvelope(protocol.TypeQuickMatchStatus, env.ID, protocol.QuickMatchStatusPayload{

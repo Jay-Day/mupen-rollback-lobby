@@ -26,6 +26,8 @@ const (
 	TypeRoomUpdatePlayerSettings = "ROOM_UPDATE_PLAYER_SETTINGS"
 	TypeRoomUpdatePrediction     = "ROOM_UPDATE_PREDICTION"
 	TypeRoomUpdateLiveReplay     = "ROOM_UPDATE_LIVE_REPLAY"
+	TypeRoomUpdateLateJoin       = "ROOM_UPDATE_LATE_JOIN"
+	TypeRoomUpdateSaveData       = "ROOM_UPDATE_SAVE_DATA"
 	TypeRoomSwapSlots            = "ROOM_SWAP_SLOTS"
 	// Host-only, waiting-room-only: turn ranked on/off and pick its settings.
 	TypeRoomUpdateRanked = "ROOM_UPDATE_RANKED"
@@ -75,6 +77,10 @@ const (
 	// A client's measured ping to another player in its room
 	// (RoomPeerPingRequest), for ranked max-ping checks.
 	TypeRoomPeerPing = "ROOM_PEER_PING"
+	// Local players: extra lobby users sharing this connection. Added and
+	// removed from the lobby; they all take seats on room create or join.
+	TypeLocalPlayerAdd    = "LOCAL_PLAYER_ADD"
+	TypeLocalPlayerRemove = "LOCAL_PLAYER_REMOVE"
 	// ICE signaling is relayed over the authenticated lobby WebSocket. The
 	// server never sees gameplay datagrams and is not a TURN relay.
 	TypeICESignal = "ICE_SIGNAL"
@@ -105,8 +111,16 @@ const (
 	TypeSpectateStop     = "SPECTATE_STOP"  // spectator: stop watching
 
 	// Moderation (client → server).
-	TypeAdminAuth = "ADMIN_AUTH" // claim moderator role with a password
-	TypeModAction = "MOD_ACTION" // moderator: kick/mute/timeout/ban/unban/unmute/list
+	TypeAdminAuth   = "ADMIN_AUTH"   // claim moderator role with a password
+	TypeAdminLogout = "ADMIN_LOGOUT" // give the moderator role back
+	TypeModAction   = "MOD_ACTION"   // moderator: kick/mute/timeout/ban/unban/unmute/list/inspect
+
+	// Challenges: asking someone to play right now. Sent from a room it's an
+	// invite to that room; otherwise accepting makes a private room for both.
+	TypeChallengeSend    = "CHALLENGE_SEND"
+	TypeChallengeCancel  = "CHALLENGE_CANCEL"
+	TypeChallengeRespond = "CHALLENGE_RESPOND"
+	TypeChallengeGames   = "CHALLENGE_GAMES" // which of my games does this player have?
 )
 
 // Server → Client message types
@@ -115,6 +129,7 @@ const (
 	TypeHelloFail        = "HELLO_FAIL"
 	TypeHeartbeatAck     = "HEARTBEAT_ACK"
 	TypeChatMsg          = "CHAT_MSG"
+	TypeChatFail         = "CHAT_FAIL" // a private message couldn't be delivered
 	TypeChatHistoryReply = "CHAT_HISTORY_REPLY"
 	TypePresenceFull     = "PRESENCE_FULL"
 	TypePresenceDelta    = "PRESENCE_DELTA"
@@ -135,6 +150,17 @@ const (
 	TypeMatchBegin        = "MATCH_BEGIN"
 	TypeMatchPeerLeft     = "MATCH_PEER_LEFT"
 	TypeQuickMatchStatus  = "QUICK_MATCH_STATUS"
+	// Replies to LOCAL_PLAYER_ADD / LOCAL_PLAYER_REMOVE, only to the owner.
+	TypeLocalPlayerAdded   = "LOCAL_PLAYER_ADDED"
+	TypeLocalPlayerRemoved = "LOCAL_PLAYER_REMOVED"
+	TypeLocalPlayerFail    = "LOCAL_PLAYER_FAIL"
+	// Challenges (server → client). CHALLENGE_SENT acknowledges the sender and
+	// CHALLENGE_INCOMING reaches the player it's for; CHALLENGE_RESULT ends it for
+	// both of them, or refuses a CHALLENGE_SEND.
+	TypeChallengeSent       = "CHALLENGE_SENT"
+	TypeChallengeIncoming   = "CHALLENGE_INCOMING"
+	TypeChallengeResult     = "CHALLENGE_RESULT"
+	TypeChallengeGamesReply = "CHALLENGE_GAMES_REPLY"
 	// Late join (server → client). MATCH_ADMIT_BEGIN goes to the match's
 	// players and the joiner; MATCH_ADMIT_FAIL answers a refused MATCH_ADMIT.
 	TypeMatchAdmitBegin = "MATCH_ADMIT_BEGIN"
@@ -176,10 +202,14 @@ const (
 	TypeBroadcastViewerCount = "BROADCAST_VIEWER_COUNT"
 
 	// Moderation (server → client).
-	TypeAdminAuthOK   = "ADMIN_AUTH_OK"   // moderator role granted
-	TypeAdminAuthFail = "ADMIN_AUTH_FAIL" // wrong password / no admins configured
-	TypeModNotice     = "MOD_NOTICE"      // system notice to a user (blocked/muted/kicked/info)
-	TypeModList       = "MOD_LIST"        // reply to a moderator's "list" action
+	TypeAdminAuthOK    = "ADMIN_AUTH_OK"    // moderator role granted
+	TypeAdminAuthFail  = "ADMIN_AUTH_FAIL"  // wrong password / no admins configured
+	TypeAdminLoggedOut = "ADMIN_LOGGED_OUT" // moderator role given back
+	TypeModNotice      = "MOD_NOTICE"       // system notice to a user (blocked/muted/kicked/info)
+	TypeModList        = "MOD_LIST"         // reply to a moderator's "list" action
+	TypeModResult      = "MOD_RESULT"       // a kick/mute/timeout/ban took effect
+	TypeModTargetInfo  = "MOD_TARGET_INFO"  // reply to a moderator's "inspect" action
+	TypeModPeers       = "MOD_PEERS"        // who is a moderator, to moderators
 )
 
 // Failure reason codes
@@ -223,6 +253,39 @@ const (
 	ReasonNotVerified       = "not_verified"       // ranked needs a logged-in account
 	ReasonTooFar            = "too_far"            // estimated ping above the room's max ping
 	ReasonRankedSeats       = "ranked_seats"       // ranked sets are 1v1
+
+	// Local player refusals.
+	ReasonNotEnoughSeats  = "not_enough_seats"  // fewer free seats than players on this PC
+	ReasonNeedsUpdate     = "needs_update"      // this client can't share a room with local players
+	ReasonPeerNeedsUpdate = "peer_needs_update" // someone seated can't share a room with local players
+	ReasonLocalPlayers    = "local_players"     // Quick Match takes one player per PC
+	ReasonInvalidName     = "invalid_name"
+	ReasonNameTaken       = "name_taken"
+	ReasonTooManyPlayers  = "too_many"
+	ReasonInRoom          = "in_room"
+	ReasonSearching       = "searching"
+	ReasonTooFast         = "too_fast"
+	// Refusals for private messages (ReasonNeedsUpdate too).
+	ReasonUserGone = "user_gone"
+	ReasonSamePC   = "same_pc"
+	// Refused joining a room made for a challenge.
+	ReasonPrivateRoom = "private_room"
+)
+
+// How a challenge ended, or why CHALLENGE_SEND was refused (ReasonNeedsUpdate
+// and ReasonTooFast too). ChallengeUnavailable says no more than that on purpose:
+// the real reason may be how many players are on someone's PC.
+const (
+	ChallengeAccepted    = "accepted"
+	ChallengeDeclined    = "declined"
+	ChallengeTimedOut    = "timeout"
+	ChallengeCancelled   = "cancelled"
+	ChallengeBusy        = "busy"         // in a match
+	ChallengeUnavailable = "unavailable"  // can't happen right now
+	ChallengeNoGame      = "no_game"      // they don't have the game
+	ChallengeCooldown    = "cooldown"     // they declined you moments ago
+	ChallengePending     = "pending"      // you already have one out
+	ChallengeBlocked     = "blocked_note" // the message hit the chat filter
 )
 
 // -- Request payloads --
@@ -249,6 +312,20 @@ type HelloRequest struct {
 	// Advertises support for joining a running match (MATCH_ADMIT_*). A match
 	// only sizes itself for late joiners when every seated player sets it.
 	LateJoin bool `json:"lateJoin,omitempty"`
+	// Advertises support for local players: the client routes by each seat's
+	// PeerID. A room never mixes clients that don't with a PC holding several
+	// players, since they'd open a connection per seat.
+	LocalPlayers bool `json:"localPlayers,omitempty"`
+	// Advertises support for private messages and challenges. Peers are told
+	// through presence, so they don't offer them to a client that can't show them.
+	Social bool `json:"social,omitempty"`
+	// Advertises that this client shows a match's players their spectators' chat,
+	// and tells spectators the players can read it. A spectator without it was
+	// promised they can't, so the players don't get that spectator's lines.
+	SpectatorChat bool `json:"spectatorChat,omitempty"`
+	// Advertises support for matches that start from the host's save data.
+	// Such a match can't start, or take a late joiner, without it.
+	SaveData bool `json:"saveData,omitempty"`
 	// Optional account authentication; guests omit it.
 	Auth *HelloAuth `json:"auth,omitempty"`
 	// Ranked game modules the client has installed.
@@ -340,6 +417,10 @@ type HeartbeatRequest struct {
 type ChatSendRequest struct {
 	Channel string `json:"channel"`
 	Message string `json:"message"`
+	// Private messages name who they're for. AsUserID picks who on this PC is
+	// talking; zero means the connection's owner.
+	ToUserID uint64 `json:"toUserId,omitempty"`
+	AsUserID uint64 `json:"asUserId,omitempty"`
 }
 
 type ChatHistoryRequest struct {
@@ -438,6 +519,34 @@ type RoomUpdatePredictionRequest struct {
 // authoritative choice in ROOM_STATE so every seated player can see it.
 type RoomUpdateLiveReplayRequest struct {
 	Enabled bool `json:"enabled"`
+}
+
+// RoomUpdateLateJoinRequest changes whether the next match can take players
+// mid-game (MATCH_ADMIT). Host-only and waiting-room-only; the server
+// rebroadcasts the choice in ROOM_STATE as LateJoinEnabled.
+type RoomUpdateLateJoinRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
+// RoomUpdateSaveDataRequest turns save data on or off for the room's next
+// match and describes the host's pick. Host-only and waiting-room-only. The
+// save itself goes from the host to the players in the pre-match manifest;
+// the server only relays this description in ROOM_STATE.
+type RoomUpdateSaveDataRequest struct {
+	Enabled bool     `json:"enabled"`
+	Label   string   `json:"label,omitempty"`
+	Kinds   []string `json:"kinds,omitempty"`
+	Bytes   int      `json:"bytes,omitempty"`
+	Hash    string   `json:"hash,omitempty"`
+}
+
+// RoomSaveDataPayload is ROOM_STATE's view of the room's save data option.
+type RoomSaveDataPayload struct {
+	Enabled bool     `json:"enabled"`
+	Label   string   `json:"label,omitempty"`
+	Kinds   []string `json:"kinds,omitempty"`
+	Bytes   int      `json:"bytes,omitempty"`
+	Hash    string   `json:"hash,omitempty"`
 }
 
 type PingProbeRequestPayload struct {
@@ -614,18 +723,56 @@ type QuickMatchTeammateRequest struct {
 	Keep bool `json:"keep"`
 }
 
+// LocalPlayerAddRequest adds a player to this connection. Refused while in a
+// room or searching.
+type LocalPlayerAddRequest struct {
+	Name string `json:"name"`
+}
+
+type LocalPlayerRemoveRequest struct {
+	UserID uint64 `json:"userId"`
+}
+
+// ChallengeSendRequest asks a player to play. Rom is ignored from inside a
+// room, where this invites them to it.
+type ChallengeSendRequest struct {
+	ToUserID   uint64  `json:"toUserId"`
+	Rom        RomInfo `json:"rom"`
+	Note       string  `json:"note,omitempty"`
+	LiveReplay bool    `json:"liveReplay,omitempty"`
+}
+
+type ChallengeCancelRequest struct {
+	ChallengeID uint64 `json:"challengeId"`
+}
+
+type ChallengeRespondRequest struct {
+	ChallengeID uint64 `json:"challengeId"`
+	Accept      bool   `json:"accept"`
+}
+
+type ChallengeGamesRequest struct {
+	ToUserID uint64 `json:"toUserId"`
+}
+
 // -- Response payloads --
 
 type HelloOKResponse struct {
-	UserID     uint64           `json:"userId"`
+	UserID uint64 `json:"userId"`
+	// Username is the spelling the lobby kept, which can differ from HELLO's.
+	Username   string           `json:"username"`
 	ObservedIP string           `json:"observedIp"`
 	UDPAnchor  string           `json:"udpAnchor"`
 	Region     string           `json:"region"`
 	ICE        ICEConfiguration `json:"ice"`
-	// Username as registered (canonical casing) when authenticated; clients
-	// should display this instead of what they typed.
-	Username string `json:"username,omitempty"`
-	// Present when the HELLO authenticated an account.
+	// LocalPlayers tells the client LOCAL_PLAYER_ADD works here.
+	LocalPlayers bool `json:"localPlayers,omitempty"`
+	// Social tells the client private messages and challenges work here.
+	Social bool `json:"social,omitempty"`
+	// SpectatorChat tells the client a match's players share its spectators' chat here.
+	SpectatorChat bool `json:"spectatorChat,omitempty"`
+	// Present when the HELLO authenticated an account; Username is then the
+	// account's registered spelling.
 	Account *AccountInfo `json:"account,omitempty"`
 	// Ranked ladders this server runs, so clients know which ROMs qualify.
 	Ladders []LadderInfo `json:"ladders,omitempty"`
@@ -673,6 +820,20 @@ type LadderInfo struct {
 	TeamSize int `json:"teamSize"`
 }
 
+type LocalPlayerAddedPayload struct {
+	UserID uint64 `json:"userId"`
+	Name   string `json:"name"`
+}
+
+type LocalPlayerRemovedPayload struct {
+	UserID uint64 `json:"userId"`
+}
+
+type LocalPlayerFailPayload struct {
+	Name   string `json:"name,omitempty"`
+	Reason string `json:"reason"`
+}
+
 type ICETransportServer struct {
 	Host     string `json:"host"`
 	Port     uint16 `json:"port"`
@@ -710,6 +871,19 @@ type ChatMsgPayload struct {
 	// Sender was authenticated as a moderator (ADMIN_AUTH) when sending.
 	// Clients use this to trust admin-only chat directives like "@notify".
 	Admin bool `json:"admin,omitempty"`
+	// Spectator chat only: the sender is playing the match being watched.
+	FromPlayer bool `json:"fromPlayer,omitempty"`
+	// Private messages only: who it's for. It may be a local player, whose
+	// owner's connection receives it.
+	ToUserID   uint64 `json:"toUserId,omitempty"`
+	ToUsername string `json:"toUsername,omitempty"`
+}
+
+// ChatFailPayload says why a private message went nowhere.
+type ChatFailPayload struct {
+	Channel  string `json:"channel"`
+	ToUserID uint64 `json:"toUserId"`
+	Reason   string `json:"reason"`
 }
 
 type ChatHistoryReply struct {
@@ -732,6 +906,7 @@ type PresenceUser struct {
 	SearchingRom    string `json:"searchingRom,omitempty"`    // ROM name while state == searching
 	WatchingMatchID uint64 `json:"watchingMatchId,omitempty"` // live replay watched while state == spectating
 	Verified        bool   `json:"verified,omitempty"`        // logged into a registered account
+	Social          bool   `json:"social,omitempty"`          // can receive private messages and challenges
 }
 
 type PresenceFullPayload struct {
@@ -765,9 +940,11 @@ type RoomSummary struct {
 	ViewerCount  int      `json:"viewerCount,omitempty"`  // live replay audience; omitted at zero
 	// LateJoin marks an in-game room with a free seat that a late-join capable
 	// client may enter; the host can then add them to the running match.
-	LateJoin bool `json:"lateJoin,omitempty"`
-	Ranked       bool     `json:"ranked,omitempty"`
-	Ladder       string   `json:"ladder,omitempty"` // ladder id while ranked
+	LateJoin bool   `json:"lateJoin,omitempty"`
+	Ranked   bool   `json:"ranked,omitempty"`
+	Ladder   string `json:"ladder,omitempty"` // ladder id while ranked
+	// Private rooms were made for a challenge and refuse ROOM_JOIN.
+	Private bool `json:"private,omitempty"`
 }
 
 type RoomListPayload struct {
@@ -792,9 +969,15 @@ type RoomSeatPayload struct {
 	// LateJoin mirrors the client's capability so the host's UI can tell
 	// whether it can add this member to a running match.
 	LateJoin bool `json:"lateJoin,omitempty"`
-	Verified         bool `json:"verified,omitempty"`
+	Verified bool `json:"verified,omitempty"`
 	// Standing on the ROM's ladder, for verified players when the ROM has one.
 	Standing *LadderStanding `json:"standing,omitempty"`
+	// PeerID is the user whose connection this seat plays through: UserID,
+	// unless the seat is a local player. Clients connect per PeerID.
+	PeerID uint64 `json:"peerId,omitempty"`
+	// SaveData mirrors the client's capability, so the host can see who
+	// keeps a save data match from starting.
+	SaveData bool `json:"saveData,omitempty"`
 }
 
 type RoomStatePayload struct {
@@ -827,6 +1010,16 @@ type RoomStatePayload struct {
 	// CanStartAlone tells the host ROOM_START works with nobody else seated.
 	// Older servers refuse it, so clients need this to offer the option.
 	CanStartAlone bool `json:"canStartAlone,omitempty"`
+	Private       bool `json:"private,omitempty"`
+	// LateJoinEnabled is the host's choice (ROOM_UPDATE_LATE_JOIN, off in a
+	// new room): only then is the next match sized for late joiners. Sent for
+	// every room that has the option (not quick match or ranked rooms), so
+	// clients can tell which rooms offer it.
+	LateJoinEnabled *bool `json:"lateJoinEnabled,omitempty"`
+	// SaveData is the host's choice of starting save (ROOM_UPDATE_SAVE_DATA,
+	// off in a new room). Sent for every room that has the option (not quick
+	// match or ranked rooms), so clients can tell which rooms offer it.
+	SaveData *RoomSaveDataPayload `json:"saveData,omitempty"`
 	// Present while the room is ranked.
 	Ranked *RankedRoomState `json:"ranked,omitempty"`
 }
@@ -859,6 +1052,48 @@ type RoomLeftPayload struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+// ChallengeSentPayload acknowledges a CHALLENGE_SEND. ExpiresInMs counts from
+// now, so clients don't depend on their clocks agreeing with the server's.
+type ChallengeSentPayload struct {
+	ChallengeID uint64  `json:"challengeId"`
+	ToUserID    uint64  `json:"toUserId"`
+	ToUsername  string  `json:"toUsername"`
+	Rom         RomInfo `json:"rom"`
+	ExpiresInMs int64   `json:"expiresInMs"`
+	Invite      bool    `json:"invite,omitempty"`
+}
+
+// ChallengeIncomingPayload reaches the challenged player's connection. ToUserID
+// may be a local player. An invite names the room instead of proposing a new one.
+type ChallengeIncomingPayload struct {
+	ChallengeID  uint64  `json:"challengeId"`
+	FromUserID   uint64  `json:"fromUserId"`
+	FromUsername string  `json:"fromUsername"`
+	ToUserID     uint64  `json:"toUserId"`
+	ToUsername   string  `json:"toUsername"`
+	Rom          RomInfo `json:"rom"`
+	Note         string  `json:"note,omitempty"`
+	ExpiresInMs  int64   `json:"expiresInMs"`
+	Invite       bool    `json:"invite,omitempty"`
+	RoomName     string  `json:"roomName,omitempty"`
+	RoomPlayers  int     `json:"roomPlayers,omitempty"`
+	RoomMax      int     `json:"roomMaxPlayers,omitempty"`
+}
+
+// ChallengeResultPayload ends a challenge, or refuses a CHALLENGE_SEND, in which
+// case ChallengeID is zero and ToUserID says which one.
+type ChallengeResultPayload struct {
+	ChallengeID uint64 `json:"challengeId,omitempty"`
+	ToUserID    uint64 `json:"toUserId,omitempty"`
+	Result      string `json:"result"`
+}
+
+// ChallengeGamesReply lists the sender's games, by MD5, that the player has too.
+type ChallengeGamesReply struct {
+	ToUserID uint64   `json:"toUserId"`
+	MD5s     []string `json:"md5s"`
+}
+
 type PingProbeReplyPayload struct {
 	TargetUserID   uint64 `json:"targetUserId"`
 	TargetEndpoint string `json:"targetEndpoint"`
@@ -882,6 +1117,9 @@ type MatchPeer struct {
 	LocalIP      string `json:"localIp,omitempty"`
 	Slot         int    `json:"slot"`
 	ICESupported bool   `json:"iceSupported,omitempty"`
+	// PeerID is the user whose connection this seat plays through (see
+	// RoomSeatPayload.PeerID).
+	PeerID uint64 `json:"peerId,omitempty"`
 }
 
 type MatchBeginPayload struct {
@@ -924,6 +1162,9 @@ type MatchAdmitBeginPayload struct {
 	HostID  uint64      `json:"hostId"`
 	Joiner  MatchPeer   `json:"joiner"`
 	Peers   []MatchPeer `json:"peers"`
+	// Joiners is every player the hand-off adds, Joiner first: a PC joins with
+	// all of its local players.
+	Joiners []MatchPeer `json:"joiners,omitempty"`
 }
 
 // Late join hand-off steps, in order. Each names who may send it and who
@@ -1020,6 +1261,8 @@ type QuickMatchStatusPayload struct {
 	// QueueSize counts the searchers in the same pool (same ROM, and for a
 	// ranked search the same ladder and roster), including you.
 	QueueSize int `json:"queueSize"`
+	// Reason says why a QUICK_MATCH_JOIN was refused.
+	Reason string `json:"reason,omitempty"`
 	// Ranked is set when the search is (or was) a ranked one.
 	Ranked bool `json:"ranked,omitempty"`
 	// Continuous: the session searches again after each set or match. Stays
@@ -1145,8 +1388,10 @@ type AdminAuthOKResponse struct {
 }
 
 // ModActionRequest is a moderator command. Action is one of:
-// "kick", "mute", "timeout", "ban", "unban", "unmute", "list".
-// Target is a username for kick/mute/timeout/ban, or an IP for unban/unmute.
+// "kick", "mute", "timeout", "ban", "unban", "unmute", "list", "inspect",
+// "closeroom".
+// Target is a username for kick/mute/timeout/ban/inspect, or an IP for
+// unban/unmute.
 // Duration is a Go duration string ("10m", "1h", "30s"); empty/"0" = permanent.
 type ModActionRequest struct {
 	Action   string `json:"action"`
@@ -1166,6 +1411,7 @@ type ModNoticePayload struct {
 // ModSanction is one ban/mute entry surfaced to a moderator via MOD_LIST.
 type ModSanction struct {
 	IP     string `json:"ip"`
+	Name   string `json:"name,omitempty"` // who it was applied to; empty on older entries
 	Reason string `json:"reason"`
 	By     string `json:"by"`
 	Until  int64  `json:"until"` // unix ms; 0 = permanent
@@ -1175,4 +1421,28 @@ type ModSanction struct {
 type ModListReply struct {
 	Bans  []ModSanction `json:"bans"`
 	Mutes []ModSanction `json:"mutes"`
+}
+
+// ModResultPayload confirms a sanction with what's needed to undo it. It goes
+// with the MOD_NOTICE text older clients show.
+type ModResultPayload struct {
+	Action string `json:"action"`
+	Target string `json:"target"`
+	IP     string `json:"ip,omitempty"`
+	Until  int64  `json:"until,omitempty"` // unix ms; 0 = permanent
+}
+
+// ModTargetInfoPayload answers "inspect": what acting on Target would affect.
+// Others is everyone else on the same connection. Moderators are the only people
+// ever told that a PC is shared.
+type ModTargetInfoPayload struct {
+	Target    string   `json:"target"`
+	Others    []string `json:"others,omitempty"`
+	Moderator bool     `json:"moderator,omitempty"`
+}
+
+// ModPeersPayload lists the users moderators can't act on. Local players of a
+// moderator's connection are included. Only moderators receive it.
+type ModPeersPayload struct {
+	UserIDs []uint64 `json:"userIds"`
 }

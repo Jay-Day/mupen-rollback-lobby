@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jay-day/rmgk-lobby/internal/rating"
+	"github.com/jay-day/rmgk-lobby/internal/usernames"
 
 	_ "modernc.org/sqlite"
 )
@@ -215,12 +216,53 @@ var migrations = []string{
 		code_hash  TEXT NOT NULL,
 		expires_at INTEGER NOT NULL
 	);`,
+	// 11: names match by usernames.Key and lookalikes by usernames.Skeleton,
+	// since NOCASE only folds ASCII (filled in by backfillUsernameKeys)
+	`ALTER TABLE accounts ADD COLUMN username_key TEXT NOT NULL DEFAULT '';
+	ALTER TABLE accounts ADD COLUMN username_skeleton TEXT NOT NULL DEFAULT '';`,
 }
 
 // migrationSteps run in Go after the SQL of the same migration (1-based).
 var migrationSteps = map[int]func(tx *sql.Tx) error{
-	5: rebuildRatingsByRoster,
-	6: backfillSetCharacters,
+	5:  rebuildRatingsByRoster,
+	6:  backfillSetCharacters,
+	11: backfillUsernameKeys,
+}
+
+// backfillUsernameKeys fills in every account's name key and skeleton, then
+// indexes them. Names registered before had to be ASCII, so their keys are
+// unique already.
+func backfillUsernameKeys(tx *sql.Tx) error {
+	rows, err := tx.Query(`SELECT id, username FROM accounts`)
+	if err != nil {
+		return err
+	}
+	type named struct {
+		id   int64
+		name string
+	}
+	var all []named
+	for rows.Next() {
+		var n named
+		if err := rows.Scan(&n.id, &n.name); err != nil {
+			rows.Close()
+			return err
+		}
+		all = append(all, n)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, n := range all {
+		if _, err := tx.Exec(`UPDATE accounts SET username_key = ?, username_skeleton = ? WHERE id = ?`,
+			usernames.Key(n.name), usernames.Skeleton(n.name), n.id); err != nil {
+			return err
+		}
+	}
+	_, err = tx.Exec(`CREATE UNIQUE INDEX accounts_username_key ON accounts(username_key);
+		CREATE INDEX accounts_username_skeleton ON accounts(username_skeleton);`)
+	return err
 }
 
 func (s *Store) migrate() error {
@@ -263,18 +305,26 @@ func validPassword(password string) bool {
 	return n >= MinPasswordLen && len(password) <= MaxPasswordLen
 }
 
-// Register creates an account. The caller validates the username format.
+// Register creates an account. The caller validates the username format and
+// passes the spelling usernames.Normalize keeps. A name that is, or looks
+// like, a registered one is taken.
 func (s *Store) Register(username, password string) (Account, error) {
 	if !validPassword(password) {
 		return Account{}, ErrWeakPassword
+	}
+	if taken, err := s.IsRegistered(username); err != nil {
+		return Account{}, err
+	} else if taken {
+		return Account{}, ErrUsernameTaken
 	}
 	hash, err := hashPassword(password)
 	if err != nil {
 		return Account{}, err
 	}
 	now := s.now()
-	res, err := s.db.Exec(`INSERT INTO accounts (username, pw_hash, created_at) VALUES (?, ?, ?)`,
-		username, hash, now.Unix())
+	res, err := s.db.Exec(`INSERT INTO accounts (username, username_key, username_skeleton, pw_hash, created_at)
+		VALUES (?, ?, ?, ?, ?)`,
+		username, usernames.Key(username), usernames.Skeleton(username), hash, now.Unix())
 	if err != nil {
 		if isUniqueViolation(err) {
 			return Account{}, ErrUsernameTaken
@@ -288,7 +338,7 @@ func (s *Store) Register(username, password string) (Account, error) {
 	return Account{ID: id, Username: username, CreatedAt: time.Unix(now.Unix(), 0)}, nil
 }
 
-// Login checks a username (case-insensitive) and password.
+// Login checks a username (by usernames.Key) and password.
 func (s *Store) Login(username, password string) (Account, error) {
 	var (
 		account  Account
@@ -296,8 +346,8 @@ func (s *Store) Login(username, password string) (Account, error) {
 		created  int64
 		disabled bool
 	)
-	err := s.db.QueryRow(`SELECT id, username, pw_hash, created_at, disabled FROM accounts WHERE username = ?`,
-		username).Scan(&account.ID, &account.Username, &hash, &created, &disabled)
+	err := s.db.QueryRow(`SELECT id, username, pw_hash, created_at, disabled FROM accounts WHERE username_key = ?`,
+		usernames.Key(username)).Scan(&account.ID, &account.Username, &hash, &created, &disabled)
 	if errors.Is(err, sql.ErrNoRows) {
 		verifyPassword(dummyHash, password)
 		return Account{}, ErrBadCredentials
@@ -319,15 +369,26 @@ func (s *Store) Login(username, password string) (Account, error) {
 	return account, nil
 }
 
-// IsRegistered reports whether username (case-insensitive) belongs to an
-// account, so guests can't connect under a registered name.
+// IsRegistered reports whether username belongs to an account or looks like
+// one that does, so guests can't connect under a registered name. Two plain
+// ASCII names never count as lookalikes, as in the lobby's online names.
 func (s *Store) IsRegistered(username string) (bool, error) {
-	var one int
-	err := s.db.QueryRow(`SELECT 1 FROM accounts WHERE username = ?`, username).Scan(&one)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+	rows, err := s.db.Query(`SELECT username FROM accounts WHERE username_key = ? OR username_skeleton = ?`,
+		usernames.Key(username), usernames.Skeleton(username))
+	if err != nil {
+		return false, err
 	}
-	return err == nil, err
+	defer rows.Close()
+	for rows.Next() {
+		var registered string
+		if err := rows.Scan(&registered); err != nil {
+			return false, err
+		}
+		if usernames.Same(registered, username) || !usernames.IsASCII(registered) || !usernames.IsASCII(username) {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 func hashToken(token string) string {

@@ -14,6 +14,7 @@ import (
 // semi-stable identifier we have — there are no accounts).
 type Sanction struct {
 	IP     string    `json:"ip"`
+	Name   string    `json:"name,omitempty"` // who it was applied to; empty on older entries
 	Reason string    `json:"reason"`
 	By     string    `json:"by"`    // moderator name
 	Set    time.Time `json:"set"`   // when applied
@@ -150,9 +151,9 @@ func (m *Manager) IsMuted(ip string) (Sanction, bool) {
 }
 
 // Ban applies a ban (dur == 0 => permanent; dur > 0 => timeout that expires).
-func (m *Manager) Ban(ip, by, reason string, dur time.Duration) {
+func (m *Manager) Ban(ip, name, by, reason string, dur time.Duration) {
 	now := time.Now()
-	s := Sanction{IP: ip, Reason: reason, By: by, Set: now}
+	s := Sanction{IP: ip, Name: name, Reason: reason, By: by, Set: now}
 	if dur > 0 {
 		s.Until = now.Add(dur)
 	}
@@ -164,9 +165,9 @@ func (m *Manager) Ban(ip, by, reason string, dur time.Duration) {
 }
 
 // Mute silences an IP's chat for dur (dur == 0 => until manually unmuted).
-func (m *Manager) Mute(ip, by, reason string, dur time.Duration) {
+func (m *Manager) Mute(ip, name, by, reason string, dur time.Duration) {
 	now := time.Now()
-	s := Sanction{IP: ip, Reason: reason, By: by, Set: now}
+	s := Sanction{IP: ip, Name: name, Reason: reason, By: by, Set: now}
 	if dur > 0 {
 		s.Until = now.Add(dur)
 	}

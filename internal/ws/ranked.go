@@ -104,6 +104,24 @@ func (h *Hub) rankedEligibility(u *state.User, settings *state.RankedSettings, h
 	return "", ""
 }
 
+// rankedLocalPlayersMessage refuses a PC with local players a ranked seat: a
+// ranked player is one account at one PC. Only that PC is told.
+const rankedLocalPlayersMessage = "Ranked play takes one player per PC. Remove your local players first."
+
+// rankedInviteRefusal reports whether target's PC can't be invited into
+// room because the room is ranked and they couldn't play in it.
+func (h *Hub) rankedInviteRefusal(target *state.User, room *state.Room) bool {
+	settings := room.GetRanked()
+	if settings == nil {
+		return false
+	}
+	if len(target.Group()) > 1 {
+		return true
+	}
+	reason, _ := h.rankedEligibility(target.Primary(), settings, room.Host)
+	return reason != ""
+}
+
 // roomState is roomStatePayload plus what needs the account store: ladder
 // names and each verified seat's standing.
 func (h *Hub) roomState(room *state.Room) protocol.RoomStatePayload {

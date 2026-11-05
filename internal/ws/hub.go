@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coder/websocket"
 	"github.com/jay-day/rmgk-lobby/internal/accounts"
@@ -20,6 +21,7 @@ import (
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
 	"github.com/jay-day/rmgk-lobby/internal/ranked"
 	"github.com/jay-day/rmgk-lobby/internal/state"
+	"github.com/jay-day/rmgk-lobby/internal/usernames"
 )
 
 const (
@@ -56,6 +58,7 @@ type Hub struct {
 
 	lobbyChat  *chatHistory
 	matchmaker *matchmaker
+	challenges *challengeManager
 	broadcasts *broadcastManager
 	mod        *moderation.Manager
 	settings   *config.Store // nil = built-in defaults
@@ -89,6 +92,7 @@ func NewHub(s *state.State, udpPublicAddr string, iceConfig protocol.ICEConfigur
 		unregister:    make(chan *Client, 32),
 		lobbyChat:     newChatHistory(),
 		matchmaker:    newMatchmaker(),
+		challenges:    newChallengeManager(),
 		mod:           mod,
 		settings:      settings,
 	}
@@ -148,6 +152,12 @@ func (h *Hub) cleanupClient(c *Client) {
 	h.matchmaker.remove(uid)
 	h.quickMatchSplitFrom(uid)
 
+	// Challenges to or from this PC are over.
+	h.endChallengesFor(c.user, protocol.ChallengeUnavailable)
+	if c.isModerator {
+		h.broadcastModPeers()
+	}
+
 	// End any broadcast this user was running and drop them from spectator sets.
 	h.broadcasts.onUserGone(uid)
 
@@ -160,6 +170,12 @@ func (h *Hub) cleanupClient(c *Client) {
 	// TODO: if user was in a match, send MATCH_PEER_LEFT to peers.
 
 	h.broadcastPresenceRemoved(uid)
+
+	// Local players go with their connection.
+	for _, local := range c.user.Group()[1:] {
+		h.state.RemoveUser(local.ID)
+		h.broadcastPresenceRemoved(local.ID)
+	}
 }
 
 // reapSilentClients force-closes connections that have been silent past
@@ -277,10 +293,13 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request, ip string) {
 // clampString caps a client-supplied string to n bytes — these are echoed to
 // every peer, so don't let one client bloat presence broadcasts.
 func clampString(s string, n int) string {
-	if len(s) > n {
-		return s[:n]
+	if len(s) <= n {
+		return s
 	}
-	return s
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
@@ -299,14 +318,17 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 
 	// a Discord sign-in learns the name from the linked account
 	discordLogin := req.Auth != nil && req.Auth.Mode == "discord"
-	if !discordLogin && !isValidUsername(req.Username) {
-		c.sendFail(protocol.TypeHelloFail, env.ID, protocol.ReasonInvalidPayload)
+	username, err := usernames.Normalize(req.Username)
+	if err != nil && !discordLogin {
+		c.sendFail(protocol.TypeHelloFail, env.ID, protocol.ReasonInvalidName)
 		return errInvalidUsername
 	}
+	// accounts register and look up the spelling the lobby keeps
+	req.Username = username
 	// Usernames are broadcast to the whole lobby — hold them to the same
 	// hate-speech filter as chat.
 	if h.mod != nil && !discordLogin {
-		if term, hit := h.mod.FilterMessage(req.Username); hit {
+		if term, hit := h.mod.FilterMessage(username); hit {
 			c.sendFail(protocol.TypeHelloFail, env.ID, protocol.ReasonInvalidPayload)
 			slog.Info("username blocked by filter", "ip", c.ip, "term", term)
 			return errInvalidUsername
@@ -321,7 +343,6 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		})
 		return errHelloRejected
 	}
-	username := req.Username
 	var accountID int64
 	if auth.account != nil {
 		username = auth.account.Username
@@ -348,6 +369,11 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		Anonymous:     req.Anonymous,
 		ICESupported:  req.ICESupported,
 		LateJoin:      req.LateJoin,
+		LocalPlayers:  req.LocalPlayers,
+		Social:        req.Social,
+		SpectatorChat: req.SpectatorChat,
+		RomHashes:     romHashSet(req.RomHashes),
+		SaveData:      req.SaveData,
 		AccountID:     accountID,
 		SessionToken:  auth.token,
 		JoinedAt:      time.Now(),
@@ -367,12 +393,16 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 
 	resp := protocol.HelloOKResponse{
 		UserID:     user.ID,
+		Username:   user.Username,
 		ObservedIP: c.ip,
 		UDPAnchor:  h.udpPublicAddr,
 		Region:     user.Region,
 		ICE:        h.iceConfig,
-		Username:   user.Username,
 		Ladders:    h.ladderInfo(),
+
+		LocalPlayers:  true,
+		Social:        true,
+		SpectatorChat: true,
 	}
 	if user.Verified() {
 		resp.Account = h.accountInfo(user)
@@ -418,6 +448,10 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleRoomUpdatePrediction(c, env)
 	case protocol.TypeRoomUpdateLiveReplay:
 		h.handleRoomUpdateLiveReplay(c, env)
+	case protocol.TypeRoomUpdateLateJoin:
+		h.handleRoomUpdateLateJoin(c, env)
+	case protocol.TypeRoomUpdateSaveData:
+		h.handleRoomUpdateSaveData(c, env)
 	case protocol.TypeRoomSwapSlots:
 		h.handleRoomSwapSlots(c, env)
 	case protocol.TypeRoomUpdateRanked:
@@ -458,6 +492,18 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleQuickMatchJoin(c, env)
 	case protocol.TypeQuickMatchCancel:
 		h.handleQuickMatchCancel(c, env)
+	case protocol.TypeLocalPlayerAdd:
+		h.handleLocalPlayerAdd(c, env)
+	case protocol.TypeLocalPlayerRemove:
+		h.handleLocalPlayerRemove(c, env)
+	case protocol.TypeChallengeSend:
+		h.handleChallengeSend(c, env)
+	case protocol.TypeChallengeCancel:
+		h.handleChallengeCancel(c, env)
+	case protocol.TypeChallengeRespond:
+		h.handleChallengeRespond(c, env)
+	case protocol.TypeChallengeGames:
+		h.handleChallengeGames(c, env)
 	case protocol.TypeMatchAdmit:
 		h.handleMatchAdmit(c, env)
 	case protocol.TypeMatchAdmitSignal:
@@ -488,6 +534,8 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleSpectateStop(c, env)
 	case protocol.TypeAdminAuth:
 		h.handleAdminAuth(c, env)
+	case protocol.TypeAdminLogout:
+		h.handleAdminLogout(c, env)
 	case protocol.TypeModAction:
 		h.handleModAction(c, env)
 	default:
@@ -568,7 +616,12 @@ func (h *Hub) handlePingProbeRequest(c *Client, env protocol.Envelope) {
 	if err := json.Unmarshal(env.Data, &req); err != nil {
 		return
 	}
-	if req.TargetUserID == c.user.ID {
+	// A local player is reached through its owner's connection.
+	target := h.state.GetUser(req.TargetUserID)
+	if target != nil {
+		target = target.Primary()
+	}
+	if req.TargetUserID == c.user.ID || target == c.user {
 		return
 	}
 	// Dropped silently: a client over its budget is either buggy or hostile,
@@ -577,8 +630,6 @@ func (h *Hub) handlePingProbeRequest(c *Client, env protocol.Envelope) {
 		slog.Debug("ping probe rate limited", "user", c.user.Username, "target", req.TargetUserID)
 		return
 	}
-
-	target := h.state.GetUser(req.TargetUserID)
 
 	resp := protocol.PingProbeReplyPayload{TargetUserID: req.TargetUserID}
 	if target != nil {
@@ -622,8 +673,11 @@ func (h *Hub) handleHeartbeat(c *Client, env protocol.Envelope) {
 	if len(env.Data) > 0 {
 		_ = json.Unmarshal(env.Data, &req)
 	}
+	group := c.user.Group()
 	if req.PingToServer > 0 {
-		c.user.SetPingToServer(req.PingToServer)
+		for _, u := range group {
+			u.SetPingToServer(req.PingToServer)
+		}
 	}
 
 	// AFK presence. Only the two "doing nothing" states flip to away — a
@@ -631,13 +685,15 @@ func (h *Hub) handleHeartbeat(c *Client, env protocol.Envelope) {
 	// set and cleared by their own flows, and an AFK label would clobber
 	// them). Returning from away lands on idle; if they were actually
 	// browsing, the next room-list interaction restores that on its own.
-	switch st := c.user.GetState(); {
-	case req.Away && (st == state.UserStateIdle || st == state.UserStateBrowsing):
-		c.user.SetState(state.UserStateAway)
-		h.broadcastPresenceUpdated(c.user)
-	case !req.Away && st == state.UserStateAway:
-		c.user.SetState(state.UserStateIdle)
-		h.broadcastPresenceUpdated(c.user)
+	for _, u := range group {
+		switch st := u.GetState(); {
+		case req.Away && (st == state.UserStateIdle || st == state.UserStateBrowsing):
+			u.SetState(state.UserStateAway)
+			h.broadcastPresenceUpdated(u)
+		case !req.Away && st == state.UserStateAway:
+			u.SetState(state.UserStateIdle)
+			h.broadcastPresenceUpdated(u)
+		}
 	}
 
 	c.sendEnvelope(protocol.TypeHeartbeatAck, env.ID, protocol.HeartbeatAckResponse{
@@ -702,7 +758,7 @@ func (h *Hub) handleChatSend(c *Client, env protocol.Envelope) {
 	if !validChannel(req.Channel) {
 		return
 	}
-	msg := strings.TrimSpace(req.Message)
+	msg := strings.TrimSpace(cleanText(req.Message))
 	if msg == "" {
 		return
 	}
@@ -752,8 +808,10 @@ func (h *Hub) handleChatSend(c *Client, env protocol.Envelope) {
 		}
 		h.broadcastToRoom(room, protocol.TypeChatMsg, payload)
 	case channelSpectate:
-		// Only to the viewers of the live replay the sender is watching.
-		h.broadcasts.spectatorChat(c.user.ID, payload)
+		// A live replay's viewers, and the players of the match it shows.
+		h.broadcasts.spectatorChat(c, payload)
+	case channelPM:
+		h.deliverPrivateMessage(c, env.ID, req, payload)
 	}
 }
 
@@ -762,7 +820,7 @@ func (h *Hub) handleChatHistory(c *Client, env protocol.Envelope) {
 	if err := json.Unmarshal(env.Data, &req); err != nil {
 		return
 	}
-	if !validChannel(req.Channel) {
+	if !validChannel(req.Channel) || req.Channel == channelPM {
 		return
 	}
 	reply := protocol.ChatHistoryReply{
@@ -783,6 +841,7 @@ func (h *Hub) presenceUserFromState(u *state.User) protocol.PresenceUser {
 		Connection:    u.Connection,
 		PingToServer:  u.PingToServer,
 		Verified:      u.Verified(),
+		Social:        u.Social,
 	}
 	// Withholding happens here, at the single choke point every presence
 	// message flows through, so no other broadcast path can leak the country.

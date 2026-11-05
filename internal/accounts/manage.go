@@ -7,6 +7,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/jay-day/rmgk-lobby/internal/usernames"
 )
 
 // ResetCodeTTL is how long a moderator-issued password reset code works.
@@ -140,8 +142,8 @@ func (s *Store) ResetPassword(username, code, next string) (Account, error) {
 		expires  int64
 	)
 	err := s.db.QueryRow(`SELECT a.id, a.username, a.created_at, a.disabled, r.code_hash, r.expires_at
-		FROM accounts a JOIN password_resets r ON r.account_id = a.id WHERE a.username = ?`,
-		username).Scan(&account.ID, &account.Username, &created, &disabled, &codeHash, &expires)
+		FROM accounts a JOIN password_resets r ON r.account_id = a.id WHERE a.username_key = ?`,
+		usernames.Key(username)).Scan(&account.ID, &account.Username, &created, &disabled, &codeHash, &expires)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Account{}, ErrBadResetCode
 	}

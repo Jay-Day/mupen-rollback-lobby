@@ -6,6 +6,7 @@ require (
 	github.com/coder/websocket v1.8.12
 	github.com/phuslu/iploc v1.0.20260515
 	golang.org/x/crypto v0.57.0
+	golang.org/x/text v0.42.0
 	modernc.org/sqlite v1.60.1
 )
 

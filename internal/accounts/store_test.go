@@ -50,6 +50,89 @@ func TestRegisterLogin(t *testing.T) {
 	}
 }
 
+// Names outside ASCII match the way the lobby matches online names: by
+// usernames.Key, with lookalikes taken unless both names are plain ASCII.
+func TestRegisterUnicodeNames(t *testing.T) {
+	s := openTestStore(t)
+
+	jose, err := s.Register("José", "correct horse")
+	if err != nil {
+		t.Fatalf("Register(José): %v", err)
+	}
+	if _, err := s.Register("JOSÉ", "another password"); !errors.Is(err, ErrUsernameTaken) {
+		t.Fatalf("upper-case duplicate err = %v", err)
+	}
+	// the same name with a combining accent, and in fullwidth letters
+	if got, err := s.Login("José", "correct horse"); err != nil || got.ID != jose.ID || got.Username != "José" {
+		t.Fatalf("Login(decomposed) = %+v, %v", got, err)
+	}
+	if got, err := s.AccountByName("ｊｏｓé"); err != nil || got.ID != jose.ID {
+		t.Fatalf("AccountByName(fullwidth) = %+v, %v", got, err)
+	}
+
+	if _, err := s.Register("Bob", "password123"); err != nil {
+		t.Fatalf("Register(Bob): %v", err)
+	}
+	// Bob with a Cyrillic о is Bob's
+	if _, err := s.Register("Bоb", "password123"); !errors.Is(err, ErrUsernameTaken) {
+		t.Fatalf("lookalike err = %v", err)
+	}
+	if ok, _ := s.IsRegistered("Bоb"); !ok {
+		t.Fatal("IsRegistered(lookalike of Bob) = false")
+	}
+	// two ASCII names that only look alike stay apart
+	if _, err := s.Register("PauI", "password123"); err != nil {
+		t.Fatalf("Register(PauI): %v", err)
+	}
+	if _, err := s.Register("Paul", "password123"); err != nil {
+		t.Fatalf("Register(Paul) next to PauI: %v", err)
+	}
+	if ok, _ := s.IsRegistered("Pau1"); ok {
+		t.Fatal("IsRegistered(Pau1) = true; ASCII lookalikes aren't registered names")
+	}
+
+	if _, err := s.Register("スマブラ太郎", "password123"); err != nil {
+		t.Fatalf("Register(スマブラ太郎): %v", err)
+	}
+	if ok, _ := s.IsRegistered("スマブラ太郎"); !ok {
+		t.Fatal("IsRegistered(スマブラ太郎) = false")
+	}
+	if found, err := s.SearchAccounts("ブラ", 10); err != nil || len(found) != 1 || found[0].Username != "スマブラ太郎" {
+		t.Fatalf("SearchAccounts(ブラ) = %+v, %v", found, err)
+	}
+	if found, err := s.SearchAccounts("JOS", 10); err != nil || len(found) != 1 || found[0].ID != jose.ID {
+		t.Fatalf("SearchAccounts(JOS) = %+v, %v", found, err)
+	}
+}
+
+// Accounts from before migration 11 get their name keys filled in.
+func TestMigrationBackfillsUsernameKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acct, _ := s.Register("Player_1", "correct horse")
+	if _, err := s.db.Exec(`DROP INDEX accounts_username_key; DROP INDEX accounts_username_skeleton;
+		ALTER TABLE accounts DROP COLUMN username_key; ALTER TABLE accounts DROP COLUMN username_skeleton;
+		PRAGMA user_version = 10`); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if got, err := s.Login("player_1", "correct horse"); err != nil || got.ID != acct.ID {
+		t.Fatalf("Login after backfill = %+v, %v", got, err)
+	}
+	if _, err := s.Register("PLAYER_1", "another password"); !errors.Is(err, ErrUsernameTaken) {
+		t.Fatalf("duplicate after backfill err = %v", err)
+	}
+}
+
 func TestSessions(t *testing.T) {
 	s := openTestStore(t)
 	acct, _ := s.Register("tokenuser", "password123")
