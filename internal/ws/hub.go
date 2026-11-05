@@ -332,6 +332,7 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		SpectatorChat: req.SpectatorChat,
 		RomHashes:     romHashSet(req.RomHashes),
 		SaveData:      req.SaveData,
+		NoChallenges:  req.NoChallenges,
 		JoinedAt:      time.Now(),
 		LastSeen:      time.Now(),
 		Send:          c.send,
@@ -354,9 +355,10 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		Region:     user.Region,
 		ICE:        h.iceConfig,
 
-		LocalPlayers:  true,
-		Social:        true,
-		SpectatorChat: true,
+		LocalPlayers:      true,
+		Social:            true,
+		SpectatorChat:     true,
+		ChallengeSettings: true,
 	}
 	c.sendEnvelope(protocol.TypeHelloOK, env.ID, resp)
 
@@ -403,6 +405,8 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleRoomUpdateLateJoin(c, env)
 	case protocol.TypeRoomUpdateSaveData:
 		h.handleRoomUpdateSaveData(c, env)
+	case protocol.TypeRoomUpdateJoinLimits:
+		h.handleRoomUpdateJoinLimits(c, env)
 	case protocol.TypeRoomSwapSlots:
 		h.handleRoomSwapSlots(c, env)
 	case protocol.TypePingProbeRequest:
@@ -429,6 +433,8 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleChallengeRespond(c, env)
 	case protocol.TypeChallengeGames:
 		h.handleChallengeGames(c, env)
+	case protocol.TypeChallengeSettings:
+		h.handleChallengeSettings(c, env)
 	case protocol.TypeMatchAdmit:
 		h.handleMatchAdmit(c, env)
 	case protocol.TypeMatchAdmitSignal:
@@ -756,6 +762,7 @@ func (h *Hub) presenceUserFromState(u *state.User) protocol.PresenceUser {
 		Connection:    u.Connection,
 		PingToServer:  u.PingToServer,
 		Social:        u.Social,
+		NoChallenges:  u.ChallengesOff(),
 	}
 	// Withholding happens here, at the single choke point every presence
 	// message flows through, so no other broadcast path can leak the country.

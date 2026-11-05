@@ -42,6 +42,9 @@ type User struct {
 	Social        bool   // can receive private messages and challenges
 	SpectatorChat bool   // shares a match's spectator chat with its players
 	SaveData      bool   // can play a match that starts from the host's save data
+	// The PC doesn't take challenges. Set on the connection's owner only; its
+	// local players follow it (see ChallengesOff).
+	NoChallenges bool
 
 	// The games this client has, by upper-case MD5, from HELLO. Set once and
 	// only read afterwards.
@@ -109,6 +112,27 @@ func (u *User) RemoveLocal(userID uint64) *User {
 		}
 	}
 	return nil
+}
+
+// ChallengesOff reports whether u's PC turned challenges off.
+func (u *User) ChallengesOff() bool {
+	owner := u.Primary()
+	owner.mu.RLock()
+	defer owner.mu.RUnlock()
+	return owner.NoChallenges
+}
+
+// SetChallengesOff records the PC's choice on u's owner and reports whether it
+// changed.
+func (u *User) SetChallengesOff(off bool) bool {
+	owner := u.Primary()
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	if owner.NoChallenges == off {
+		return false
+	}
+	owner.NoChallenges = off
+	return true
 }
 
 func (u *User) GetState() UserState {

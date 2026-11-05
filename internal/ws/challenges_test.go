@@ -663,3 +663,36 @@ func TestModPeersReachOnlyModerators(t *testing.T) {
 		t.Fatal("no ADMIN_LOGGED_OUT")
 	}
 }
+
+func TestChallengesOffRefusesThemAndShowsInPresence(t *testing.T) {
+	f := newLateJoinFixture(t, 4)
+	f.socialUser("mira")
+	f.socialUser("kart")
+	sam := f.addLocal("kart", "sam")
+
+	// One waiting for an answer when kart turns them off ends there.
+	in := f.challenge("mira", "kart")
+	f.drain("mira")
+	f.drain("kart")
+	f.send("kart", protocol.TypeChallengeSettings, protocol.ChallengeSettingsRequest{Off: true})
+	if got := payloadOf[protocol.ChallengeResultPayload](t, f.drain("mira"), protocol.TypeChallengeResult); got.ChallengeID != in.ChallengeID || got.Result != protocol.ChallengeOff {
+		t.Fatalf("pending challenge ended with %+v", got)
+	}
+	presence := f.h.presenceUserFromState(f.users["kart"])
+	if !presence.NoChallenges {
+		t.Fatal("presence doesn't say kart takes no challenges")
+	}
+	// The whole PC: a local player follows its owner.
+	if !f.h.presenceUserFromState(sam).NoChallenges {
+		t.Fatal("presence doesn't say sam takes no challenges")
+	}
+	f.refusedWith("mira", "kart", protocol.ChallengeOff)
+	f.refusedWith("mira", "sam", protocol.ChallengeOff)
+
+	f.send("kart", protocol.TypeChallengeSettings, protocol.ChallengeSettingsRequest{Off: false})
+	if f.h.presenceUserFromState(f.users["kart"]).NoChallenges {
+		t.Fatal("still off after turning challenges back on")
+	}
+	f.drain("mira")
+	f.challenge("mira", "kart")
+}
