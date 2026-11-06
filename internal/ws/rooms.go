@@ -602,6 +602,49 @@ func (h *Hub) handleRoomUpdateJoinLimits(c *Client, env protocol.Envelope) {
 	h.broadcastRoomList()
 }
 
+// roomResizable reports whether the host may change the room's seat count:
+// quick match and challenge rooms are sized for the players they were made for,
+// and a ranked room for its set's teams.
+func roomResizable(r *state.Room) bool {
+	return !r.QuickMatch && !r.Private && r.GetRanked() == nil
+}
+
+// handleRoomUpdateMaxPlayers changes how many seats the room has. Host-only,
+// and only while it waits: a running match was sized when it started. It can't
+// drop below the players already seated.
+func (h *Hub) handleRoomUpdateMaxPlayers(c *Client, env protocol.Envelope) {
+	var req protocol.RoomUpdateMaxPlayersRequest
+	if err := json.Unmarshal(env.Data, &req); err != nil {
+		return
+	}
+	room := c.user.CurrentRoom
+	if room == nil {
+		return
+	}
+	if room.Host == nil || room.Host.ID != c.user.ID {
+		slog.Debug("ROOM_UPDATE_MAX_PLAYERS rejected: not host", "user", c.user.Username, "room", room.ID)
+		return
+	}
+	if !roomResizable(room) || room.State != state.RoomStateWaiting {
+		return
+	}
+	if req.MaxPlayers < minRoomPlayers || req.MaxPlayers > maxRoomPlayers {
+		return
+	}
+	changed, ok := room.SetMaxPlayers(req.MaxPlayers)
+	if !ok {
+		slog.Debug("ROOM_UPDATE_MAX_PLAYERS rejected: fewer seats than players", "room", room.ID,
+			"max", req.MaxPlayers)
+		return
+	}
+	if !changed {
+		return
+	}
+	slog.Info("room size updated", "room", room.ID, "max", req.MaxPlayers, "by", c.user.Username)
+	h.broadcastRoomState(room)
+	h.broadcastRoomList()
+}
+
 // Save data limits, matching the client's: the cartridge saves a match can
 // start from, and the most they hold together (EEPROM, SRAM, FlashRAM).
 const (
@@ -1264,6 +1307,7 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 		LateJoin:          roomAcceptsLateJoin(r),
 		CanStartAlone:     roomCanStartAlone(r),
 		Private:           r.Private,
+		Resizable:         roomResizable(r),
 		Rom: protocol.RomInfo{
 			Name:   r.RomName,
 			MD5:    r.RomMD5,

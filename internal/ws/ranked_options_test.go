@@ -118,6 +118,55 @@ func TestRankedRoomHasNoLateJoinOrSaveData(t *testing.T) {
 	}
 }
 
+// A ranked room has its set's seats: the host can't resize it until it's
+// casual again.
+func TestRankedRoomKeepsTheSetsSize(t *testing.T) {
+	f := newRankedFixture(t)
+	host := f.connect("host", true)
+	f.hub.handleRoomCreate(host, envelope(t, protocol.RoomCreateRequest{
+		Name: "casual", Rom: protocol.RomInfo{Name: "Remix", MD5: testRomMD5}, MaxPlayers: 4, Delay: 2, Prediction: 7,
+	}))
+	room := host.user.CurrentRoom
+	if room == nil {
+		t.Fatal("room wasn't created")
+	}
+	if !f.hub.roomState(room).Resizable {
+		t.Fatal("casual room isn't resizable")
+	}
+
+	f.hub.handleRoomUpdateRanked(host, envelope(t, protocol.RankedRoomRequest{Enabled: true}))
+	settings := room.GetRanked()
+	if settings == nil {
+		t.Fatal("room didn't turn ranked")
+	}
+	seats := settings.Players()
+	if room.MaxPlayers != seats {
+		t.Fatalf("ranked room has %d seats, want the set's %d", room.MaxPlayers, seats)
+	}
+	if f.hub.roomState(room).Resizable {
+		t.Fatal("ranked room is marked resizable")
+	}
+	for _, size := range []int{2, 3, 4} {
+		f.hub.handleRoomUpdateMaxPlayers(host, envelope(t, protocol.RoomUpdateMaxPlayersRequest{MaxPlayers: size}))
+		if room.MaxPlayers != seats {
+			t.Fatalf("ranked room took %d seats: now %d", size, room.MaxPlayers)
+		}
+	}
+
+	f.hub.handleRoomUpdateRanked(host, envelope(t, protocol.RankedRoomRequest{Enabled: false}))
+	if !f.hub.roomState(room).Resizable {
+		t.Fatal("casual again: not resizable")
+	}
+	next := 3
+	if seats == 3 {
+		next = 4
+	}
+	f.hub.handleRoomUpdateMaxPlayers(host, envelope(t, protocol.RoomUpdateMaxPlayersRequest{MaxPlayers: next}))
+	if room.MaxPlayers != next {
+		t.Fatalf("casual again: size %d, want %d", room.MaxPlayers, next)
+	}
+}
+
 // An invite can't seat someone a ranked room would refuse at the door.
 func TestInviteToRankedRoomNeedsEligibility(t *testing.T) {
 	f := newRankedFixture(t)
