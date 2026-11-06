@@ -591,7 +591,8 @@ func (m *broadcastManager) spectateStart(c *Client, matchID uint64) {
 // syncSpectatingPresence shows a lobby-idle user as "spectating" while they
 // watch any live stream, and returns them to idle once they watch none. Like
 // AFK, it only takes over the "doing nothing" states: a seated, searching or
-// playing user keeps their real state. Call with no broadcast locks held.
+// playing user keeps their real state. Local players watch with the PC they
+// sit at, as they go AFK with it. Call with no broadcast locks held.
 func (m *broadcastManager) syncSpectatingPresence(userID uint64) {
 	if m.hub == nil {
 		return
@@ -603,16 +604,19 @@ func (m *broadcastManager) syncSpectatingPresence(userID uint64) {
 		return // disconnected: presence removal already covers them
 	}
 
-	var changed bool
-	if m.isWatching(userID) {
-		changed = c.user.CompareAndSetState([]state.UserState{
-			state.UserStateIdle, state.UserStateBrowsing, state.UserStateAway,
-		}, state.UserStateSpectating)
-	} else {
-		changed = c.user.CompareAndSetState([]state.UserState{state.UserStateSpectating}, state.UserStateIdle)
-	}
-	if changed {
-		m.hub.broadcastPresenceUpdated(c.user)
+	watching := m.isWatching(userID)
+	for _, u := range c.user.Group() {
+		var changed bool
+		if watching {
+			changed = u.CompareAndSetState([]state.UserState{
+				state.UserStateIdle, state.UserStateBrowsing, state.UserStateAway,
+			}, state.UserStateSpectating)
+		} else {
+			changed = u.CompareAndSetState([]state.UserState{state.UserStateSpectating}, state.UserStateIdle)
+		}
+		if changed {
+			m.hub.broadcastPresenceUpdated(u)
+		}
 	}
 }
 
@@ -626,7 +630,7 @@ func (m *broadcastManager) settleLobbyState(u *state.User) {
 	}
 	m.presenceMu.Lock()
 	defer m.presenceMu.Unlock()
-	if m.isWatching(u.ID) {
+	if m.isWatching(u.Primary().ID) {
 		u.SetState(state.UserStateSpectating)
 	} else {
 		u.SetState(state.UserStateIdle)
@@ -673,33 +677,76 @@ func (m *broadcastManager) spectateStop(userID, matchID uint64) {
 	}
 }
 
-// spectatorChat relays a chat line from a spectator to every viewer of the
-// broadcast they're watching, the sender included so it echoes like room chat.
-// The match's players aren't spectators, so they never receive it. A sender
-// who isn't watching anything is ignored.
-func (m *broadcastManager) spectatorChat(senderID uint64, payload protocol.ChatMsgPayload) {
-	m.mu.Lock()
-	all := make([]*broadcast, 0, len(m.byMatch))
-	for _, b := range m.byMatch {
-		all = append(all, b)
+// spectatorChat relays a chat line to everyone on a live replay's chat: its
+// viewers, the sender included so it echoes like room chat, and the match's
+// players, who can answer. A viewer whose client still says the players can't read
+// this keeps that promise: their lines reach the other viewers only. A sender who's
+// neither watching nor playing a match being broadcast is ignored.
+func (m *broadcastManager) spectatorChat(c *Client, payload protocol.ChatMsgPayload) {
+	b, fromPlayer := m.chatBroadcastOf(c)
+	if b == nil {
+		return
 	}
-	m.mu.Unlock()
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return
+	}
+	recipients := make(map[*Client]struct{}, len(b.spectators)+maxRoomPlayers)
+	for _, sc := range b.spectators {
+		recipients[sc.client] = struct{}{}
+	}
+	b.mu.Unlock()
+	if c.user.SpectatorChat {
+		for _, player := range m.chatPlayersOf(b) {
+			recipients[player] = struct{}{}
+		}
+	}
+	payload.FromPlayer = fromPlayer
+	for recipient := range recipients {
+		recipient.sendEnvelope(protocol.TypeChatMsg, "", payload)
+	}
+}
 
-	for _, b := range all {
+// chatBroadcastOf finds the broadcast whose chat c is on, and whether c is on it as
+// one of the match's players rather than as a viewer.
+func (m *broadcastManager) chatBroadcastOf(c *Client) (*broadcast, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if match := c.user.CurrentMatch; match != nil && c.user.SpectatorChat {
+		if b := m.byMatch[match.ID]; b != nil {
+			return b, true
+		}
+	}
+	for _, b := range m.byMatch {
 		b.mu.Lock()
-		if b.closed || b.spectators[senderID] == nil {
-			b.mu.Unlock()
+		watching := b.spectators[c.user.ID] != nil
+		b.mu.Unlock()
+		if watching {
+			return b, false
+		}
+	}
+	return nil, false
+}
+
+// chatPlayersOf returns the connections playing b's match right now whose clients
+// can show its chat. Local players go through their owner's connection.
+func (m *broadcastManager) chatPlayersOf(b *broadcast) []*Client {
+	room := m.hub.state.GetRoom(b.roomID)
+	if room == nil {
+		return nil
+	}
+	var out []*Client
+	for _, seat := range room.Players {
+		u := seat.User
+		if u == nil || u.Owner != nil || !u.SpectatorChat || u.CurrentMatch == nil || u.CurrentMatch.ID != b.matchID {
 			continue
 		}
-		viewers := make([]*Client, 0, len(b.spectators))
-		for _, sc := range b.spectators {
-			viewers = append(viewers, sc.client)
-		}
-		b.mu.Unlock()
-		for _, c := range viewers {
-			c.sendEnvelope(protocol.TypeChatMsg, "", payload)
+		if player := m.hub.getClient(u.ID); player != nil {
+			out = append(out, player)
 		}
 	}
+	return out
 }
 
 // endByMatch ends a broadcast regardless of who triggered it (match is over).

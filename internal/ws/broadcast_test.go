@@ -190,6 +190,49 @@ func TestSpectatingPresenceSurvivesLeavingRoom(t *testing.T) {
 	waitUserState(t, viewer.user, state.UserStateIdle)
 }
 
+func TestSpectatingPresenceCoversLocalPlayers(t *testing.T) {
+	const matchID uint64 = 80
+	broadcaster := &Client{user: &state.User{ID: 25, Username: "host", State: state.UserStatePlaying}, send: make(chan []byte, 64)}
+	viewer := &Client{user: &state.User{ID: 26, Username: "viewer", State: state.UserStateIdle}, send: make(chan []byte, 64)}
+	local := &state.User{ID: 27, Username: "couch", State: state.UserStateIdle}
+	viewer.user.AddLocal(local)
+	h := &Hub{clients: map[uint64]*Client{
+		broadcaster.user.ID: broadcaster,
+		viewer.user.ID:      viewer,
+	}}
+	m := &broadcastManager{
+		hub:     h,
+		dir:     t.TempDir(),
+		byMatch: make(map[uint64]*broadcast),
+	}
+	h.broadcasts = m
+	if !m.begin(matchID, 1, broadcaster.user.ID, []uint64{broadcaster.user.ID}, "") {
+		t.Fatal("begin broadcast")
+	}
+	t.Cleanup(func() { m.endByMatch(matchID) })
+
+	// The PC watches, so everyone sitting at it does.
+	m.spectateStart(viewer, matchID)
+	waitUserState(t, viewer.user, state.UserStateSpectating)
+	waitUserState(t, local, state.UserStateSpectating)
+
+	// Leaving a room lands every seat of the PC back on spectating.
+	room := &state.Room{ID: 10, MaxPlayers: 4}
+	if err := h.seatUser(viewer.user, room, state.UserStateHosting); err != nil {
+		t.Fatal(err)
+	}
+	waitUserState(t, local, state.UserStateInRoom)
+	for _, u := range viewer.user.Group() {
+		h.unseatUser(u, room)
+	}
+	waitUserState(t, viewer.user, state.UserStateSpectating)
+	waitUserState(t, local, state.UserStateSpectating)
+
+	m.spectateStop(viewer.user.ID, matchID)
+	waitUserState(t, viewer.user, state.UserStateIdle)
+	waitUserState(t, local, state.UserStateIdle)
+}
+
 func TestKeyframeAssemblyAcceptsManyPacedChunks(t *testing.T) {
 	m := &broadcastManager{
 		dir:     t.TempDir(),
@@ -533,7 +576,8 @@ func TestSpectatorChatReachesOnlyThatBroadcastsViewers(t *testing.T) {
 	send(viewer1, "nice combo")
 	expect(map[*Client]bool{viewer1: true, viewer2: true}, "nice combo")
 
-	// Players, lobby users and viewers of another match can't post into it.
+	// Players on clients that can't show it, lobby users and viewers of another
+	// match can't post into it.
 	send(host, "from the match")
 	send(player, "from the match")
 	send(browser, "from the lobby")
