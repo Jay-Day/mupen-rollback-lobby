@@ -29,6 +29,7 @@ const (
 	TypeRoomUpdateLateJoin       = "ROOM_UPDATE_LATE_JOIN"
 	TypeRoomUpdateSaveData       = "ROOM_UPDATE_SAVE_DATA"
 	TypeRoomUpdateJoinLimits     = "ROOM_UPDATE_JOIN_LIMITS"
+	TypeRoomUpdateMaxPlayers     = "ROOM_UPDATE_MAX_PLAYERS"
 	TypeRoomSwapSlots            = "ROOM_SWAP_SLOTS"
 	TypePingProbeRequest         = "PING_PROBE_REQUEST"
 	TypeMatchConnected           = "MATCH_CONNECTED"
@@ -379,6 +380,12 @@ type RoomUpdateJoinLimitsRequest struct {
 	WiredOnly bool `json:"wiredOnly"`
 }
 
+// RoomUpdateMaxPlayersRequest changes how many seats the room has. Host-only,
+// while the room waits; it can't drop below the players already seated.
+type RoomUpdateMaxPlayersRequest struct {
+	MaxPlayers int `json:"maxPlayers"`
+}
+
 // RoomJoinLimitsPayload is ROOM_STATE's view of the room's join limits.
 // MaxPing is the highest ping to the host a joiner may have, in ms (0 takes
 // any); WiredOnly turns away a PC whose player is on Wi-Fi or cellular.
@@ -673,6 +680,9 @@ type RoomStatePayload struct {
 	// room that has them (not quick match rooms), so clients can tell which
 	// rooms offer the option.
 	JoinLimits *RoomJoinLimitsPayload `json:"joinLimits,omitempty"`
+	// Resizable tells the host ROOM_UPDATE_MAX_PLAYERS works in this room
+	// (not quick match or challenge rooms). Older servers don't have it.
+	Resizable bool `json:"resizable,omitempty"`
 }
 
 type RoomJoinFailPayload struct {

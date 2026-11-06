@@ -316,6 +316,40 @@ func (r *Room) SwapSlots(slotA, slotB int) bool {
 	return true
 }
 
+// SetMaxPlayers changes the number of seats and reports whether it changed.
+// It refuses fewer seats than players seated; anyone in a seat that goes away
+// moves to the lowest free one. The caller checks host, state and range.
+func (r *Room) SetMaxPlayers(max int) (changed bool, ok bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if max < len(r.Players) {
+		return false, false
+	}
+	if max == r.MaxPlayers {
+		return false, true
+	}
+	used := make(map[int]bool, len(r.Players))
+	for _, seat := range r.Players {
+		if seat.Slot <= max {
+			used[seat.Slot] = true
+		}
+	}
+	for _, seat := range r.Players {
+		if seat.Slot <= max {
+			continue
+		}
+		for s := 1; s <= max; s++ {
+			if !used[s] {
+				seat.Slot = s
+				used[s] = true
+				break
+			}
+		}
+	}
+	r.MaxPlayers = max
+	return true, true
+}
+
 // MarkKicked bars a user from rejoining this room. The set belongs to the Room,
 // so it disappears automatically only when the room itself is destroyed.
 func (r *Room) MarkKicked(userID uint64, username string) {

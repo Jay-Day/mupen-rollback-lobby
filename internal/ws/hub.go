@@ -407,6 +407,8 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleRoomUpdateSaveData(c, env)
 	case protocol.TypeRoomUpdateJoinLimits:
 		h.handleRoomUpdateJoinLimits(c, env)
+	case protocol.TypeRoomUpdateMaxPlayers:
+		h.handleRoomUpdateMaxPlayers(c, env)
 	case protocol.TypeRoomSwapSlots:
 		h.handleRoomSwapSlots(c, env)
 	case protocol.TypePingProbeRequest:
