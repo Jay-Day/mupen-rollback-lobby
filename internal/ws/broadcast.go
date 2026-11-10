@@ -75,9 +75,12 @@ const keyframeChunkBytes = 512 * 1024
 
 // New clients use small paced chunks so chat can preempt between them; older
 // clients used 512 KiB chunks. Bound both the shape and total decoded bytes.
+// The total is the largest keyframe a viewer accepts: a 24 MiB state, or its
+// compressed form's 10-byte header (LobbyClient.cpp, MAX_KEYFRAME_ENCODED_BYTES).
+// Anything larger would be stored and sent only for every viewer to refuse it.
 const (
 	maxKeyframeChunks = 512
-	maxKeyframeBytes  = 32 << 20
+	maxKeyframeBytes  = 24<<20 + 10
 )
 
 // maxSpoolBytes caps one broadcast's spool file. A krec is input records — even

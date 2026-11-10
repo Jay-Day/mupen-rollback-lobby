@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"sync/atomic"
@@ -33,7 +34,24 @@ const (
 	admitStaleAfter    = 90 * time.Second
 	admitMaxChunkB64   = 700 * 1024 // stays under the 1 MiB WebSocket read limit
 	admitMaxChunkCount = 256
+
+	// The most one hand-off relays of each chunked step, as the clients cap
+	// them on arrival: the pre-match settings (the size a broadcast's may be)
+	// and the encoded game state (the size a keyframe may be). A host that
+	// sends more is ending the hand-off, not completing it.
+	admitMaxManifestBytes = 512 * 1024
+	admitMaxStateBytes    = maxKeyframeBytes
 )
+
+// admitRelayLimit is the base64 size one hand-off may relay for a chunked
+// step. A blob is split anywhere, so every chunk may carry its own padding.
+func admitRelayLimit(step string) int {
+	raw := admitMaxStateBytes
+	if step == protocol.AdmitStepManifest {
+		raw = admitMaxManifestBytes
+	}
+	return base64.StdEncoding.EncodedLen(raw) + 4*admitMaxChunkCount
+}
 
 var admitIDs atomic.Uint64
 
@@ -244,11 +262,25 @@ func (h *Hub) handleMatchAdmitSignal(c *Client, env protocol.Envelope) {
 	isPlayer := c.user.CurrentMatch == match
 	sig.FromUserID = c.user.ID
 
+	// Only the settings and the game state carry data; every other step is a
+	// short signal, some of them relayed to every player.
+	isBlob := sig.Step == protocol.AdmitStepManifest || sig.Step == protocol.AdmitStepState
+	if !isBlob && (sig.Data != "" || sig.Count != 0) {
+		return
+	}
+
 	switch sig.Step {
 	case protocol.AdmitStepManifest, protocol.AdmitStepState:
-		if isHost {
-			sendEnvelopeTo(admit.Joiner, protocol.TypeMatchAdmitSignal, sig)
+		if !isHost {
+			return
 		}
+		if !match.CountAdmissionRelay(admit.ID, sig.Step, len(sig.Data), admitRelayLimit(sig.Step)) {
+			slog.Warn("late join: host sent more than a hand-off may relay",
+				"match", match.ID, "admit", admit.ID, "host", c.user.Username, "step", sig.Step)
+			h.abortAdmission(room, match, admit.ID, sig.Step+"_too_large", 0)
+			return
+		}
+		sendEnvelopeTo(admit.Joiner, protocol.TypeMatchAdmitSignal, sig)
 	case protocol.AdmitStepReady:
 		if isJoiner {
 			sendEnvelopeTo(room.Host, protocol.TypeMatchAdmitSignal, sig)

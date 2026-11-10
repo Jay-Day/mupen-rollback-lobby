@@ -38,6 +38,9 @@ type Admission struct {
 	Joiner    *User
 	Slot      int
 	StartedAt time.Time
+	// Relayed counts the base64 bytes of each chunked step (the settings, the
+	// game state) passed on to the joiner so far.
+	Relayed map[string]int
 }
 
 // BeginAdmission starts a hand-off unless one is already running, and returns
@@ -58,6 +61,25 @@ func (m *Match) CurrentAdmission() *Admission {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.Admit
+}
+
+// CountAdmissionRelay adds n bytes to what hand-off id has relayed for step
+// and reports whether the total is still within limit. Past the limit nothing
+// is added.
+func (m *Match) CountAdmissionRelay(id uint64, step string, n, limit int) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.Admit == nil || m.Admit.ID != id {
+		return false
+	}
+	if m.Admit.Relayed == nil {
+		m.Admit.Relayed = make(map[string]int)
+	}
+	if m.Admit.Relayed[step]+n > limit {
+		return false
+	}
+	m.Admit.Relayed[step] += n
+	return true
 }
 
 // EndAdmission clears the hand-off if it is still the one with this id.
