@@ -10,3 +10,6 @@
 admins.json
 bans.json
 lobby.json
+rmgk.db
+rmgk.db-*
+ranked.json

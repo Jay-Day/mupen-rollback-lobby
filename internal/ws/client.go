@@ -5,17 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"regexp"
 	"time"
 
 	"github.com/coder/websocket"
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
 	"github.com/jay-day/rmgk-lobby/internal/state"
+	"github.com/jay-day/rmgk-lobby/internal/usernames"
 )
 
 var (
-	usernameRegexp     = regexp.MustCompile(`^[A-Za-z0-9_\-\.]{2,20}$`)
 	errInvalidUsername = errors.New("invalid username")
+	errHelloRejected   = errors.New("hello rejected")
 )
 
 // Client wraps one WebSocket connection plus its outbound queue.
@@ -39,6 +39,12 @@ type Client struct {
 	// each target. Same read-loop-only rule as chatTimes, so no lock.
 	probeTimes   []time.Time
 	introducedAt map[uint64]time.Time
+
+	// Local player add/remove flood window. Same read-loop-only rule.
+	rosterTimes []time.Time
+
+	// CHALLENGE_SEND flood window. Same read-loop-only rule.
+	challengeTimes []time.Time
 }
 
 const (
@@ -246,5 +252,6 @@ func (c *Client) writeFail(msgType, id string, response protocol.HelloFailRespon
 }
 
 func isValidUsername(s string) bool {
-	return usernameRegexp.MatchString(s)
+	_, err := usernames.Normalize(s)
+	return err == nil
 }

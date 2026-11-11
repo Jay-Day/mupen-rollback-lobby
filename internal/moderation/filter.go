@@ -2,6 +2,8 @@ package moderation
 
 import (
 	"strings"
+
+	"github.com/jay-day/rmgk-lobby/internal/usernames"
 )
 
 // Filter matches messages against a curated hate-speech blocklist (racial and
@@ -13,6 +15,8 @@ import (
 // not "coon", "suspicious" is not "spic", "the shed" is not "heshe").
 //
 // Per word it defeats the common evasions:
+//   - other alphabets: fullwidth forms, accents, invisible characters and
+//     lookalike letters (Cyrillic, Greek, ...) read as the Latin they imitate
 //   - leetspeak: '1'->i, '@'->a, '$'->s, ... (n1gg3r -> nigger)
 //   - stretched letters: runs of 3+ identical letters collapse to one, while
 //     legitimate double letters are preserved (niiiigger -> nigger, but the
@@ -39,7 +43,7 @@ var leet = map[rune]rune{
 func normalize(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
-	for _, r := range strings.ToLower(s) {
+	for _, r := range strings.ToLower(usernames.Latinize(s)) {
 		if m, ok := leet[r]; ok {
 			r = m
 		}

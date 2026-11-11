@@ -38,12 +38,29 @@ type User struct {
 	Connection    string // self-reported transport medium ("wifi"/"lan"/...)
 	ICESupported  bool   // room-scoped libjuice signaling/transport support
 	LateJoin      bool   // can join a running match (MATCH_ADMIT_*)
+	LocalPlayers  bool   // reads the peerId routing that local players need
+	Social        bool   // can receive private messages and challenges
+	SpectatorChat bool   // shares a match's spectator chat with its players
 	SaveData      bool   // can play a match that starts from the host's save data
+	// The PC doesn't take challenges. Set on the connection's owner only; its
+	// local players follow it (see ChallengesOff).
+	NoChallenges bool
+
+	// The games this client has, by upper-case MD5, from HELLO. Set once and
+	// only read afterwards.
+	RomHashes map[string]struct{}
+
+	// Set once at HELLO when the user logged into a registered account;
+	// read-only afterwards. Guests have AccountID 0.
+	AccountID    int64
+	SessionToken string // remember-me token issued at HELLO, for ACCOUNT_LOGOUT
 
 	PingToServer uint16
 
 	CurrentRoom  *Room
 	CurrentMatch *Match
+	// Live replay being watched while State is spectating (0 = none).
+	WatchingMatchID uint64
 
 	JoinedAt time.Time
 	LastSeen time.Time
@@ -51,6 +68,78 @@ type User struct {
 	// Send is the outbound message channel owned by the WS client goroutine.
 	// The hub writes serialized JSON envelopes here; the client's writeLoop drains it.
 	Send chan<- []byte
+
+	// A local player is a user with no connection of its own: Owner is the user
+	// whose connection it shares and Send stays nil, so anything sent to the
+	// room reaches that PC once, through the owner's seat. Everything else
+	// treats it as an ordinary user. Locals are the owner's local players, in
+	// the order they were added.
+	Owner  *User
+	Locals []*User
+}
+
+// Primary returns the user whose connection u plays through: u itself, or its
+// owner when u is a local player.
+func (u *User) Primary() *User {
+	if u.Owner != nil {
+		return u.Owner
+	}
+	return u
+}
+
+// Group returns everyone on u's connection, the owner first and then the local
+// players in the order they were added. They enter, leave and join matches
+// together.
+func (u *User) Group() []*User {
+	owner := u.Primary()
+	owner.mu.RLock()
+	defer owner.mu.RUnlock()
+	out := make([]*User, 0, len(owner.Locals)+1)
+	out = append(out, owner)
+	return append(out, owner.Locals...)
+}
+
+// AddLocal adds a local player to u's connection.
+func (u *User) AddLocal(local *User) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	local.Owner = u
+	u.Locals = append(u.Locals, local)
+}
+
+// RemoveLocal takes a local player off u's connection and returns it, or nil if
+// userID isn't one of u's.
+func (u *User) RemoveLocal(userID uint64) *User {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	for i, local := range u.Locals {
+		if local.ID == userID {
+			u.Locals = append(u.Locals[:i], u.Locals[i+1:]...)
+			return local
+		}
+	}
+	return nil
+}
+
+// ChallengesOff reports whether u's PC turned challenges off.
+func (u *User) ChallengesOff() bool {
+	owner := u.Primary()
+	owner.mu.RLock()
+	defer owner.mu.RUnlock()
+	return owner.NoChallenges
+}
+
+// SetChallengesOff records the PC's choice on u's owner and reports whether it
+// changed.
+func (u *User) SetChallengesOff(off bool) bool {
+	owner := u.Primary()
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	if owner.NoChallenges == off {
+		return false
+	}
+	owner.NoChallenges = off
+	return true
 }
 
 func (u *User) GetState() UserState {
@@ -78,6 +167,29 @@ func (u *User) CompareAndSetState(from []UserState, to UserState) bool {
 		}
 	}
 	return false
+}
+
+// SetWatchingMatch records the live replay the user watches (0 = none) and
+// reports whether their presence shows the change: it only does while they
+// are spectating.
+func (u *User) SetWatchingMatch(matchID uint64) bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.WatchingMatchID == matchID {
+		return false
+	}
+	u.WatchingMatchID = matchID
+	return u.State == UserStateSpectating
+}
+
+// WatchingMatch returns the live replay the user is spectating, 0 if none.
+func (u *User) WatchingMatch() uint64 {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	if u.State != UserStateSpectating {
+		return 0
+	}
+	return u.WatchingMatchID
 }
 
 func (u *User) GetUDPEndpoint() (string, uint16) {
@@ -110,3 +222,6 @@ func (u *User) SetPingToServer(rtt uint16) {
 	defer u.mu.Unlock()
 	u.PingToServer = rtt
 }
+
+// Verified reports whether the user is logged into a registered account.
+func (u *User) Verified() bool { return u.AccountID != 0 }
