@@ -28,6 +28,7 @@ const (
 	TypeRoomUpdateLiveReplay     = "ROOM_UPDATE_LIVE_REPLAY"
 	TypeRoomUpdateLateJoin       = "ROOM_UPDATE_LATE_JOIN"
 	TypeRoomUpdateSaveData       = "ROOM_UPDATE_SAVE_DATA"
+	TypeRoomUpdateGameOptions    = "ROOM_UPDATE_GAME_OPTIONS"
 	TypeRoomUpdateJoinLimits     = "ROOM_UPDATE_JOIN_LIMITS"
 	TypeRoomUpdateMaxPlayers     = "ROOM_UPDATE_MAX_PLAYERS"
 	TypeRoomSwapSlots            = "ROOM_SWAP_SLOTS"
@@ -244,6 +245,9 @@ type HelloRequest struct {
 	// Advertises support for matches that start from the host's save data.
 	// Such a match can't start, or take a late joiner, without it.
 	SaveData bool `json:"saveData,omitempty"`
+	// Advertises support for game options (ROOM_UPDATE_GAME_OPTIONS). A match
+	// with any option on can't start, or take a late joiner, without it.
+	GameOptions bool `json:"gameOptions,omitempty"`
 	// This PC doesn't take challenges (CHALLENGE_SETTINGS changes it later).
 	// Sent here too, so no challenge can slip in before the first update.
 	NoChallenges bool `json:"noChallenges,omitempty"`
@@ -371,6 +375,22 @@ type RoomUpdateSaveDataRequest struct {
 	Kinds   []string `json:"kinds,omitempty"`
 	Bytes   int      `json:"bytes,omitempty"`
 	Hash    string   `json:"hash,omitempty"`
+}
+
+// GameOption is one per-game option the host turned on, such as "Vanilla
+// only" for a game the client knows how to change. ID is opaque to the server
+// (lower-case letters, digits and '-'); Label is what players are shown.
+type GameOption struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+}
+
+// RoomUpdateGameOptionsRequest replaces the game options of the room's next
+// match: an empty list turns them all off. Host-only and waiting-room-only. The
+// client changes the game for them itself, from the host's pre-match manifest;
+// the server only relays the list in ROOM_STATE and ROOM_LIST.
+type RoomUpdateGameOptionsRequest struct {
+	Options []GameOption `json:"options"`
 }
 
 // RoomUpdateJoinLimitsRequest changes who may join the room from now on.
@@ -604,6 +624,10 @@ type RoomSummary struct {
 	// Join limits, so the list can say who a room takes before anyone tries.
 	MaxPing   int  `json:"maxPing,omitempty"`
 	WiredOnly bool `json:"wiredOnly,omitempty"`
+	// GameOptions are the host's game options (ROOM_UPDATE_GAME_OPTIONS), so
+	// the list can tag a room, or a running match, before anyone joins.
+	// Omitted when none are on.
+	GameOptions []GameOption `json:"gameOptions,omitempty"`
 }
 
 type RoomListPayload struct {
@@ -634,6 +658,9 @@ type RoomSeatPayload struct {
 	// SaveData mirrors the client's capability, so the host can see who
 	// keeps a save data match from starting.
 	SaveData bool `json:"saveData,omitempty"`
+	// GameOptions mirrors the client's capability, so the host can see who
+	// keeps a match with game options from starting.
+	GameOptions bool `json:"gameOptions,omitempty"`
 }
 
 type RoomStatePayload struct {
@@ -683,6 +710,12 @@ type RoomStatePayload struct {
 	// Resizable tells the host ROOM_UPDATE_MAX_PLAYERS works in this room
 	// (not quick match or challenge rooms). Older servers don't have it.
 	Resizable bool `json:"resizable,omitempty"`
+	// GameOptionsOffered tells clients ROOM_UPDATE_GAME_OPTIONS works in this
+	// room (not quick match rooms). Older servers don't have it.
+	GameOptionsOffered bool `json:"gameOptionsOffered,omitempty"`
+	// GameOptions are the host's game options for the next match, or the
+	// running one's (ROOM_UPDATE_GAME_OPTIONS). Omitted when none are on.
+	GameOptions []GameOption `json:"gameOptions,omitempty"`
 }
 
 type RoomJoinFailPayload struct {

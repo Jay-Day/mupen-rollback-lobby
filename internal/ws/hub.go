@@ -332,6 +332,7 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		SpectatorChat: req.SpectatorChat,
 		RomHashes:     romHashSet(req.RomHashes),
 		SaveData:      req.SaveData,
+		GameOptions:   req.GameOptions,
 		NoChallenges:  req.NoChallenges,
 		JoinedAt:      time.Now(),
 		LastSeen:      time.Now(),
@@ -405,6 +406,8 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleRoomUpdateLateJoin(c, env)
 	case protocol.TypeRoomUpdateSaveData:
 		h.handleRoomUpdateSaveData(c, env)
+	case protocol.TypeRoomUpdateGameOptions:
+		h.handleRoomUpdateGameOptions(c, env)
 	case protocol.TypeRoomUpdateJoinLimits:
 		h.handleRoomUpdateJoinLimits(c, env)
 	case protocol.TypeRoomUpdateMaxPlayers:
