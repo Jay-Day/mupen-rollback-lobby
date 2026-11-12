@@ -77,6 +77,7 @@ database. The rest of the lobby stays in memory.
 | `RMGK_DB_PATH` | `rmgk.db` | SQLite database: accounts, sessions, ratings, set history. Back it up. |
 | `RMGK_RANKED_PATH` | `ranked.json` | Ranked ladders, allowed ROMs and tier bands. See `ranked.example.json`. Without it, accounts work but ranked rooms are unavailable. |
 | `RMGK_TRUSTED_PROXIES` | (none) | Comma-separated reverse proxy IPs or CIDRs, e.g. `127.0.0.1`. Requests from them take the client address from `X-Forwarded-For`, for bans and rate limits. Leave it unset when clients connect directly. |
+| `RMGK_GAME_OPTIONS_DIR` | `gameoptions` beside `ranked.json` | Game options packs that ranked rulesets are played with (see [Ranked game options](#ranked-game-options)). Copy this repo's `gameoptions/` folder there. |
 | `RMGK_REPLAY_DIR` | `replays` | Uploaded ranked set replays (`<setId>.krec`, a few hundred KB each). One upload per set; never overwritten. Back it up with the database. |
 
 Both paths are relative to the service's working directory, so set absolute
@@ -133,7 +134,9 @@ enabling accounts. Put Caddy or nginx in front of `:8080`.
 - **Ranked rooms:** set with `ROOM_CREATE.ranked` or `ROOM_UPDATE_RANKED`, which is host-only and only while the room is waiting.
   - Ranked rooms seat 2 (1v1) or 4 (2v2) verified players and start only when full.
   - They're limited to ROMs on a ladder, and open to any logged-in player within the room's max ping. Every set has the ladder's length (`bestOf` in `ranked.json`).
-- **Match start:** `MATCH_BEGIN.ranked` carries the ladder, module, ruleset, set length and team size.
+  - Their game options are the ruleset's (see [Ranked game options](#ranked-game-options)), in `ROOM_STATE` and `ROOM_LIST` `gameOptions` like a host's. The host can't change them: `gameOptionsOffered` is false and `ROOM_UPDATE_GAME_OPTIONS` is ignored. Changing the ruleset changes them; turning ranked off turns them all off.
+  - Ranked needs a client that sends `rankedOptions: true` in `HELLO`. A logged-in player without it can't create, join, be invited into or search for ranked (`ranked_needs_update`, "needs a newer version of Dale64"), and a set doesn't start with one seated.
+- **Match start:** `MATCH_BEGIN.ranked` carries the ladder, module, ruleset, set length, team size and `gameOptions`: each option's `id`, English `label` and `patches` (`offset` as a number, `bytes` and `expect` as upper-case hex), the ruleset's first, then the team option. Clients play the set with exactly these. It's always sent, `[]` when the ruleset has none.
 - **Results:** when the set ends, each player sends `MATCH_RESULT`.
   - Agreeing reports with a valid winner are rated: Glicko-2 for 1v1, counting the whole set as one result; OpenSkill for 2v2, every game.
   - 2v2 reports also carry `teams` (each slot's team: 1 for the team holding the lowest slot, 2 for the other), `winnerTeam`, and each game's `winnerTeam`. All four must agree, including the pairing, with two players per team; otherwise the set is disputed (`reports_disagree` or `invalid_teams`).
@@ -147,8 +150,15 @@ enabling accounts. Put Caddy or nginx in front of `:8080`.
     - A kicked player, or no report from the stayers within 15 seconds, voids the set (`player_left`).
   - Players get the outcome and rating change in `RANKED_RESULT`.
   - Moderators review disputes from the lobby chat. `/disputes` lists them with both players' reports; `/resolve <setId> <winner|void> [note]` rates the set from the players' current ratings or voids it (for a 2v2 set, naming any player of the winning team), and online players get a `RANKED_RESULT`.
-- **Spectators:** for ranked matches the broadcaster also sends `BROADCAST_JOURNAL` chunks (the game module's memory write journal). Every spectator gets all of them, in order and ahead of the krec data, as `SPECTATE_JOURNAL`.
 - **Tiers:** based on the conservative rating (rating minus twice the deviation). Players stay provisional until their deviation drops below 110.
+
+### Ranked game options
+
+Everything ranked changes in the game (rules, menus, stages, teams) is ROM patches from game options packs, and the lobby decides them. Hosts can't pick or alter them, and players don't need a pack installed.
+
+- The packs are the JSON files RMG-K ships in `Data/GameOptions` (its README describes the format). The lobby loads its own copy from `RMGK_GAME_OPTIONS_DIR` (default: `gameoptions` in the folder holding `ranked.json`) at startup. This repo's `gameoptions/` folder has the Smash Remix 2.0.1 pack; deploy it next to `ranked.json`, and copy it again from RMG-K whenever the pack changes.
+- Each ladder in `ranked.json` names its rulesets' options in `rulesetOptions`, in the order clients apply them. A ruleset without any plays the game unchanged, which the lobby warns about at startup. A 2v2 ladder names in `teamOptions` the option that makes port 2, 3 or 4 P1's teammate (all three). A set whose teams the lobby matched (a chosen or kept Quick Ranked team) gets that option after the ruleset's.
+- At startup every named option must be offered for every ROM on its ladder, and a ruleset's options, with each team option, must fit in one match: at most 8 options, 64 KiB of patches, no two changing the same bytes. Otherwise the lobby logs `ranked config load failed: game options` and exits. A pack or option that breaks a pack rule is skipped with a warning, as RMG-K skips it.
 
 ### Rankings page
 
@@ -167,7 +177,7 @@ Its read-only JSON API:
 
 To try the site with a realistic amount of data, `go run ./cmd/ranked-seed --db seed.db --ranked ranked.json --players 600 --days 150` fills a new database with simulated players and sets (password `password123` for every account). Run the lobby with `RMGK_DB_PATH=seed.db` to browse it.
 
-The Rulesets page text comes from `ranked.json`: each ladder's `rules`, `rulesetNames`, `rulesetDescriptions` and `rulesetStages` (see `ranked.example.json`). `rulesetStages` lists each roster's stages; the game module enforces them, so keep it in sync with the module.
+The Rulesets page text comes from `ranked.json`: each ladder's `rules`, `rulesetNames`, `rulesetDescriptions` and `rulesetStages` (see `ranked.example.json`). `rulesetStages` lists each roster's stages; the ruleset's stage option enforces them, so keep it in sync with the pack.
 
 ### Moderator pages
 

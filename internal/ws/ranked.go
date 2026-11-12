@@ -1,15 +1,18 @@
 package ws
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"math"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/jay-day/rmgk-lobby/internal/accounts"
+	"github.com/jay-day/rmgk-lobby/internal/gameoptions"
 	"github.com/jay-day/rmgk-lobby/internal/geo"
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
 	"github.com/jay-day/rmgk-lobby/internal/rating"
@@ -69,6 +72,11 @@ func (h *Hub) resolveRankedSettings(romMD5 string, req *protocol.RankedRoomReque
 	if !ok {
 		return nil, protocol.ReasonInvalidPayload, "Unknown ranked ruleset."
 	}
+	options, ok := h.rankedConfig.GameOptions(ladder.ID, ruleset, romMD5, 0)
+	if !ok {
+		slog.Error("ranked game options aren't loaded for this ROM", "ladder", ladder.ID, "ruleset", ruleset, "md5", romMD5)
+		return nil, protocol.ReasonRankedUnavailable, "Ranked play isn't available on this server."
+	}
 	maxPing := req.MaxPing
 	if maxPing < 0 {
 		maxPing = 0
@@ -76,13 +84,58 @@ func (h *Hub) resolveRankedSettings(romMD5 string, req *protocol.RankedRoomReque
 		maxPing = maxRankedPing
 	}
 	return &state.RankedSettings{
-		LadderID:  ladder.ID,
-		ModuleID:  ladder.ModuleID,
-		RulesetID: ruleset,
-		BestOf:    int(ladder.BestOf),
-		TeamSize:  ladder.TeamSize,
-		MaxPing:   maxPing,
+		LadderID:    ladder.ID,
+		ModuleID:    ladder.ModuleID,
+		RulesetID:   ruleset,
+		BestOf:      int(ladder.BestOf),
+		TeamSize:    ladder.TeamSize,
+		MaxPing:     maxPing,
+		GameOptions: roomGameOptions(options),
 	}, "", ""
+}
+
+// roomGameOptions is how a room shows ranked game options: id and label.
+func roomGameOptions(options []*gameoptions.Option) []state.GameOption {
+	if len(options) == 0 {
+		return nil
+	}
+	out := make([]state.GameOption, len(options))
+	for i, opt := range options {
+		out[i] = state.GameOption{ID: opt.ID, Label: opt.Label}
+	}
+	return out
+}
+
+// rankedGameOptions is the MATCH_BEGIN form of a set's game options, with
+// their patches; never nil, so the field is always sent.
+func rankedGameOptions(options []*gameoptions.Option) []protocol.RankedGameOption {
+	out := make([]protocol.RankedGameOption, 0, len(options))
+	for _, opt := range options {
+		patches := make([]protocol.RankedGamePatch, len(opt.Patches))
+		for i, p := range opt.Patches {
+			patches[i] = protocol.RankedGamePatch{
+				Offset: p.Offset,
+				Bytes:  strings.ToUpper(hex.EncodeToString(p.Bytes)),
+				Expect: strings.ToUpper(hex.EncodeToString(p.Expect)),
+			}
+		}
+		out = append(out, protocol.RankedGameOption{ID: opt.ID, Label: opt.Label, Patches: patches})
+	}
+	return out
+}
+
+// p1Teammate is the port P1 plays with when the lobby matched the teams
+// (see requiredTeams), 0 when the players pick teams in the game.
+func p1Teammate(teams [4]int) int {
+	if teams[0] == 0 {
+		return 0
+	}
+	for slot := 2; slot <= 4; slot++ {
+		if teams[slot-1] == teams[0] {
+			return slot
+		}
+	}
+	return 0
 }
 
 // maxRankedPing caps the max ping setting (ms).
@@ -93,6 +146,11 @@ const maxRankedPing = 500
 func (h *Hub) rankedEligibility(u *state.User, settings *state.RankedSettings, host *state.User) (string, string) {
 	if !u.Verified() {
 		return protocol.ReasonNotVerified, u.Username + " needs to log into an account to play ranked."
+	}
+	// Ranked sets are played with the lobby's game options: a client that
+	// can't apply them would play the game unlocked.
+	if !u.RankedOptions {
+		return protocol.ReasonRankedNeedsUpdate, u.Username + " needs a newer version of Dale64 to play ranked."
 	}
 	if host == nil || host.ID == u.ID {
 		return "", ""
@@ -208,6 +266,9 @@ func (h *Hub) handleRoomUpdateRanked(c *Client, env protocol.Envelope) {
 
 // rankedStartCheck validates a ranked room right before its match starts.
 func (h *Hub) rankedStartCheck(room *state.Room, settings *state.RankedSettings) string {
+	if _, ok := h.rankedConfig.GameOptions(settings.LadderID, settings.RulesetID, room.RomMD5, 0); !ok {
+		return "Ranked play isn't available on this server."
+	}
 	seated := 0
 	var players []*state.User
 	for _, seat := range room.Players {
@@ -323,6 +384,17 @@ func (h *Hub) beginRankedSet(match *state.Match, room *state.Room, settings *sta
 		}
 	}
 	set.requiredTeams = requiredTeams(settings, slots)
+	// The lobby's game options are the set's rules: the ruleset's, then the
+	// teams it matched. rankedStartCheck made sure the ruleset's are loaded;
+	// UseGameOptions loaded the team options with them.
+	teammate := p1Teammate(set.requiredTeams)
+	options, ok := h.rankedConfig.GameOptions(settings.LadderID, settings.RulesetID, room.RomMD5, teammate)
+	if !ok {
+		slog.Error("ranked team game option missing at match start", "match", match.ID, "ladder", settings.LadderID,
+			"ruleset", settings.RulesetID, "md5", room.RomMD5, "teammate", teammate)
+		options, _ = h.rankedConfig.GameOptions(settings.LadderID, settings.RulesetID, room.RomMD5, 0)
+	}
+	info.GameOptions = rankedGameOptions(options)
 	for _, seat := range room.Players {
 		if seat.User == nil {
 			continue
@@ -346,8 +418,13 @@ func (h *Hub) beginRankedSet(match *state.Match, room *state.Room, settings *sta
 	h.rankedSets.sets[match.ID] = set
 	h.rankedSets.mu.Unlock()
 
+	optionIDs := make([]string, len(options))
+	for i, opt := range options {
+		optionIDs[i] = opt.ID
+	}
 	slog.Info("ranked set started", "match", match.ID, "ladder", settings.LadderID,
-		"ruleset", settings.RulesetID, "bestOf", settings.BestOf, "requiredTeams", set.requiredTeams)
+		"ruleset", settings.RulesetID, "bestOf", settings.BestOf, "requiredTeams", set.requiredTeams,
+		"gameOptions", optionIDs)
 	return info
 }
 

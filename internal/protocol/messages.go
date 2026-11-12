@@ -28,6 +28,7 @@ const (
 	TypeRoomUpdateLiveReplay     = "ROOM_UPDATE_LIVE_REPLAY"
 	TypeRoomUpdateLateJoin       = "ROOM_UPDATE_LATE_JOIN"
 	TypeRoomUpdateSaveData       = "ROOM_UPDATE_SAVE_DATA"
+	TypeRoomUpdateGameOptions    = "ROOM_UPDATE_GAME_OPTIONS"
 	TypeRoomUpdateJoinLimits     = "ROOM_UPDATE_JOIN_LIMITS"
 	TypeRoomUpdateMaxPlayers     = "ROOM_UPDATE_MAX_PLAYERS"
 	TypeRoomSwapSlots            = "ROOM_SWAP_SLOTS"
@@ -105,12 +106,8 @@ const (
 	// fast-forward only the short tail (bounded catch-up, independent of match length).
 	// Sent in chunks to stay under the server's per-message read limit.
 	TypeBroadcastKeyframe = "BROADCAST_KEYFRAME"
-	// Ranked matches: the game module's memory write journal (opaque bytes,
-	// see the RMG-K ranked host). Spectators apply it alongside the krec
-	// inputs, or their replay drifts from the match.
-	TypeBroadcastJournal = "BROADCAST_JOURNAL"
-	TypeSpectateStart    = "SPECTATE_START" // spectator: begin watching a match
-	TypeSpectateStop     = "SPECTATE_STOP"  // spectator: stop watching
+	TypeSpectateStart     = "SPECTATE_START" // spectator: begin watching a match
+	TypeSpectateStop      = "SPECTATE_STOP"  // spectator: stop watching
 
 	// Moderation (client → server).
 	TypeAdminAuth   = "ADMIN_AUTH"   // claim moderator role with a password
@@ -198,11 +195,8 @@ const (
 	// Savestate keyframe sent to a joining spectator (chunked) before the krec
 	// tail, so it can restore to the keyframe's frame and fast-forward only the tail.
 	TypeSpectateKeyframe = "SPECTATE_KEYFRAME"
-	// Write journal chunks, in order and complete from the match start, sent
-	// ahead of the krec data they apply to (see BROADCAST_JOURNAL).
-	TypeSpectateJournal = "SPECTATE_JOURNAL"
-	TypeSpectateEnd     = "SPECTATE_END"  // stream ended (match over / broadcaster left)
-	TypeSpectateFail    = "SPECTATE_FAIL" // request rejected (not broadcasting, ended)
+	TypeSpectateEnd      = "SPECTATE_END"  // stream ended (match over / broadcaster left)
+	TypeSpectateFail     = "SPECTATE_FAIL" // request rejected (not broadcasting, ended)
 	// Sent to every match participant and active spectator whenever the audience changes.
 	TypeBroadcastViewerCount = "BROADCAST_VIEWER_COUNT"
 
@@ -254,10 +248,11 @@ const (
 	ReasonEmailFailed         = "email_failed"         // the email couldn't be sent
 
 	// Ranked rooms
-	ReasonRankedUnavailable = "ranked_unavailable" // ROM not on a ladder / ranked not configured
-	ReasonNotVerified       = "not_verified"       // ranked needs a logged-in account
-	ReasonTooFar            = "too_far"            // estimated ping above the room's max ping
-	ReasonRankedSeats       = "ranked_seats"       // ranked sets are 1v1
+	ReasonRankedUnavailable = "ranked_unavailable"  // ROM not on a ladder / ranked not configured
+	ReasonNotVerified       = "not_verified"        // ranked needs a logged-in account
+	ReasonTooFar            = "too_far"             // estimated ping above the room's max ping
+	ReasonRankedSeats       = "ranked_seats"        // ranked sets are 1v1
+	ReasonRankedNeedsUpdate = "ranked_needs_update" // a client without rankedOptions
 
 	// Local player refusals.
 	ReasonNotEnoughSeats  = "not_enough_seats"  // fewer free seats than players on this PC
@@ -336,6 +331,12 @@ type HelloRequest struct {
 	// Advertises support for matches that start from the host's save data.
 	// Such a match can't start, or take a late joiner, without it.
 	SaveData bool `json:"saveData,omitempty"`
+	// Advertises support for game options (ROOM_UPDATE_GAME_OPTIONS). A match
+	// with any option on can't start, or take a late joiner, without it.
+	GameOptions bool `json:"gameOptions,omitempty"`
+	// Advertises that the client plays ranked sets with the game options
+	// MATCH_BEGIN's ranked.gameOptions carries. Ranked is refused without it.
+	RankedOptions bool `json:"rankedOptions,omitempty"`
 	// This PC doesn't take challenges (CHALLENGE_SETTINGS changes it later).
 	// Sent here too, so no challenge can slip in before the first update.
 	NoChallenges bool `json:"noChallenges,omitempty"`
@@ -558,6 +559,22 @@ type RoomUpdateSaveDataRequest struct {
 	Kinds   []string `json:"kinds,omitempty"`
 	Bytes   int      `json:"bytes,omitempty"`
 	Hash    string   `json:"hash,omitempty"`
+}
+
+// GameOption is one per-game option the host turned on, such as "Vanilla
+// only" for a game the client knows how to change. ID is opaque to the server
+// (lower-case letters, digits and '-'); Label is what players are shown.
+type GameOption struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+}
+
+// RoomUpdateGameOptionsRequest replaces the game options of the room's next
+// match: an empty list turns them all off. Host-only and waiting-room-only. The
+// client changes the game for them itself, from the host's pre-match manifest;
+// the server only relays the list in ROOM_STATE and ROOM_LIST.
+type RoomUpdateGameOptionsRequest struct {
+	Options []GameOption `json:"options"`
 }
 
 // RoomUpdateJoinLimitsRequest changes who may join the room from now on.
@@ -998,6 +1015,10 @@ type RoomSummary struct {
 	// Join limits, so the list can say who a room takes before anyone tries.
 	MaxPing   int  `json:"maxPing,omitempty"`
 	WiredOnly bool `json:"wiredOnly,omitempty"`
+	// GameOptions are the host's game options (ROOM_UPDATE_GAME_OPTIONS), or
+	// a ranked room's ruleset's, so the list can tag a room, or a running
+	// match, before anyone joins. Omitted when none are on.
+	GameOptions []GameOption `json:"gameOptions,omitempty"`
 }
 
 type RoomListPayload struct {
@@ -1031,6 +1052,9 @@ type RoomSeatPayload struct {
 	// SaveData mirrors the client's capability, so the host can see who
 	// keeps a save data match from starting.
 	SaveData bool `json:"saveData,omitempty"`
+	// GameOptions mirrors the client's capability, so the host can see who
+	// keeps a match with game options from starting.
+	GameOptions bool `json:"gameOptions,omitempty"`
 }
 
 type RoomStatePayload struct {
@@ -1080,6 +1104,14 @@ type RoomStatePayload struct {
 	// Resizable tells the host ROOM_UPDATE_MAX_PLAYERS works in this room
 	// (not quick match, challenge or ranked rooms). Older servers don't have it.
 	Resizable bool `json:"resizable,omitempty"`
+	// GameOptionsOffered tells clients ROOM_UPDATE_GAME_OPTIONS works in this
+	// room (not quick match or ranked rooms). Older servers don't have it.
+	GameOptionsOffered bool `json:"gameOptionsOffered,omitempty"`
+	// GameOptions are the host's game options for the next match, or the
+	// running one's (ROOM_UPDATE_GAME_OPTIONS). In a ranked room they're the
+	// ruleset's, locked; MATCH_BEGIN's ranked.gameOptions has their patches
+	// (plus the matched teams' option). Omitted when none are on.
+	GameOptions []GameOption `json:"gameOptions,omitempty"`
 	// Present while the room is ranked.
 	Ranked *RankedRoomState `json:"ranked,omitempty"`
 }
@@ -1261,6 +1293,27 @@ type RankedMatchInfo struct {
 	BestOf    int                 `json:"bestOf"`
 	TeamSize  int                 `json:"teamSize"`
 	Players   []RankedMatchPlayer `json:"players"`
+	// GameOptions are what every client patches the ROM with for this set:
+	// the ruleset's options, then the one that makes P1's lobby-matched
+	// teammate its teammate. The lobby decides them, not the host. Always
+	// sent, empty when there are none.
+	GameOptions []RankedGameOption `json:"gameOptions"`
+}
+
+// RankedGameOption is one game option of a ranked set, with its English label.
+type RankedGameOption struct {
+	ID      string            `json:"id"`
+	Label   string            `json:"label"`
+	Patches []RankedGamePatch `json:"patches"`
+}
+
+// RankedGamePatch replaces ROM bytes at Offset, a ROM file offset in .z64
+// (big-endian) byte order. Bytes and Expect are upper-case hex of the same
+// length; Expect is what the unpatched ROM has there.
+type RankedGamePatch struct {
+	Offset uint32 `json:"offset"`
+	Bytes  string `json:"bytes"`
+	Expect string `json:"expect"`
 }
 
 type RankedMatchPlayer struct {
@@ -1408,20 +1461,6 @@ type BroadcastKeyframeRequest struct {
 	ChunkIndex int    `json:"chunkIndex"`
 	ChunkCount int    `json:"chunkCount"`
 	Data       string `json:"data"` // base64 savestate slice
-}
-
-// BroadcastJournalRequest carries the next chunk of a ranked match's write
-// journal. Chunks are appended in order and never reordered or merged.
-type BroadcastJournalRequest struct {
-	MatchID uint64 `json:"matchId"`
-	Data    string `json:"data"` // base64
-}
-
-// SpectateJournalPayload delivers journal chunk Seq (0-based, contiguous).
-type SpectateJournalPayload struct {
-	MatchID uint64 `json:"matchId"`
-	Seq     int    `json:"seq"`
-	Data    string `json:"data"` // base64
 }
 
 // SpectateKeyframePayload delivers the latest keyframe (chunked) to a joining

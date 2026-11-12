@@ -27,6 +27,10 @@
         "remix-1v1-vanilla": ["Dream Land"],
         "remix-1v1-remix": ["Dream Land", "Goomba Road", "Pokémon Stadium 2", "Pokémon Stadium"]
       },
+      "rulesetOptions": {
+        "remix-1v1-vanilla": ["ranked-rules", "vanilla-only", "stages-dream-land"],
+        "remix-1v1-remix": ["ranked-rules", "stages-remix-ranked"]
+      },
       "bestOf": 3,
       "roms": [
         {
@@ -64,6 +68,15 @@
       "rulesetStages": {
         "remix-2v2-vanilla": ["Dream Land"],
         "remix-2v2-remix": ["Dream Land", "Goomba Road", "Pokémon Stadium 2", "Pokémon Stadium"]
+      },
+      "rulesetOptions": {
+        "remix-2v2-vanilla": ["ranked-rules", "ranked-teams", "vanilla-only", "stages-dream-land"],
+        "remix-2v2-remix": ["ranked-rules", "ranked-teams", "stages-remix-ranked"]
+      },
+      "teamOptions": {
+        "2": "teams-p1p2",
+        "3": "teams-p1p3",
+        "4": "teams-p1p4"
       },
       "bestOf": 3,
       "roms": [

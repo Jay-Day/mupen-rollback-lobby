@@ -42,6 +42,8 @@ type User struct {
 	Social        bool   // can receive private messages and challenges
 	SpectatorChat bool   // shares a match's spectator chat with its players
 	SaveData      bool   // can play a match that starts from the host's save data
+	GameOptions   bool   // can play a match with the host's game options on
+	RankedOptions bool   // plays ranked sets with the lobby's game options
 	// The PC doesn't take challenges. Set on the connection's owner only; its
 	// local players follow it (see ChallengesOff).
 	NoChallenges bool

@@ -114,6 +114,8 @@ func (h *Hub) handleLocalPlayerAdd(c *Client, env protocol.Envelope) {
 		Social:        owner.Social,
 		SpectatorChat: owner.SpectatorChat,
 		SaveData:      owner.SaveData,
+		GameOptions:   owner.GameOptions,
+		RankedOptions: owner.RankedOptions,
 		PingToServer:  owner.PingToServer,
 		JoinedAt:      time.Now(),
 		LastSeen:      time.Now(),

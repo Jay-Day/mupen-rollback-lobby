@@ -49,13 +49,14 @@ func newRankedFixtureWith(t *testing.T, config string) *rankedFixture {
 	return &rankedFixture{t: t, hub: hub, store: store}
 }
 
-// connect adds a user the way handleHello would, verified when registered.
+// connect adds a user the way handleHello would, verified when registered,
+// with a client that plays ranked with the lobby's game options.
 func (f *rankedFixture) connect(name string, registered bool) *Client {
 	f.t.Helper()
 	send := make(chan []byte, 256)
 	u := &state.User{
 		ID: f.hub.state.NextUserID(), Username: name, State: state.UserStateIdle,
-		JoinedAt: time.Now(), LastSeen: time.Now(), Send: send,
+		JoinedAt: time.Now(), LastSeen: time.Now(), Send: send, RankedOptions: true,
 	}
 	if registered {
 		acct, err := f.store.Register(name, "password123")

@@ -1,0 +1,72 @@
+{
+  "format": 1,
+  "id": "ranked-fixture",
+  "game": "Smash Remix 2.0.1 (test fixture)",
+  "romMd5": ["2B2D6B295106C54216B7FC7A2F14346E"],
+  "options": [
+    {
+      "id": "vanilla-only",
+      "label": "Vanilla only",
+      "patches": [
+        { "offset": "0x02F00000", "expect": "00000000", "bytes": "11111111", "note": "dummy" }
+      ]
+    },
+    {
+      "id": "ranked-rules",
+      "label": "Ranked rules",
+      "serverOnly": true,
+      "patches": [
+        { "offset": "0x02F00100", "expect": "0000000000000000", "bytes": "2222222222222222", "note": "dummy" },
+        { "offset": "0x02F00200", "expect": "00000000", "bytes": "22222222", "note": "dummy" }
+      ]
+    },
+    {
+      "id": "ranked-teams",
+      "label": "Team battle",
+      "serverOnly": true,
+      "patches": [
+        { "offset": "0x02F00300", "expect": "00000000", "bytes": "33333333", "note": "dummy" }
+      ]
+    },
+    {
+      "id": "stages-dream-land",
+      "label": "Dream Land only",
+      "serverOnly": true,
+      "patches": [
+        { "offset": "0x02F00400", "expect": "00000000", "bytes": "44444444", "note": "dummy" }
+      ]
+    },
+    {
+      "id": "stages-remix-ranked",
+      "label": "Ranked stages",
+      "serverOnly": true,
+      "patches": [
+        { "offset": "0x02F00400", "expect": "00000000", "bytes": "55555555", "note": "dummy; the same bytes as stages-dream-land, never on together" }
+      ]
+    },
+    {
+      "id": "teams-p1p2",
+      "label": "Teams: P1 & P2",
+      "serverOnly": true,
+      "patches": [
+        { "offset": "0x02F00500", "expect": "00", "bytes": "02", "note": "dummy" }
+      ]
+    },
+    {
+      "id": "teams-p1p3",
+      "label": "Teams: P1 & P3",
+      "serverOnly": true,
+      "patches": [
+        { "offset": "0x02F00500", "expect": "00", "bytes": "03", "note": "dummy" }
+      ]
+    },
+    {
+      "id": "teams-p1p4",
+      "label": "Teams: P1 & P4",
+      "serverOnly": true,
+      "patches": [
+        { "offset": "0x02F00500", "expect": "00", "bytes": "04", "note": "dummy" }
+      ]
+    }
+  ]
+}

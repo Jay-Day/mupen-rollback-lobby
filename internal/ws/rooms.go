@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
 	"github.com/jay-day/rmgk-lobby/internal/state"
@@ -355,6 +357,10 @@ func (h *Hub) handleRoomStart(c *Client, env protocol.Envelope) {
 	}
 	if !roomPlayersTakeSaveData(room) {
 		slog.Debug("ROOM_START rejected: a player can't play with save data", "room", room.ID)
+		return
+	}
+	if !roomPlayersTakeGameOptions(room) {
+		slog.Debug("ROOM_START rejected: a player can't play with game options", "room", room.ID)
 		return
 	}
 
@@ -726,6 +732,152 @@ func roomPlayersTakeSaveData(room *state.Room) bool {
 		}
 	}
 	return true
+}
+
+// Game option limits. Ids are the client's own names for what an option
+// changes; labels show in every member's room and in the room list.
+const (
+	gameOptionsMax     = 8
+	gameOptionIDMax    = 32
+	gameOptionLabelMax = 48
+)
+
+// handleRoomUpdateGameOptions replaces the game options of the room's next
+// match; an empty list turns them all off. Host-only and waiting-only: a
+// running match keeps the options it started with. A list that breaks any rule
+// is refused whole.
+func (h *Hub) handleRoomUpdateGameOptions(c *Client, env protocol.Envelope) {
+	var req protocol.RoomUpdateGameOptionsRequest
+	if err := json.Unmarshal(env.Data, &req); err != nil {
+		return
+	}
+	room := c.user.CurrentRoom
+	if room == nil {
+		return
+	}
+	if room.Host == nil || room.Host.ID != c.user.ID {
+		slog.Debug("ROOM_UPDATE_GAME_OPTIONS rejected: not host", "user", c.user.Username, "room", room.ID)
+		return
+	}
+	if room.State != state.RoomStateWaiting || room.QuickMatch {
+		slog.Debug("ROOM_UPDATE_GAME_OPTIONS rejected: not waiting, or quick match",
+			"room", room.ID, "state", room.State, "quick", room.QuickMatch)
+		return
+	}
+	// A ranked room plays its ruleset's options, which the host can't change.
+	if room.GetRanked() != nil {
+		slog.Debug("ROOM_UPDATE_GAME_OPTIONS rejected: ranked room", "room", room.ID)
+		return
+	}
+	opts, ok := parseGameOptions(req.Options)
+	if !ok {
+		slog.Debug("ROOM_UPDATE_GAME_OPTIONS rejected: bad options", "room", room.ID)
+		return
+	}
+	// The labels show in every member's room and in the room list: filter
+	// them like a room name.
+	if h.mod != nil {
+		for _, opt := range opts {
+			if term, hit := h.mod.FilterMessage(opt.Label); hit {
+				slog.Info("game option label blocked by filter", "user", c.user.Username, "ip", c.ip, "term", term)
+				return
+			}
+		}
+	}
+	if !room.SetGameOptions(opts) {
+		return
+	}
+	ids := make([]string, 0, len(opts))
+	for _, opt := range opts {
+		ids = append(ids, opt.ID)
+	}
+	slog.Info("room game options updated", "room", room.ID, "options", ids, "by", c.user.Username)
+	h.broadcastRoomState(room)
+	h.broadcastRoomList()
+}
+
+// parseGameOptions checks the host's list and returns it as the room keeps it.
+// Anything structurally wrong refuses the list instead of being fixed, so the
+// room never shows options other than the ones the host's client sent.
+func parseGameOptions(in []protocol.GameOption) ([]state.GameOption, bool) {
+	if len(in) > gameOptionsMax {
+		return nil, false
+	}
+	out := make([]state.GameOption, 0, len(in))
+	seen := make(map[string]bool, len(in))
+	for _, opt := range in {
+		if !validGameOptionID(opt.ID) || seen[opt.ID] {
+			return nil, false
+		}
+		seen[opt.ID] = true
+		label := strings.TrimSpace(opt.Label)
+		if !validGameOptionLabel(label) {
+			return nil, false
+		}
+		out = append(out, state.GameOption{ID: opt.ID, Label: label})
+	}
+	return out, true
+}
+
+// validGameOptionID reports whether id matches ^[a-z0-9-]{1,32}$.
+func validGameOptionID(id string) bool {
+	if len(id) == 0 || len(id) > gameOptionIDMax {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// validGameOptionLabel reports whether a trimmed label can be shown as it is:
+// 1-48 characters on one line, with nothing cleanText would change. U+FFFD
+// is refused too, since the JSON decoder puts it where the client sent bytes
+// that aren't UTF-8.
+func validGameOptionLabel(label string) bool {
+	n := utf8.RuneCountInString(label)
+	if n == 0 || n > gameOptionLabelMax || cleanText(label) != label {
+		return false
+	}
+	for _, r := range label {
+		if unicode.IsControl(r) || r == ' ' || r == ' ' || r == utf8.RuneError {
+			return false
+		}
+	}
+	return true
+}
+
+// roomPlayersTakeGameOptions reports whether every seated player can play the
+// room's next match: with game options on, a client without them would refuse
+// the pre-match manifest and fail the start for everyone. A ranked room's
+// options come from the lobby in MATCH_BEGIN instead, and its players need
+// rankedOptions for them (rankedEligibility).
+func roomPlayersTakeGameOptions(room *state.Room) bool {
+	if len(room.GameOptionList()) == 0 || room.GetRanked() != nil {
+		return true
+	}
+	for _, seat := range room.Players {
+		if seat.User != nil && !seat.User.GameOptions {
+			return false
+		}
+	}
+	return true
+}
+
+// gameOptionsPayload is the wire form of a room's game options; nil when none
+// are on, so the field is left out.
+func gameOptionsPayload(opts []state.GameOption) []protocol.GameOption {
+	if len(opts) == 0 {
+		return nil
+	}
+	out := make([]protocol.GameOption, len(opts))
+	for i, opt := range opts {
+		out[i] = protocol.GameOption{ID: opt.ID, Label: opt.Label}
+	}
+	return out
 }
 
 // clampRunes caps s at n characters without splitting one.
@@ -1245,6 +1397,7 @@ func (h *Hub) buildRoomListPayload() protocol.RoomListPayload {
 			Private:      r.Private,
 			MaxPing:      maxPing,
 			WiredOnly:    wiredOnly,
+			GameOptions:  gameOptionsPayload(r.GameOptionList()),
 		})
 		if settings := r.GetRanked(); settings != nil {
 			payload.Rooms[len(payload.Rooms)-1].Ranked = true
@@ -1308,6 +1461,7 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 		CanStartAlone:     roomCanStartAlone(r),
 		Private:           r.Private,
 		Resizable:         roomResizable(r),
+		GameOptions:       gameOptionsPayload(r.GameOptionList()),
 		Rom: protocol.RomInfo{
 			Name:   r.RomName,
 			MD5:    r.RomMD5,
@@ -1321,6 +1475,7 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 	// A ranked set has fixed players and boots every game blank, like a
 	// quick match: those rooms don't have the options.
 	if !r.QuickMatch && r.Ranked == nil {
+		out.GameOptionsOffered = true
 		enabled := r.LateJoinEnabled
 		out.LateJoinEnabled = &enabled
 		out.SaveData = &protocol.RoomSaveDataPayload{}
@@ -1356,6 +1511,7 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 			Verified:         seat.User.Verified(),
 			PeerID:           seat.User.Primary().ID,
 			SaveData:         seat.User.SaveData,
+			GameOptions:      seat.User.GameOptions,
 		})
 	}
 	if settings := r.Ranked; settings != nil {

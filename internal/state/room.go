@@ -61,6 +61,11 @@ type Room struct {
 	// nil when the match starts blank. The save itself never passes through
 	// the server.
 	SaveData *SaveDataInfo
+	// GameOptions are the per-game options the host turned on for the next
+	// match, in the host's order, or a ranked room's ruleset's (SetRanked);
+	// nil when none are. The server never sees what a host's do to the game.
+	// Replaced whole, never changed in place.
+	GameOptions []GameOption
 	// Join limits, set by the host: the highest ping to the host a joiner may
 	// have (0 takes any), and whether a PC on Wi-Fi may join at all. Players
 	// already seated stay when they change.
@@ -97,6 +102,9 @@ type RankedSettings struct {
 	// Teammates (team sets): users the lobby matched as teammates, a chosen
 	// or kept team of a quick match. Each pair must play on one team.
 	Teammates [][2]uint64
+	// GameOptions are the ruleset's game options (ranked.json
+	// rulesetOptions), the room's while it's ranked. Never changed in place.
+	GameOptions []GameOption
 }
 
 func pingPair(a, b uint64) [2]uint64 {
@@ -146,10 +154,12 @@ func (r *Room) GetRanked() *RankedSettings {
 // SetRanked replaces the ranked settings (nil = unranked). Turning ranked on
 // sizes the room for the set: two seats for 1v1, four for 2v2. It also turns
 // late join and save data off: a set's players are fixed, and every game
-// boots blank.
+// boots blank. The room's game options become the ruleset's; turning ranked
+// off turns them all off, for the host to choose again.
 func (r *Room) SetRanked(settings *RankedSettings) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	wasRanked := r.Ranked != nil
 	r.Ranked = settings
 	if settings != nil {
 		r.MaxPlayers = settings.Players()
@@ -158,6 +168,12 @@ func (r *Room) SetRanked(settings *RankedSettings) {
 		// Ranked has its own maximum ping and takes any logged-in player.
 		r.MaxPing = 0
 		r.WiredOnly = false
+		r.GameOptions = nil
+		if len(settings.GameOptions) > 0 {
+			r.GameOptions = settings.GameOptions
+		}
+	} else if wasRanked {
+		r.GameOptions = nil
 	}
 }
 
@@ -362,6 +378,49 @@ func saveDataEqual(a, b *SaveDataInfo) bool {
 	}
 	for i := range a.Kinds {
 		if a.Kinds[i] != b.Kinds[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// GameOption is one of the host's game options: an opaque id and the label
+// players are shown.
+type GameOption struct {
+	ID    string
+	Label string
+}
+
+// GameOptionList returns the room's game options (nil when none are on). The
+// slice is never changed in place, so callers may keep it.
+func (r *Room) GameOptionList() []GameOption {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.GameOptions
+}
+
+// SetGameOptions replaces the room's game options (empty turns them all off)
+// and reports whether they changed. The caller is responsible for host/state
+// checks and validation.
+func (r *Room) SetGameOptions(opts []GameOption) bool {
+	if len(opts) == 0 {
+		opts = nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if gameOptionsEqual(r.GameOptions, opts) {
+		return false
+	}
+	r.GameOptions = opts
+	return true
+}
+
+func gameOptionsEqual(a, b []GameOption) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
 			return false
 		}
 	}

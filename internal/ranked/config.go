@@ -12,8 +12,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
 
+	"github.com/jay-day/rmgk-lobby/internal/gameoptions"
 	"github.com/jay-day/rmgk-lobby/internal/rating"
 )
 
@@ -39,6 +42,15 @@ type Ladder struct {
 	// order (rankings page). The game module enforces them, so keep this in
 	// sync with it.
 	RulesetStages map[string][]string `json:"rulesetStages,omitempty"`
+	// RulesetOptions names, per ruleset, the game options its matches are
+	// played with (ids from the game options packs), in the order clients
+	// apply them. The lobby sends their ROM patches in MATCH_BEGIN; hosts
+	// can't change them.
+	RulesetOptions map[string][]string `json:"rulesetOptions,omitempty"`
+	// TeamOptions (team ladders) names the game option that makes port "2",
+	// "3" or "4" P1's teammate. A match whose teams the lobby matched gets
+	// it after the ruleset's options.
+	TeamOptions map[string]string `json:"teamOptions,omitempty"`
 	// Rules lists the match rules every ruleset on the ladder shares, for
 	// the rankings page (e.g. "4 stock, 8 minutes").
 	Rules []string `json:"rules,omitempty"`
@@ -113,7 +125,20 @@ type Config struct {
 
 	byMD5 map[string][]*Ladder // a ROM can have one ladder per team size
 	byID  map[string]*Ladder
+
+	// The game options each ladder names, resolved against the packs for
+	// each of its ROMs by UseGameOptions: per ruleset, and per teammate
+	// port ("2"-"4"). Never changed afterwards.
+	rulesetOptions map[optionsKey][]*gameoptions.Option
+	teamOptions    map[optionsKey]*gameoptions.Option
 }
+
+type optionsKey struct {
+	ladder, md5, name string
+}
+
+// teammatePorts are the ports P1's teammate can have in a 2v2 set.
+var teammatePorts = []string{"2", "3", "4"}
 
 // Load reads the config at path. A missing file yields an empty config with
 // ranked disabled.
@@ -169,6 +194,9 @@ func Parse(data []byte) (*Config, error) {
 		if l.BestOf < 1 || l.BestOf%2 == 0 {
 			return nil, fmt.Errorf("ladder %q: bestOf %d must be a positive odd number", l.ID, l.BestOf)
 		}
+		if err := l.checkGameOptionNames(); err != nil {
+			return nil, fmt.Errorf("ladder %q: %w", l.ID, err)
+		}
 		for _, rom := range l.Roms {
 			md5 := strings.ToUpper(strings.TrimSpace(rom.MD5))
 			if len(md5) != 32 {
@@ -184,6 +212,121 @@ func Parse(data []byte) (*Config, error) {
 		c.byID[l.ID] = l
 	}
 	return c, nil
+}
+
+// checkGameOptionNames checks rulesetOptions and teamOptions as written;
+// UseGameOptions checks them against the packs.
+func (l *Ladder) checkGameOptionNames() error {
+	for ruleset, ids := range l.RulesetOptions {
+		if _, ok := l.Ruleset(ruleset); !ok || ruleset == "" {
+			return fmt.Errorf("rulesetOptions names unknown ruleset %q", ruleset)
+		}
+		for i, id := range ids {
+			if !gameoptions.ValidOptionID(id) {
+				return fmt.Errorf("rulesetOptions[%q]: %q isn't an option id", ruleset, id)
+			}
+			for _, earlier := range ids[:i] {
+				if earlier == id {
+					return fmt.Errorf("rulesetOptions[%q] names %q twice", ruleset, id)
+				}
+			}
+		}
+	}
+	if len(l.TeamOptions) == 0 {
+		return nil
+	}
+	if !l.Teams() {
+		return errors.New("teamOptions is for team ladders")
+	}
+	for port, id := range l.TeamOptions {
+		if !slices.Contains(teammatePorts, port) {
+			return fmt.Errorf("teamOptions: %q isn't a teammate port (2, 3 or 4)", port)
+		}
+		if !gameoptions.ValidOptionID(id) {
+			return fmt.Errorf("teamOptions[%q]: %q isn't an option id", port, id)
+		}
+	}
+	for _, port := range teammatePorts {
+		if _, ok := l.TeamOptions[port]; !ok {
+			return fmt.Errorf("teamOptions needs an option for each teammate port (2, 3 and 4); %s is missing", port)
+		}
+	}
+	return nil
+}
+
+// UseGameOptions checks every ladder's rulesetOptions and teamOptions
+// against the game options packs, for each ROM on the ladder: every option
+// must be offered for the ROM, and a ruleset's options, with each team
+// option, must fit in one match (no more than 8, 64 KiB of patches, no two
+// changing the same bytes). It keeps their patches for GameOptions. Call it
+// once, before the config is used.
+func (c *Config) UseGameOptions(packs *gameoptions.Set) error {
+	c.rulesetOptions = make(map[optionsKey][]*gameoptions.Option)
+	c.teamOptions = make(map[optionsKey]*gameoptions.Option)
+	for i := range c.Ladders {
+		l := &c.Ladders[i]
+		if len(l.RulesetOptions) == 0 && len(l.TeamOptions) == 0 {
+			continue
+		}
+		for _, rom := range l.Roms {
+			md5 := normalizeMD5(rom.MD5)
+			for _, ruleset := range l.Rulesets {
+				ids := l.RulesetOptions[ruleset]
+				opts, err := packs.Resolve(md5, ids)
+				if err != nil {
+					return fmt.Errorf("ladder %q, ruleset %q, ROM %s: %w", l.ID, ruleset, md5, err)
+				}
+				if len(ids) > 0 {
+					c.rulesetOptions[optionsKey{l.ID, md5, ruleset}] = opts
+				}
+				for _, port := range teammatePorts {
+					team, ok := l.TeamOptions[port]
+					if !ok {
+						continue
+					}
+					withTeam, err := packs.Resolve(md5, append(slices.Clone(ids), team))
+					if err != nil {
+						return fmt.Errorf("ladder %q, ruleset %q with teamOptions[%q], ROM %s: %w", l.ID, ruleset, port, md5, err)
+					}
+					c.teamOptions[optionsKey{l.ID, md5, port}] = withTeam[len(withTeam)-1]
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// GameOptions returns the game options a ranked set on a ladder's ruleset is
+// played with on the ROM: the ruleset's, then (team ladders with
+// teamOptions) the one that makes port teammate P1's teammate; teammate 0
+// leaves that out. ok is false when the ladder names options UseGameOptions
+// didn't resolve for this ROM, which leaves the ruleset unplayable.
+func (c *Config) GameOptions(ladderID, rulesetID, romMD5 string, teammate int) ([]*gameoptions.Option, bool) {
+	l, ok := c.byID[ladderID]
+	if !ok {
+		return nil, false
+	}
+	md5 := normalizeMD5(romMD5)
+	var out []*gameoptions.Option
+	if len(l.RulesetOptions[rulesetID]) > 0 {
+		opts, ok := c.rulesetOptions[optionsKey{l.ID, md5, rulesetID}]
+		if !ok {
+			return nil, false
+		}
+		out = append(out, opts...)
+	}
+	if teammate != 0 && len(l.TeamOptions) > 0 {
+		opt, ok := c.teamOptions[optionsKey{l.ID, md5, strconv.Itoa(teammate)}]
+		if !ok {
+			return nil, false
+		}
+		out = append(out, opt)
+	}
+	return out, true
+}
+
+func normalizeMD5(md5 string) string {
+	return strings.ToUpper(strings.TrimSpace(md5))
 }
 
 // Enabled reports whether any ladder is configured.

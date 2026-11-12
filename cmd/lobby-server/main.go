@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/jay-day/rmgk-lobby/internal/clientip"
 	"github.com/jay-day/rmgk-lobby/internal/config"
 	"github.com/jay-day/rmgk-lobby/internal/discord"
+	"github.com/jay-day/rmgk-lobby/internal/gameoptions"
 	"github.com/jay-day/rmgk-lobby/internal/mail"
 	"github.com/jay-day/rmgk-lobby/internal/moderation"
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
@@ -118,6 +120,27 @@ func main() {
 	if err != nil {
 		slog.Error("ranked config load failed", "path", rankedPath, "err", err)
 		os.Exit(1)
+	}
+	// Ranked sets are played with game options from these packs (the same
+	// files RMG-K ships); the lobby hands their patches to the players.
+	gameOptionsDir := envOr("RMGK_GAME_OPTIONS_DIR", filepath.Join(filepath.Dir(rankedPath), "gameoptions"))
+	packs, err := gameoptions.LoadDir(gameOptionsDir)
+	if err != nil {
+		slog.Error("game options packs load failed", "dir", gameOptionsDir, "err", err)
+		os.Exit(1)
+	}
+	if err := rankedConfig.UseGameOptions(packs); err != nil {
+		slog.Error("ranked config load failed: game options", "path", rankedPath, "dir", gameOptionsDir, "err", err)
+		os.Exit(1)
+	}
+	slog.Info("game options ready", "dir", gameOptionsDir, "packs", len(packs.Packs()))
+	for _, l := range rankedConfig.Ladders {
+		for _, ruleset := range l.Rulesets {
+			if len(l.RulesetOptions[ruleset]) == 0 {
+				slog.Warn("ranked ruleset has no rulesetOptions: its sets play the game unchanged",
+					"ladder", l.ID, "ruleset", ruleset)
+			}
+		}
 	}
 	hub.EnableAccounts(store, rankedConfig)
 	replayDir := envOr("RMGK_REPLAY_DIR", "replays")
