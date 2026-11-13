@@ -127,10 +127,34 @@ func (h *Hub) deliverPrivateMessage(c *Client, id string, req protocol.ChatSendR
 		// The shield is the moderator's, not their guests'.
 		msg.Admin = msg.Admin && as == c.user
 	}
+	// A PC with private messages off still hears back from whoever it wrote to,
+	// and from moderators writing as themselves.
+	now := time.Now()
+	if !msg.Admin && !target.TakesPrivateMessagesFrom(msg.FromUserID, now) {
+		fail(protocol.ReasonPMsOff)
+		return
+	}
 	msg.ToUserID = target.ID
 	msg.ToUsername = target.Username
 	sendToUser(target, protocol.TypeChatMsg, msg)
 	c.sendEnvelope(protocol.TypeChatMsg, id, msg)
+	c.user.NotePrivateMessageSent(target.ID, now)
+}
+
+// handlePMSettings turns private messages to the sender's PC off or back on.
+// Everyone hears through presence, so their clients stop offering to write.
+func (h *Hub) handlePMSettings(c *Client, env protocol.Envelope) {
+	var req protocol.PMSettingsRequest
+	if err := json.Unmarshal(env.Data, &req); err != nil {
+		return
+	}
+	if !c.user.SetPrivateMessagesOff(req.Off) {
+		return
+	}
+	slog.Info("private message setting changed", "user", c.user.Username, "off", req.Off)
+	for _, u := range c.user.Group() {
+		h.broadcastPresenceUpdated(u)
+	}
 }
 
 func nowMs() int64 {

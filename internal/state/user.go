@@ -46,6 +46,12 @@ type User struct {
 	// The PC doesn't take challenges. Set on the connection's owner only; its
 	// local players follow it (see ChallengesOff).
 	NoChallenges bool
+	// The PC doesn't take private messages, except replies (see
+	// TakesPrivateMessagesFrom). Owner only, like NoChallenges.
+	NoPrivateMessages bool
+	// Whom the PC last wrote to, and when: they may answer for a while even with
+	// NoPrivateMessages on. Owner only.
+	pmSentAt map[uint64]time.Time
 
 	// The games this client has, by upper-case MD5, from HELLO. Set once and
 	// only read afterwards.
@@ -134,6 +140,61 @@ func (u *User) SetChallengesOff(off bool) bool {
 	}
 	owner.NoChallenges = off
 	return true
+}
+
+// PrivateMessageReplyWindow is how long someone who got a private message can
+// answer it, even from a PC that turned private messages off.
+const PrivateMessageReplyWindow = 10 * time.Minute
+
+// PrivateMessagesOff reports whether u's PC turned private messages off.
+func (u *User) PrivateMessagesOff() bool {
+	owner := u.Primary()
+	owner.mu.RLock()
+	defer owner.mu.RUnlock()
+	return owner.NoPrivateMessages
+}
+
+// SetPrivateMessagesOff records the PC's choice on u's owner and reports whether
+// it changed.
+func (u *User) SetPrivateMessagesOff(off bool) bool {
+	owner := u.Primary()
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	if owner.NoPrivateMessages == off {
+		return false
+	}
+	owner.NoPrivateMessages = off
+	return true
+}
+
+// NotePrivateMessageSent records that u's PC wrote to userID at "at", so that
+// userID can answer within PrivateMessageReplyWindow.
+func (u *User) NotePrivateMessageSent(userID uint64, at time.Time) {
+	owner := u.Primary()
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	if owner.pmSentAt == nil {
+		owner.pmSentAt = make(map[uint64]time.Time)
+	}
+	for id, sent := range owner.pmSentAt {
+		if at.Sub(sent) >= PrivateMessageReplyWindow {
+			delete(owner.pmSentAt, id)
+		}
+	}
+	owner.pmSentAt[userID] = at
+}
+
+// TakesPrivateMessagesFrom reports whether fromUserID can write to u at now: u's
+// PC takes private messages, or it wrote to fromUserID within the reply window.
+func (u *User) TakesPrivateMessagesFrom(fromUserID uint64, now time.Time) bool {
+	owner := u.Primary()
+	owner.mu.RLock()
+	defer owner.mu.RUnlock()
+	if !owner.NoPrivateMessages {
+		return true
+	}
+	sent, ok := owner.pmSentAt[fromUserID]
+	return ok && now.Sub(sent) < PrivateMessageReplyWindow
 }
 
 func (u *User) GetState() UserState {

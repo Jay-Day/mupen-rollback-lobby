@@ -334,6 +334,7 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		SaveData:      req.SaveData,
 		GameOptions:   req.GameOptions,
 		NoChallenges:  req.NoChallenges,
+		NoPrivateMessages: req.NoPrivateMessages,
 		JoinedAt:      time.Now(),
 		LastSeen:      time.Now(),
 		Send:          c.send,
@@ -360,6 +361,7 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		Social:            true,
 		SpectatorChat:     true,
 		ChallengeSettings: true,
+		PMSettings:        true,
 	}
 	c.sendEnvelope(protocol.TypeHelloOK, env.ID, resp)
 
@@ -440,6 +442,8 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleChallengeGames(c, env)
 	case protocol.TypeChallengeSettings:
 		h.handleChallengeSettings(c, env)
+	case protocol.TypePMSettings:
+		h.handlePMSettings(c, env)
 	case protocol.TypeMatchAdmit:
 		h.handleMatchAdmit(c, env)
 	case protocol.TypeMatchAdmitSignal:
@@ -768,6 +772,7 @@ func (h *Hub) presenceUserFromState(u *state.User) protocol.PresenceUser {
 		PingToServer:  u.PingToServer,
 		Social:        u.Social,
 		NoChallenges:  u.ChallengesOff(),
+		NoPrivateMessages: u.PrivateMessagesOff(),
 	}
 	// Withholding happens here, at the single choke point every presence
 	// message flows through, so no other broadcast path can leak the country.

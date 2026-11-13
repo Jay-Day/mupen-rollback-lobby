@@ -81,6 +81,8 @@ const (
 	// Whether this PC takes challenges at all. Everyone sees the choice in
 	// presence, so nobody sends one that would only be refused.
 	TypeChallengeSettings = "CHALLENGE_SETTINGS"
+	// Whether this PC takes private messages. Shown in presence like challenges.
+	TypePMSettings = "PM_SETTINGS"
 )
 
 // Server → Client message types
@@ -182,6 +184,7 @@ const (
 	// Refusals for private messages (ReasonNeedsUpdate too).
 	ReasonUserGone = "user_gone"
 	ReasonSamePC   = "same_pc"
+	ReasonPMsOff   = "pms_off" // they don't take private messages
 	// Refused joining a room made for a challenge.
 	ReasonPrivateRoom = "private_room"
 	// Refused by the room's join limits: someone on the joining PC is on
@@ -251,6 +254,8 @@ type HelloRequest struct {
 	// This PC doesn't take challenges (CHALLENGE_SETTINGS changes it later).
 	// Sent here too, so no challenge can slip in before the first update.
 	NoChallenges bool `json:"noChallenges,omitempty"`
+	// This PC doesn't take private messages (PM_SETTINGS changes it later).
+	NoPrivateMessages bool `json:"noPrivateMessages,omitempty"`
 }
 
 type HeartbeatRequest struct {
@@ -486,6 +491,12 @@ type ChallengeSettingsRequest struct {
 	Off bool `json:"off"`
 }
 
+// PMSettingsRequest turns private messages to this PC off or back on. Off still
+// lets through replies to the PC's own messages, and moderators.
+type PMSettingsRequest struct {
+	Off bool `json:"off"`
+}
+
 // -- Response payloads --
 
 type HelloOKResponse struct {
@@ -504,6 +515,8 @@ type HelloOKResponse struct {
 	SpectatorChat bool `json:"spectatorChat,omitempty"`
 	// ChallengeSettings tells the client CHALLENGE_SETTINGS works here.
 	ChallengeSettings bool `json:"challengeSettings,omitempty"`
+	// PMSettings tells the client PM_SETTINGS works here.
+	PMSettings bool `json:"pmSettings,omitempty"`
 }
 
 type LocalPlayerAddedPayload struct {
@@ -585,6 +598,8 @@ type PresenceUser struct {
 	SearchingRom    string `json:"searchingRom,omitempty"` // ROM name while state == searching
 	Social          bool   `json:"social,omitempty"`       // can receive private messages and challenges
 	NoChallenges    bool   `json:"noChallenges,omitempty"` // their PC doesn't take challenges
+	// Their PC doesn't take private messages (replies to its own still get through).
+	NoPrivateMessages bool `json:"noPrivateMessages,omitempty"`
 }
 
 type PresenceFullPayload struct {
