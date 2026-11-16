@@ -57,7 +57,8 @@ func main() {
 	}
 	slog.Info("lobby config ready", "path", configPath,
 		"min_client_version", settings.Get().MinClientVersion,
-		"keyframe_seconds", settings.Get().LiveReplayKeyframeSeconds)
+		"keyframe_seconds", settings.Get().LiveReplayKeyframeSeconds,
+		"keyframe_on_demand", settings.Get().LiveReplayKeyframeOnDemand)
 
 	gameState := state.New()
 	gate := ratelimit.NewConnectGate()

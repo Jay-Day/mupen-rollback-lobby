@@ -138,6 +138,9 @@ const (
 	TypeSpectateFail     = "SPECTATE_FAIL" // request rejected (not broadcasting, ended)
 	// Sent to every match participant and active spectator whenever the audience changes.
 	TypeBroadcastViewerCount = "BROADCAST_VIEWER_COUNT"
+	// Server → broadcaster of an on-demand broadcast (see BroadcastBeginRequest):
+	// a viewer is waiting for a keyframe, so capture and upload one now.
+	TypeBroadcastKeyframeRequest = "BROADCAST_KEYFRAME_REQUEST"
 
 	// Moderation (server → client).
 	TypeAdminAuthOK    = "ADMIN_AUTH_OK"    // moderator role granted
@@ -819,6 +822,10 @@ type MatchBeginPayload struct {
 	// Seconds between the live replay broadcaster's savestate keyframes, from
 	// the lobby config. Clients use 30 when it's missing (older lobbies).
 	KeyframeIntervalSec int `json:"keyframeIntervalSec,omitempty"`
+	// The lobby wants keyframes on demand: a broadcaster that supports it says
+	// so in BROADCAST_BEGIN and then uploads one only when asked with
+	// BROADCAST_KEYFRAME_REQUEST, instead of every KeyframeIntervalSec.
+	KeyframeOnDemand bool `json:"keyframeOnDemand,omitempty"`
 	// Seats is the number of controller ports every client emulates. It is
 	// the room's capacity when every seated player supports late join, so an
 	// empty seat is an idle controller someone can take over mid-match. Zero
@@ -915,6 +922,10 @@ type QuickMatchStatusPayload struct {
 type BroadcastBeginRequest struct {
 	MatchID  uint64 `json:"matchId"`
 	Manifest string `json:"manifest,omitempty"` // base64 player prematch manifest
+	// The broadcaster uploads keyframes when BROADCAST_KEYFRAME_REQUEST asks
+	// instead of on a timer. Clients set it only when MATCH_BEGIN offered it;
+	// older ones leave it out and keep uploading periodically.
+	KeyframeOnDemand bool `json:"keyframeOnDemand,omitempty"`
 }
 
 type BroadcastDataRequest struct {
@@ -962,7 +973,14 @@ type BroadcastViewerCountPayload struct {
 	ViewerCount int    `json:"viewerCount"`
 }
 
-// BroadcastKeyframeRequest carries one chunk of a periodic savestate keyframe.
+// BroadcastKeyframeRequestPayload asks the broadcaster of MatchID for a fresh
+// keyframe, uploaded as usual with BROADCAST_KEYFRAME.
+type BroadcastKeyframeRequestPayload struct {
+	MatchID uint64 `json:"matchId"`
+}
+
+// BroadcastKeyframeRequest carries one chunk of a savestate keyframe, periodic
+// or asked for with BROADCAST_KEYFRAME_REQUEST.
 // Frame is the krec input-record index to consume immediately after restoring
 // the savestate. The savestate (compressed) is split into
 // ChunkCount chunks to stay under the server's per-message read limit; the server

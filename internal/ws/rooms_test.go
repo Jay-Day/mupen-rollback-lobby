@@ -263,7 +263,7 @@ func TestCompatibilityHostSettingsChangeRoomPrediction(t *testing.T) {
 
 func TestMatchBeginCarriesConfiguredKeyframeInterval(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "lobby.json")
-	if err := os.WriteFile(path, []byte(`{"liveReplayKeyframeSeconds": 45}`), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(`{"liveReplayKeyframeSeconds": 45, "liveReplayKeyframeOnDemand": true}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	settings, err := config.Open(path)
@@ -303,6 +303,9 @@ func TestMatchBeginCarriesConfiguredKeyframeInterval(t *testing.T) {
 		}
 		if begin.KeyframeIntervalSec != 45 {
 			t.Fatalf("%s MATCH_BEGIN keyframeIntervalSec = %d, want 45", name, begin.KeyframeIntervalSec)
+		}
+		if !begin.KeyframeOnDemand {
+			t.Fatalf("%s MATCH_BEGIN keyframeOnDemand = false, want true", name)
 		}
 	}
 }

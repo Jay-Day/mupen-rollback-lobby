@@ -60,7 +60,7 @@ func TestViewerCountTracksJoinStopAndDisconnect(t *testing.T) {
 		byMatch: make(map[uint64]*broadcast),
 	}
 	h.broadcasts = m
-	if !m.begin(matchID, 1, broadcaster.user.ID, []uint64{broadcaster.user.ID, player.user.ID}, "") {
+	if !m.begin(matchID, 1, broadcaster.user.ID, []uint64{broadcaster.user.ID, player.user.ID}, "", false) {
 		t.Fatal("begin broadcast")
 	}
 	t.Cleanup(func() { m.endByMatch(matchID) })
@@ -123,7 +123,7 @@ func TestSpectatingPresenceFollowsSubscription(t *testing.T) {
 		byMatch: make(map[uint64]*broadcast),
 	}
 	h.broadcasts = m
-	if !m.begin(matchID, 1, broadcaster.user.ID, []uint64{broadcaster.user.ID}, "") {
+	if !m.begin(matchID, 1, broadcaster.user.ID, []uint64{broadcaster.user.ID}, "", false) {
 		t.Fatal("begin broadcast")
 	}
 	t.Cleanup(func() { m.endByMatch(matchID) })
@@ -165,7 +165,7 @@ func TestSpectatingPresenceSurvivesLeavingRoom(t *testing.T) {
 		byMatch: make(map[uint64]*broadcast),
 	}
 	h.broadcasts = m
-	if !m.begin(matchID, 1, broadcaster.user.ID, []uint64{broadcaster.user.ID}, "") {
+	if !m.begin(matchID, 1, broadcaster.user.ID, []uint64{broadcaster.user.ID}, "", false) {
 		t.Fatal("begin broadcast")
 	}
 	t.Cleanup(func() { m.endByMatch(matchID) })
@@ -206,7 +206,7 @@ func TestSpectatingPresenceCoversLocalPlayers(t *testing.T) {
 		byMatch: make(map[uint64]*broadcast),
 	}
 	h.broadcasts = m
-	if !m.begin(matchID, 1, broadcaster.user.ID, []uint64{broadcaster.user.ID}, "") {
+	if !m.begin(matchID, 1, broadcaster.user.ID, []uint64{broadcaster.user.ID}, "", false) {
 		t.Fatal("begin broadcast")
 	}
 	t.Cleanup(func() { m.endByMatch(matchID) })
@@ -240,7 +240,7 @@ func TestKeyframeAssemblyAcceptsManyPacedChunks(t *testing.T) {
 	}
 	const matchID uint64 = 88
 	const broadcasterID uint64 = 99
-	if !m.begin(matchID, 1, broadcasterID, nil, "") {
+	if !m.begin(matchID, 1, broadcasterID, nil, "", false) {
 		t.Fatal("begin broadcast")
 	}
 	t.Cleanup(func() { m.endByMatch(matchID) })
@@ -272,7 +272,7 @@ func TestSpectatePumpRetriesFullQueueWithoutGap(t *testing.T) {
 	const matchID uint64 = 11
 	const broadcasterID uint64 = 22
 	manifest := base64.StdEncoding.EncodeToString([]byte("host prematch settings with selected cheat options"))
-	if !m.begin(matchID, 1, broadcasterID, nil, manifest) {
+	if !m.begin(matchID, 1, broadcasterID, nil, manifest, false) {
 		t.Fatal("begin broadcast")
 	}
 	b := m.byMatch[matchID]
@@ -391,7 +391,7 @@ func TestKeyframeSpectateStreamHasContiguousLogicalOffsets(t *testing.T) {
 	const matchID uint64 = 44
 	const broadcasterID uint64 = 55
 	manifest := base64.StdEncoding.EncodeToString([]byte("host prematch settings for late spectators"))
-	if !m.begin(matchID, 1, broadcasterID, nil, manifest) {
+	if !m.begin(matchID, 1, broadcasterID, nil, manifest, false) {
 		t.Fatal("begin broadcast")
 	}
 	b := m.byMatch[matchID]
@@ -539,8 +539,8 @@ func TestSpectatorChatReachesOnlyThatBroadcastsViewers(t *testing.T) {
 
 	m := &broadcastManager{dir: t.TempDir(), byMatch: make(map[uint64]*broadcast)}
 	h := &Hub{broadcasts: m}
-	if !m.begin(matchA, 1, host.user.ID, []uint64{host.user.ID, player.user.ID}, "") ||
-		!m.begin(matchB, 2, otherHost.user.ID, []uint64{otherHost.user.ID}, "") {
+	if !m.begin(matchA, 1, host.user.ID, []uint64{host.user.ID, player.user.ID}, "", false) ||
+		!m.begin(matchB, 2, otherHost.user.ID, []uint64{otherHost.user.ID}, "", false) {
 		t.Fatal("begin broadcasts")
 	}
 	t.Cleanup(func() {

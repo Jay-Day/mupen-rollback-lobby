@@ -34,6 +34,14 @@ type Settings struct {
 	// fast-forward for them and more upload for the broadcaster. Clients get
 	// it in MATCH_BEGIN, so a change applies from the next match.
 	LiveReplayKeyframeSeconds int `json:"liveReplayKeyframeSeconds"`
+	// Take keyframes when viewers join instead of on a timer. A viewer joining
+	// when the cached keyframe is older than LiveReplayKeyframeSeconds waits
+	// while the broadcaster takes a new one, and everyone joining in the next
+	// LiveReplayKeyframeSeconds is served that one; in a match's first
+	// interval, viewers replay from frame 0 instead. Saves the broadcaster's
+	// upload while nobody joins. Clients get it in MATCH_BEGIN, so turning it
+	// on or off applies from the next match; the age limit is read at each join.
+	LiveReplayKeyframeOnDemand bool `json:"liveReplayKeyframeOnDemand"`
 
 	// Time between a quick match pairing and its auto-start, for both
 	// clients to measure ping and publish their rollback settings.

@@ -22,7 +22,7 @@ func (f *lateJoinFixture) broadcasting(m *state.Match) {
 	for _, player := range m.Players {
 		ids = append(ids, player.ID)
 	}
-	if !f.h.broadcasts.begin(m.ID, m.RoomID, m.Players[0].ID, ids, "") {
+	if !f.h.broadcasts.begin(m.ID, m.RoomID, m.Players[0].ID, ids, "", false) {
 		f.t.Fatal("broadcast didn't begin")
 	}
 	f.t.Cleanup(func() { f.h.broadcasts.endByMatch(m.ID) })

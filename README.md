@@ -41,6 +41,7 @@ missing file or key uses the default:
   "minClientVersion": "0.9.13b",
   "outdatedClientMessage": "",
   "liveReplayKeyframeSeconds": 30,
+  "liveReplayKeyframeOnDemand": false,
   "quickMatchWarmupSeconds": 5,
   "connectAttempts": 5,
   "connectWindowSeconds": 60,
@@ -54,6 +55,7 @@ missing file or key uses the default:
 | `minClientVersion` | Oldest RMG-K release that may log in. `vdev-` builds are always allowed. Checked at login, so raising it doesn't disconnect anyone already online. |
 | `outdatedClientMessage` | What rejected clients are told. Empty names the required version. |
 | `liveReplayKeyframeSeconds` | 10-600. How often a live replay broadcaster uploads a savestate keyframe; late viewers start from the latest one. Shorter means less catch-up for them and more upload for the broadcaster. Sent in `MATCH_BEGIN`, so it applies from the next match. RMG-K builds that don't read it use 30. |
+| `liveReplayKeyframeOnDemand` | `true` takes keyframes when viewers join instead of every `liveReplayKeyframeSeconds`. A viewer who joins when the cached keyframe is older than `liveReplayKeyframeSeconds` waits (up to 10 s) while the broadcaster takes a new one; everyone joining within the next `liveReplayKeyframeSeconds` gets that same keyframe. During a match's first `liveReplayKeyframeSeconds`, viewers replay from the start instead, which is no longer. Sent in `MATCH_BEGIN`, so turning it on or off applies from the next match; the age limit is read at each join. Broadcasters on RMG-K builds without it keep uploading on the timer. |
 | `quickMatchWarmupSeconds` | 2-60. Pause between a quick match pairing and its start, for both clients to measure ping. |
 | `connectAttempts`, `connectWindowSeconds`, `connectBanSeconds` | One IP connecting more than `connectAttempts` times within `connectWindowSeconds` is refused for `connectBanSeconds`. Loopback is exempt. |
 | `maxConnectionsPerIP` | Connections one IP may hold at once (4 lets a full room share a home NAT). |

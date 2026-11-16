@@ -963,10 +963,12 @@ func (h *Hub) startMatchInRoom(room *state.Room, initiator string) {
 	// Push the new room state first so clients know we've left "waiting".
 	h.broadcastRoomState(room)
 
+	settings := h.cfg()
 	payload := protocol.MatchBeginPayload{
 		MatchID:             match.ID,
 		Peers:               peers,
-		KeyframeIntervalSec: h.cfg().LiveReplayKeyframeSeconds,
+		KeyframeIntervalSec: settings.LiveReplayKeyframeSeconds,
+		KeyframeOnDemand:    settings.LiveReplayKeyframeOnDemand,
 		Seats:               match.Seats,
 	}
 	h.broadcastToRoom(room, protocol.TypeMatchBegin, payload)
