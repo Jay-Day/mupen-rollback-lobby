@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jay-day/rmgk-lobby/internal/config"
+	"github.com/jay-day/rmgk-lobby/internal/ipblock"
 	"github.com/jay-day/rmgk-lobby/internal/moderation"
 	"github.com/jay-day/rmgk-lobby/internal/modlog"
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
@@ -155,6 +156,12 @@ func main() {
 	rootCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// AWS ranges download in the background; until the first fetch succeeds
+	// nothing is blocked (fail open). Fetched even while blockAWS is off so
+	// flipping it on in lobby.json takes effect immediately.
+	awsRanges := ipblock.NewAWS()
+	go awsRanges.Run(rootCtx)
+
 	go anchor.Run(rootCtx)
 	go gate.Janitor(rootCtx)
 	go hub.Run(rootCtx)
@@ -190,6 +197,13 @@ func main() {
 		// ServeWS blocks for the connection's lifetime; balance the
 		// active-connection count when it ends, however it ends.
 		defer gate.Release(ip)
+		// Checked after the connect gate so a flood from AWS is throttled
+		// (and its log lines bounded) like any other.
+		if settings.Get().BlockAWS && awsRanges.Contains(ip) {
+			http.Error(w, "connections from cloud servers are not allowed", http.StatusForbidden)
+			slog.Info("rejected aws ip", "ip", ip)
+			return
+		}
 		hub.ServeWS(w, r, ip)
 	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {

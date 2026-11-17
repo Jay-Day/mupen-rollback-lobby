@@ -64,7 +64,8 @@ missing file or key uses the default:
   "abuseReportDays": 7,
   "roomListMinIntervalMs": 250,
   "adminLoginMaxFailures": 5,
-  "adminLoginBanSeconds": 0
+  "adminLoginBanSeconds": 0,
+  "blockAWS": true
 }
 ```
 
@@ -82,6 +83,7 @@ missing file or key uses the default:
 | `roomListMinIntervalMs` | 0-5000. The full room list goes to every player at most once per this many milliseconds; 0 sends one for every change. |
 | `adminLoginMaxFailures` | 1-1000. Wrong moderator passwords in a row from one IP (the lobby's `/login`) before it is banned. |
 | `adminLoginBanSeconds` | 0-315360000. How long that ban lasts; 0 is for good. Loopback is never banned: it is locked out of moderator logins for 15 minutes instead. |
+| `blockAWS` | Refuse connections from AWS address space. The server downloads Amazon's `ip-ranges.json` at startup and every 12 hours; nothing is blocked until the first download succeeds. |
 
 If an edit doesn't parse or a value is out of range, the server logs an error
 and keeps the previous settings; at startup an invalid file stops the server.
