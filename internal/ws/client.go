@@ -6,9 +6,11 @@ import (
 	"errors"
 	"log/slog"
 	"regexp"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/jay-day/rmgk-lobby/internal/moderation"
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
 	"github.com/jay-day/rmgk-lobby/internal/state"
 )
@@ -23,14 +25,29 @@ type Client struct {
 	hub  *Hub
 	conn *websocket.Conn
 	ip   string
+	// fromWeb: the upgrade request carried an Origin header, so a web page
+	// opened this connection (the desktop client never sends one). Such a
+	// connection can't sign in as a moderator (handleAdminAuth). Set before
+	// the read loop starts; read-only after.
+	fromWeb bool
 
 	user *state.User
 	send chan []byte
 
-	// Moderation: set once a connection authenticates via ADMIN_AUTH.
+	// Moderation: set once a connection authenticates via ADMIN_AUTH. This
+	// client's read loop reads them freely; it changes them under modMu,
+	// which other goroutines (the moderator website) take to read them
+	// (moderatorState).
+	modMu       sync.Mutex
 	isModerator bool
 	adminName   string
-	authFails   int // failed ADMIN_AUTH attempts; disconnect at maxAuthFails
+	adminKey    string // the admins.json entry it signed in with (moderation.Manager.AdminKeyValid)
+	authFails   int    // failed ADMIN_AUTH attempts; disconnect at maxAuthFails
+	webAuthSeen bool   // a refused ADMIN_AUTH from a web page was logged. Read-loop only.
+
+	// The moderators' log row for this connection (0 = not logged). Set at
+	// HELLO, before the hub registers the client.
+	connLogID int64
 
 	// Chat flood window. Only touched from this client's read loop, so no lock.
 	chatTimes []time.Time
@@ -110,6 +127,37 @@ func (c *Client) allowIntroduce(targetID uint64, now time.Time) bool {
 	return true
 }
 
+// moderatorState reads whether this connection signed in as a moderator,
+// from any goroutine. Use activeModerator where it grants anything.
+func (c *Client) moderatorState() (bool, string) {
+	c.modMu.Lock()
+	defer c.modMu.Unlock()
+	return c.isModerator, c.adminName
+}
+
+func (c *Client) setModerator(on bool, name, key string) {
+	c.modMu.Lock()
+	c.isModerator, c.adminName, c.adminKey = on, name, key
+	c.modMu.Unlock()
+}
+
+// activeModerator reports whether this connection is a moderator whose
+// admins.json entry is still there, unchanged. One that was removed, or whose
+// password changed, is signed out here (wasDemoted true) and treated as a
+// player from then on. Any goroutine may call it.
+func (c *Client) activeModerator(mod *moderation.Manager) (active, wasDemoted bool) {
+	c.modMu.Lock()
+	defer c.modMu.Unlock()
+	if !c.isModerator {
+		return false, false
+	}
+	if mod != nil && mod.AdminKeyValid(c.adminKey) {
+		return true, false
+	}
+	c.isModerator, c.adminName, c.adminKey = false, "", ""
+	return false, true
+}
+
 // notice sends a MOD_NOTICE to this client. severity is "info"/"warn"/"error".
 func (c *Client) notice(severity, text string) {
 	c.sendEnvelope(protocol.TypeModNotice, "", protocol.ModNoticePayload{
@@ -118,11 +166,25 @@ func (c *Client) notice(severity, text string) {
 	})
 }
 
-// disconnect best-effort delivers a final notice, then closes the connection,
-// which unblocks readLoop and triggers the normal unregister/cleanup path.
+// disconnectNoticeWait bounds how long a disconnect waits to write its notice.
+const disconnectNoticeWait = 2 * time.Second
+
+// disconnect delivers a final notice, then closes the connection, which
+// unblocks readLoop and triggers the normal unregister/cleanup path. The
+// notice is the same MOD_NOTICE as ever, but written straight to the socket:
+// queued, it raced the close and the player often never learned why they were
+// disconnected. Closing waits for the client to answer, so callers on a
+// goroutine others wait for (the hub's loop, another client's read loop, a
+// web request) run it with go.
 func (c *Client) disconnect(reason string) {
 	if reason != "" {
-		c.notice("error", reason)
+		payload, _ := json.Marshal(protocol.ModNoticePayload{Text: reason, Severity: "error"})
+		env, err := json.Marshal(protocol.Envelope{Type: protocol.TypeModNotice, Data: payload})
+		if err == nil {
+			ctx, cancel := context.WithTimeout(context.Background(), disconnectNoticeWait)
+			_ = c.conn.Write(ctx, websocket.MessageText, env)
+			cancel()
+		}
 	}
 	_ = c.conn.Close(websocket.StatusNormalClosure, "")
 }

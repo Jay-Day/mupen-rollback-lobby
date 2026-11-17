@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
+	"github.com/jay-day/rmgk-lobby/internal/ratelimit"
 	"github.com/jay-day/rmgk-lobby/internal/state"
 )
 
@@ -33,6 +34,10 @@ type broadcast struct {
 	closed     bool
 	liveFrame  int   // broadcaster's latest stamped live krec frame
 	written    int64 // spool bytes written, enforced against maxSpoolBytes
+	// The audience size last sent to the lobby (-1: none yet), so a change
+	// that leaves it the same (a viewer re-subscribing) isn't sent to
+	// everyone again. Written under roomListMu and mu.
+	published int
 
 	// Latest complete savestate keyframe (compressed bytes) + the first krec input
 	// record to consume after restore, so a late spectator fast-forwards only the tail.
@@ -170,6 +175,7 @@ func (m *broadcastManager) begin(matchID, roomID, broadcasterID uint64, particip
 		path:           path,
 		file:           f,
 		spectators:     make(map[uint64]*broadcastSpectator),
+		published:      -1,
 	}
 	return true
 }
@@ -388,7 +394,12 @@ func (m *broadcastManager) notifyViewerCount(matchID uint64) {
 		MatchID:     b.matchID,
 		ViewerCount: len(b.spectators),
 	}
+	unchanged := b.published == payload.ViewerCount
+	b.published = payload.ViewerCount
 	b.mu.Unlock()
+	if unchanged {
+		return // everyone already has this count
+	}
 	m.hub.broadcastToAll(protocol.TypeBroadcastViewerCount, payload, 0)
 }
 
@@ -580,7 +591,11 @@ func (m *broadcastManager) spectateStart(c *Client, matchID uint64) {
 	}
 
 	b.spectators[c.user.ID] = sc
+	viewers := len(b.spectators)
 	b.mu.Unlock()
+	if m.hub != nil {
+		m.hub.modlog.GameSpectators(matchID, viewers)
+	}
 	m.notifyViewerCount(matchID)
 	go m.pumpSpectator(b, c.user.ID, sc)
 	m.syncSpectatingPresence(c.user.ID)
@@ -677,7 +692,10 @@ func (m *broadcastManager) spectateStop(userID, matchID uint64) {
 // broadcast they're watching, the sender included so it echoes like room chat.
 // The match's players aren't spectators, so they never receive it. A sender
 // who isn't watching anything is ignored.
-func (m *broadcastManager) spectatorChat(senderID uint64, payload protocol.ChatMsgPayload) {
+//
+// It reports the match and room of a broadcast the line reached (for the
+// moderators' log), ok false when it went nowhere.
+func (m *broadcastManager) spectatorChat(senderID uint64, payload protocol.ChatMsgPayload) (matchID, roomID uint64, ok bool) {
 	m.mu.Lock()
 	all := make([]*broadcast, 0, len(m.byMatch))
 	for _, b := range m.byMatch {
@@ -699,7 +717,34 @@ func (m *broadcastManager) spectatorChat(senderID uint64, payload protocol.ChatM
 		for _, c := range viewers {
 			c.sendEnvelope(protocol.TypeChatMsg, "", payload)
 		}
+		if !ok {
+			matchID, roomID, ok = b.matchID, b.roomID, true
+		}
 	}
+	return matchID, roomID, ok
+}
+
+// watching names a live broadcast userID is subscribed to, for the
+// moderators' log; ok is false when they watch none.
+func (m *broadcastManager) watching(userID uint64) (matchID, roomID uint64, ok bool) {
+	if m == nil {
+		return 0, 0, false
+	}
+	m.mu.Lock()
+	live := make([]*broadcast, 0, len(m.byMatch))
+	for _, b := range m.byMatch {
+		live = append(live, b)
+	}
+	m.mu.Unlock()
+	for _, b := range live {
+		b.mu.Lock()
+		on := !b.closed && b.spectators[userID] != nil
+		b.mu.Unlock()
+		if on {
+			return b.matchID, b.roomID, true
+		}
+	}
+	return 0, 0, false
 }
 
 // endByMatch ends a broadcast regardless of who triggered it (match is over).
@@ -838,6 +883,17 @@ func (h *Hub) handleBroadcastBegin(c *Client, env protocol.Envelope) {
 		slog.Debug("BROADCAST_BEGIN rejected: not host", "user", c.user.ID, "match", req.MatchID)
 		return
 	}
+	// One live replay per match: clients send BROADCAST_BEGIN once, at
+	// MATCH_BEGIN, and each one (with the BROADCAST_END that follows) reaches
+	// every player twice. There is no failure reply; the host's client never
+	// asks again anyway.
+	if match.LiveReplayStarted() {
+		if log, more := liveReplayLog.Allow(c.ip); log {
+			slog.Info("BROADCAST_BEGIN refused: this match's live replay already started",
+				"user", c.user.Username, "ip", c.ip, "match", match.ID, "more_since_last_line", more)
+		}
+		return
+	}
 	participantIDs := make([]uint64, 0, len(match.Players))
 	for _, player := range match.Players {
 		if player != nil {
@@ -845,6 +901,7 @@ func (h *Hub) handleBroadcastBegin(c *Client, env protocol.Envelope) {
 		}
 	}
 	if h.broadcasts.begin(match.ID, match.RoomID, c.user.ID, participantIDs, req.Manifest) {
+		match.MarkLiveReplayStarted()
 		slog.Info("broadcast begin", "match", match.ID, "by", c.user.Username)
 		// Older hosts do not publish the pre-match room setting. Once their
 		// broadcast actually starts, reconcile it so newer room members never
@@ -886,6 +943,17 @@ func (h *Hub) handleBroadcastEnd(c *Client, env protocol.Envelope) {
 func (h *Hub) handleSpectateStart(c *Client, env protocol.Envelope) {
 	var req protocol.SpectateStartRequest
 	if err := json.Unmarshal(env.Data, &req); err != nil {
+		return
+	}
+	// Each start streams the keyframe and the match so far (megabytes) and
+	// reaches every player (viewer count, presence). A refused client closes
+	// its viewer ("Couldn't watch: <reason>"), so end any subscription it has
+	// to this match too, keeping both sides in agreement.
+	if ok, retry := h.allowAction(c, ratelimit.ActionSpectate); !ok {
+		h.broadcasts.spectateStop(c.user.ID, req.MatchID)
+		c.sendEnvelope(protocol.TypeSpectateFail, "", protocol.SpectateFailPayload{
+			MatchID: req.MatchID, Reason: tooFast("You're opening live replays too fast.", retry),
+		})
 		return
 	}
 	h.broadcasts.spectateStart(c, req.MatchID)

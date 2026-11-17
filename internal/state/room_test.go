@@ -145,3 +145,19 @@ func TestKickedUserIsBarredForRoomLifetime(t *testing.T) {
 		t.Fatal("kick should not carry into a different room")
 	}
 }
+
+func TestSkipIDs(t *testing.T) {
+	s := New()
+	s.NextRoomID()
+	s.SkipIDs(40, 7)
+	if id := s.NextRoomID(); id != 41 {
+		t.Fatalf("room id after skip = %d", id)
+	}
+	if id := s.NextMatchID(); id != 8 {
+		t.Fatalf("match id after skip = %d", id)
+	}
+	s.SkipIDs(3, 2) // never goes back
+	if id := s.NextRoomID(); id != 42 {
+		t.Fatalf("room id after a lower skip = %d", id)
+	}
+}
