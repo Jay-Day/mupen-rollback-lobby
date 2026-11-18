@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
+	"github.com/jay-day/rmgk-lobby/internal/ratelimit"
 	"github.com/jay-day/rmgk-lobby/internal/state"
 )
 
@@ -137,7 +138,11 @@ func sendEnvelopeTo(u *state.User, msgType string, data any) {
 	select {
 	case u.Send <- env:
 	default:
-		slog.Warn("late join message dropped (channel full)", "user", u.Username, "type", msgType)
+		// a host can send hand-off chunks faster than a joiner reads them
+		if log, more := lateJoinDropLog.Allow(u.Username); log {
+			slog.Warn("late join message dropped (channel full)", "user", u.Username, "type", msgType,
+				"more_since_last_line", more)
+		}
 	}
 }
 
@@ -179,6 +184,14 @@ func (h *Hub) handleMatchAdmit(c *Client, env protocol.Envelope) {
 	// joiner must run exactly the host's build to stay in sync.
 	if joiner.ClientVersion != c.user.ClientVersion {
 		c.sendMatchAdmitFail(req.MatchID, req.UserID, protocol.ReasonVersionMismatch)
+		return
+	}
+	// Adding a player reaches every player once it's done (room list and
+	// presence), so it spends the match_start budget. Clients show an unknown
+	// reason as "Couldn't add <name>: something went wrong (<reason>)."
+	if ok, retry := h.allowAction(c, ratelimit.ActionMatchStart); !ok {
+		c.sendMatchAdmitFail(req.MatchID, req.UserID,
+			"you're adding players too fast; try again in "+waitText(retry))
 		return
 	}
 
@@ -304,6 +317,7 @@ func (h *Hub) commitAdmission(room *state.Room, match *state.Match, admit *state
 	match.AddPlayer(joiner)
 	joiner.CurrentMatch = match
 	joiner.SetState(state.UserStatePlaying)
+	h.modlog.GamePlayerJoined(match.ID, logPlayer(joiner, seatSlotOf(room, joiner)))
 
 	slog.Info("late join committed", "match", match.ID, "admit", admit.ID, "joiner", joiner.Username,
 		"slot", admit.Slot)

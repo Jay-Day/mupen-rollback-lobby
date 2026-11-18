@@ -4,9 +4,12 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jay-day/rmgk-lobby/internal/ratelimit"
 )
 
 func TestParseKeepsDefaultsForMissingKeys(t *testing.T) {
@@ -64,6 +67,22 @@ func TestParseRejectsInvalid(t *testing.T) {
 		if _, _, err := Parse([]byte(data)); err == nil {
 			t.Errorf("Parse(%s) succeeded, want error", data)
 		}
+	}
+}
+
+func TestReloadLogsChanges(t *testing.T) {
+	a, _, _ := Parse([]byte(`{}`))
+	b, _, _ := Parse([]byte(`{"roomCreateLimit": 3, "spectateLimit": 4}`))
+	changes := diff(a, b)
+	got := map[string]string{}
+	for i := 0; i+1 < len(changes); i += 2 {
+		got[changes[i].(string)] = changes[i+1].(string)
+	}
+	if got["roomCreateLimit"] != "3 (was 5)" || got["spectateLimit"] != "4 (was 10)" {
+		t.Fatalf("changes logged as %v", got)
+	}
+	if len(got) != 2 {
+		t.Fatalf("changes = %v", changes)
 	}
 }
 
@@ -169,5 +188,103 @@ func write(t *testing.T, path, data string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRateLimitDefaults(t *testing.T) {
+	want := ratelimit.DefaultActionLimits()
+	for _, s := range []*Settings{Defaults(), (*Store)(nil).Get()} {
+		got := s.ActionLimits()
+		if !reflect.DeepEqual(got.Rates, want.Rates) || got.BanStrikes != 40 || got.BanWindow != 10*time.Minute ||
+			got.BanDuration != time.Hour || got.ReportTTL != 7*24*time.Hour || got.MaxIPs != ratelimit.DefaultActionMaxIPs {
+			t.Fatalf("default limits = %+v, want %+v", got, want)
+		}
+		if s.RoomListMinInterval() != 250*time.Millisecond {
+			t.Fatalf("room list interval = %v", s.RoomListMinInterval())
+		}
+	}
+	// Parse builds the same from an empty file
+	s, _, err := Parse(nil)
+	if err != nil || !reflect.DeepEqual(s.ActionLimits(), Defaults().ActionLimits()) {
+		t.Fatalf("parsed defaults differ: %+v (%v)", s.ActionLimits(), err)
+	}
+}
+
+func TestRateLimitSettings(t *testing.T) {
+	s, unknown, err := Parse([]byte(`{"roomCreateLimit": 2, "roomCreateWindowSeconds": 30, "spectateLimit": 0,
+		"lobbyUpdateWindowSeconds": 10, "abuseBanStrikes": 0, "abuseBanWindowSeconds": 120, "abuseBanSeconds": 600,
+		"abuseReportDays": 3, "roomListMinIntervalMs": 0}`))
+	if err != nil || len(unknown) != 0 {
+		t.Fatalf("parse: %v %v", err, unknown)
+	}
+	l := s.ActionLimits()
+	if r := l.Rates[ratelimit.ActionRoomCreate]; r.Count != 2 || r.Window != 30*time.Second {
+		t.Fatalf("room_create = %+v", r)
+	}
+	if r := l.Rates[ratelimit.ActionSpectate]; r.Count != 0 {
+		t.Fatalf("spectate 0 should lift the limit, got %+v", r)
+	}
+	if r := l.Rates[ratelimit.ActionLobbyUpdate]; r.Count != 30 || r.Window != 10*time.Second {
+		t.Fatalf("lobby_update = %+v", r)
+	}
+	if l.BanStrikes != 0 || l.BanWindow != 2*time.Minute || l.BanDuration != 10*time.Minute || l.ReportTTL != 3*24*time.Hour {
+		t.Fatalf("ban settings = %+v", l)
+	}
+	if s.RoomListMinInterval() != 0 {
+		t.Fatal("roomListMinIntervalMs 0 should turn coalescing off")
+	}
+	// a reload logs each change with its old value
+	changes := diff(Defaults(), s)
+	got := map[string]string{}
+	for i := 0; i+1 < len(changes); i += 2 {
+		got[changes[i].(string)] = changes[i+1].(string)
+	}
+	if got["roomCreateLimit"] != "2 (was 5)" || got["roomListMinIntervalMs"] != "0 (was 250)" || got["abuseBanStrikes"] != "0 (was 40)" {
+		t.Fatalf("changes logged as %v", got)
+	}
+}
+
+func TestRateLimitSettingsRejected(t *testing.T) {
+	for _, data := range []string{
+		`{"roomCreateLimit": -1}`,
+		`{"roomJoinLimit": 1001}`,
+		`{"matchStartWindowSeconds": 0}`,
+		`{"spectateWindowSeconds": 3601}`,
+		`{"abuseBanStrikes": -1}`,
+		`{"abuseBanStrikes": 1001}`,
+		`{"abuseBanWindowSeconds": 0}`,
+		`{"abuseBanSeconds": 0}`,
+		`{"abuseBanSeconds": 2592001}`,
+		`{"abuseReportDays": 0}`,
+		`{"abuseReportDays": 366}`,
+		`{"roomListMinIntervalMs": -1}`,
+		`{"roomListMinIntervalMs": 5001}`,
+	} {
+		if _, _, err := Parse([]byte(data)); err == nil {
+			t.Errorf("Parse(%s) accepted it", data)
+		}
+	}
+}
+
+func TestAdminLoginSettings(t *testing.T) {
+	d := Defaults()
+	if n, ban := d.AdminLoginPolicy(); n != 5 || ban != 0 {
+		t.Fatalf("default login policy = %d, %v", n, ban)
+	}
+	s, unknown, err := Parse([]byte(`{"adminLoginMaxFailures": 10, "adminLoginBanSeconds": 3600}`))
+	if err != nil || len(unknown) != 0 {
+		t.Fatalf("Parse: %v %v", err, unknown)
+	}
+	if n, ban := s.AdminLoginPolicy(); n != 10 || ban != time.Hour {
+		t.Fatalf("parsed = %d %v", n, ban)
+	}
+	for _, data := range []string{
+		`{"adminLoginMaxFailures": 0}`,
+		`{"adminLoginMaxFailures": 1001}`,
+		`{"adminLoginBanSeconds": -1}`,
+	} {
+		if _, _, err := Parse([]byte(data)); err == nil {
+			t.Errorf("Parse(%s) succeeded, want error", data)
+		}
 	}
 }
