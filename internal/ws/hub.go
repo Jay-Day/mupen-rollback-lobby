@@ -15,7 +15,9 @@ import (
 	"github.com/jay-day/rmgk-lobby/internal/config"
 	"github.com/jay-day/rmgk-lobby/internal/geo"
 	"github.com/jay-day/rmgk-lobby/internal/moderation"
+	"github.com/jay-day/rmgk-lobby/internal/modlog"
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
+	"github.com/jay-day/rmgk-lobby/internal/ratelimit"
 	"github.com/jay-day/rmgk-lobby/internal/state"
 	"github.com/jay-day/rmgk-lobby/internal/usernames"
 )
@@ -48,6 +50,12 @@ type Hub struct {
 	// Orders room-list snapshots and viewer counts through enqueue. Acquire
 	// before broadcast locks, and never while holding mu.
 	roomListMu sync.Mutex
+	// Room-list coalescing (roomlist.go), guarded by roomListMu: when the
+	// last full list went out, and whether a trailing one is due. Run sends
+	// the trailing list; roomListKick tells it one is waiting.
+	roomListLast    time.Time
+	roomListPending bool
+	roomListKick    chan struct{}
 
 	register   chan *Client
 	unregister chan *Client
@@ -58,6 +66,34 @@ type Hub struct {
 	broadcasts *broadcastManager
 	mod        *moderation.Manager
 	settings   *config.Store // nil = built-in defaults
+
+	// The moderators' log of connections, chat and games, and their audit
+	// trail; nil logs nothing. See SetModLog.
+	modlog *modlog.Logger
+	// Counts failed moderator logins per IP, shared with the moderator
+	// website; nil only limits each connection. See SetLoginGuard.
+	guard *moderation.LoginGuard
+
+	// Per-IP request limits (ratelimits.go); nil limits nothing. See
+	// SetActionLimiter.
+	actions   *ratelimit.ActionLimiter
+	actionLog *ratelimit.LogThrottle // refusal log lines, per IP and kind
+	noticeLog *ratelimit.LogThrottle // refusal notices, per connection and kind
+	rlMu      sync.Mutex
+	rlSaved   map[string]string // what the moderators' log holds, by IP (guarded by rlMu)
+
+	// Which blocked chat lines reach the moderators' log (chatlog.go).
+	blockedLog *blockedChatLog
+}
+
+// SetModLog turns on the moderators' log. Call before Run.
+func (h *Hub) SetModLog(l *modlog.Logger) { h.modlog = l }
+
+// SetLoginGuard makes ADMIN_AUTH count failures in guard, and makes the
+// guard's bans close the banned IP's lobby connections. Call before Run.
+func (h *Hub) SetLoginGuard(g *moderation.LoginGuard) {
+	h.guard = g
+	g.SetOnBan(h.loginGuardBanned)
 }
 
 func NewHub(s *state.State, udpPublicAddr string, iceConfig protocol.ICEConfiguration, mod *moderation.Manager, settings *config.Store) *Hub {
@@ -73,6 +109,8 @@ func NewHub(s *state.State, udpPublicAddr string, iceConfig protocol.ICEConfigur
 		challenges:    newChallengeManager(),
 		mod:           mod,
 		settings:      settings,
+		roomListKick:  make(chan struct{}, 1),
+		blockedLog:    newBlockedChatLog(),
 	}
 	h.broadcasts = newBroadcastManager(h)
 	return h
@@ -95,13 +133,27 @@ func (h *Hub) IsBanned(ip string) (moderation.Sanction, bool) {
 func (h *Hub) Run(ctx context.Context) {
 	reap := time.NewTicker(reapInterval)
 	defer reap.Stop()
+	// The trailing room list (roomlist.go) waits on this loop, so it can't
+	// outlive the hub.
+	roomList := time.NewTimer(time.Hour)
+	roomList.Stop()
+	defer roomList.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-h.roomListKick:
+			if wait := h.flushRoomList(time.Now()); wait > 0 {
+				roomList.Reset(wait)
+			}
+		case <-roomList.C:
+			if wait := h.flushRoomList(time.Now()); wait > 0 {
+				roomList.Reset(wait)
+			}
 		case <-reap.C:
 			h.reapSilentClients()
 			h.reapOrphanRooms()
+			h.flushBlockedChat(time.Now())
 		case c := <-h.register:
 			if c.user == nil {
 				continue
@@ -125,13 +177,14 @@ func (h *Hub) cleanupClient(c *Client) {
 
 	uid := c.user.ID
 	slog.Info("client cleanup", "user", c.user.Username, "id", uid)
+	h.modlog.ConnectionClosed(c.connLogID)
 
 	// Drop from matchmaker queue if present.
 	h.matchmaker.remove(uid)
 
 	// Challenges to or from this PC are over.
 	h.endChallengesFor(c.user, protocol.ChallengeUnavailable)
-	if c.isModerator {
+	if on, _ := c.moderatorState(); on {
 		h.broadcastModPeers()
 	}
 
@@ -175,7 +228,9 @@ func (h *Hub) reapSilentClients() {
 		slog.Info("reaping silent client",
 			"user", c.user.Username, "id", c.user.ID,
 			"last_seen", c.user.GetLastSeen().Format(time.RFC3339))
-		c.disconnect("connection timed out")
+		// On its own goroutine: closing waits for an answer a dead client
+		// never sends, and this loop also serves register/unregister.
+		go c.disconnect("connection timed out")
 	}
 }
 
@@ -219,6 +274,7 @@ func (h *Hub) reapOrphanRooms() {
 		id, _, name, seats, _, st := room.Snapshot()
 		slog.Warn("reaping orphan room", "id", id, "name", name, "seats", seats, "state", st)
 		h.state.RemoveRoom(id)
+		h.modlog.RoomClosed(id, name, modlog.EndAbandoned, "Room \""+name+"\" closed: nobody left in it")
 		removed++
 	}
 	if removed > 0 {
@@ -255,6 +311,11 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request, ip string) {
 		conn: conn,
 		ip:   ip,
 		send: make(chan []byte, clientSendQueue),
+		// A browser always sends Origin on a WebSocket handshake; RMG-K's
+		// desktop client never does (QWebSocket opened with no origin, in
+		// every release). Any web page can open this socket from a visitor's
+		// browser, so such a connection can't try moderator passwords.
+		fromWeb: len(r.Header.Values("Origin")) > 0,
 	}
 
 	ctx, cancel := context.WithCancel(r.Context())
@@ -346,6 +407,10 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 	}
 
 	c.user = user
+	c.connLogID = h.modlog.ConnectionOpened(modlog.Conn{
+		UserID: user.ID, IP: c.ip, Username: user.Username, Version: user.ClientVersion,
+		Country: knownCountry(user.Country),
+	})
 	h.register <- c
 	slog.Info("hello accepted", "user", user.Username, "id", user.ID, "ip", c.ip, "total_users", h.state.UserCount())
 
@@ -615,14 +680,29 @@ func (h *Hub) handleHeartbeat(c *Client, env protocol.Envelope) {
 	// set and cleared by their own flows, and an AFK label would clobber
 	// them). Returning from away lands on idle; if they were actually
 	// browsing, the next room-list interaction restores that on its own.
+	//
+	// Each flip reaches every player, so it spends lobby_update, once for
+	// the PC: its players share the heartbeat and flip together. An IP over
+	// that budget keeps its current state (the client repeats its away flag
+	// every heartbeat, so the flip happens once the budget allows).
+	var flips []*state.User
 	for _, u := range group {
 		switch st := u.GetState(); {
-		case req.Away && (st == state.UserStateIdle || st == state.UserStateBrowsing):
-			u.SetState(state.UserStateAway)
-			h.broadcastPresenceUpdated(u)
-		case !req.Away && st == state.UserStateAway:
-			u.SetState(state.UserStateIdle)
-			h.broadcastPresenceUpdated(u)
+		case req.Away && (st == state.UserStateIdle || st == state.UserStateBrowsing),
+			!req.Away && st == state.UserStateAway:
+			flips = append(flips, u)
+		}
+	}
+	if len(flips) > 0 {
+		if ok, _ := h.allowAction(c, ratelimit.ActionLobbyUpdate); ok {
+			for _, u := range flips {
+				if req.Away {
+					u.SetState(state.UserStateAway)
+				} else {
+					u.SetState(state.UserStateIdle)
+				}
+				h.broadcastPresenceUpdated(u)
+			}
 		}
 	}
 
@@ -667,7 +747,8 @@ func (h *Hub) broadcastToAll(msgType string, data any, excludeID uint64) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	slog.Info("broadcast", "type", msgType, "clients", len(h.clients), "exclude", excludeID)
+	slog.Debug("broadcast", "type", msgType, "clients", len(h.clients), "exclude", excludeID)
+	dropped := 0
 	for id, c := range h.clients {
 		if id == excludeID {
 			continue
@@ -675,8 +756,11 @@ func (h *Hub) broadcastToAll(msgType string, data any, excludeID uint64) {
 		select {
 		case c.send <- env:
 		default:
-			slog.Warn("broadcast drop (queue full)", "type", msgType, "to", id)
+			dropped++
 		}
+	}
+	if dropped > 0 {
+		slog.Warn("broadcast drop (queue full)", "type", msgType, "dropped", dropped, "clients", len(h.clients))
 	}
 }
 
@@ -694,17 +778,21 @@ func (h *Hub) handleChatSend(c *Client, env protocol.Envelope) {
 	}
 
 	// Per-client flood limit: chat fans out to every connected client, so a
-	// spammer amplifies through the whole lobby. Moderators are exempt.
-	if !c.isModerator && !c.allowChat(time.Now()) {
+	// spammer amplifies through the whole lobby. Moderators are exempt (as
+	// long as their admins.json entry is unchanged).
+	isMod := h.activeModerator(c)
+	if !isMod && !c.allowChat(time.Now()) {
 		c.notice("warn", "You're sending messages too fast — slow down.")
+		h.logChat(c, req, truncateMessage(msg), modlog.BlockedFlood)
 		return
 	}
 
 	if h.mod != nil {
 		// Muted users can't send chat (moderators are exempt).
-		if !c.isModerator {
+		if !isMod {
 			if s, muted := h.mod.IsMuted(c.ip); muted {
 				c.notice("warn", "You are muted"+untilSuffix(s.Until)+".")
+				h.logChat(c, req, truncateMessage(msg), modlog.BlockedMuted)
 				return
 			}
 		}
@@ -713,6 +801,7 @@ func (h *Hub) handleChatSend(c *Client, env protocol.Envelope) {
 		if term, hit := h.mod.FilterMessage(msg); hit {
 			c.notice("warn", "Your message was blocked by the chat filter.")
 			slog.Info("chat blocked", "user", c.user.Username, "id", c.user.ID, "ip", c.ip, "term", term)
+			h.logChat(c, req, truncateMessage(msg), modlog.BlockedFilter)
 			return
 		}
 	}
@@ -723,13 +812,14 @@ func (h *Hub) handleChatSend(c *Client, env protocol.Envelope) {
 		FromUsername: c.user.Username,
 		Message:      truncateMessage(msg),
 		ServerTime:   nowMs(),
-		Admin:        c.isModerator,
+		Admin:        isMod,
 	}
 
 	switch req.Channel {
 	case channelLobby:
 		h.lobbyChat.Append(payload)
 		h.broadcastToAll(protocol.TypeChatMsg, payload, 0)
+		h.logChat(c, req, payload.Message, modlog.Delivered)
 	case channelRoom:
 		// Sender must be in a room; broadcast only to that room's members.
 		room := c.user.CurrentRoom
@@ -737,12 +827,65 @@ func (h *Hub) handleChatSend(c *Client, env protocol.Envelope) {
 			return
 		}
 		h.broadcastToRoom(room, protocol.TypeChatMsg, payload)
+		h.logChat(c, req, payload.Message, modlog.Delivered)
 	case channelSpectate:
 		// A live replay's viewers, and the players of the match it shows.
-		h.broadcasts.spectatorChat(c, payload)
+		if matchID, roomID, ok := h.broadcasts.spectatorChat(c, payload); ok {
+			h.logChatIn(c, req, payload.Message, modlog.Delivered, roomID, matchID)
+		}
 	case channelPM:
 		h.deliverPrivateMessage(c, env.ID, req, payload)
 	}
+}
+
+// logChat records a message in the moderators' chat log: where it went (the
+// sender's room, with its running match, or the live replay they watch), and
+// blocked when it didn't. Blocked lines are sampled per IP (blockedChatLog),
+// so a sender who's muted, filtered or flooding can't fill the disk.
+//
+// Private messages stay out of it, blocked ones too: only the two of them
+// read those.
+func (h *Hub) logChat(c *Client, req protocol.ChatSendRequest, text, blocked string) {
+	if h.modlog == nil || req.Channel == channelPM {
+		return
+	}
+	var roomID, matchID uint64
+	switch req.Channel {
+	case channelRoom:
+		if room := c.user.CurrentRoom; room != nil {
+			roomID = room.ID
+			if m := roomMatch(room); m != nil {
+				matchID = m.ID
+			}
+		}
+	case channelSpectate:
+		matchID, roomID, _ = h.broadcasts.watching(c.user.ID)
+	}
+	h.logChatIn(c, req, text, blocked, roomID, matchID)
+}
+
+func (h *Hub) logChatIn(c *Client, req protocol.ChatSendRequest, text, blocked string, roomID, matchID uint64) {
+	if h.modlog == nil {
+		return
+	}
+	isMod, _ := c.moderatorState()
+	m := modlog.ChatMessage{
+		Channel: req.Channel, RoomID: roomID, MatchID: matchID,
+		UserID: c.user.ID, Name: c.user.Username, IP: c.ip,
+		Text: text, Admin: isMod, Blocked: blocked,
+	}
+	if roomID != 0 {
+		if room := h.state.GetRoom(roomID); room != nil {
+			m.RoomName = room.Name
+		}
+	}
+	if blocked != modlog.Delivered {
+		var ok bool
+		if m, ok = h.blockedLog.admit(moderation.CanonicalIP(c.ip), m, time.Now()); !ok {
+			return // counted; a later row from this IP carries the count
+		}
+	}
+	h.modlog.Chat(m)
 }
 
 func (h *Hub) handleChatHistory(c *Client, env protocol.Envelope) {
@@ -751,6 +894,11 @@ func (h *Hub) handleChatHistory(c *Client, env protocol.Envelope) {
 		return
 	}
 	if !validChannel(req.Channel) || req.Channel == channelPM {
+		return
+	}
+	// Up to 50 lines (30 KB) for a 50-byte request. RMG-K never sends it, so
+	// a refusal is silent.
+	if ok, _ := h.allowAction(c, ratelimit.ActionLobbyUpdate); !ok {
 		return
 	}
 	reply := protocol.ChatHistoryReply{

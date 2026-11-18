@@ -53,12 +53,40 @@ func HashPassword(salt, password string) string {
 // Authenticate returns the admin name for a matching password, constant-time
 // against each stored hash. ok is false when no credential matches.
 func (a *AdminStore) Authenticate(password string) (string, bool) {
+	name, _, ok := a.AuthenticateKey(password)
+	return name, ok
+}
+
+// AuthenticateKey is Authenticate that also returns a key naming the entry
+// that matched. The key changes when the entry's name, salt or hash does, so
+// a website session tied to it ends when that moderator is removed from
+// admins.json or given a new password.
+func (a *AdminStore) AuthenticateKey(password string) (name, key string, ok bool) {
 	for _, ad := range a.admins {
 		want := strings.ToLower(strings.TrimSpace(ad.Hash))
 		got := HashPassword(ad.Salt, password)
 		if subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1 {
-			return ad.Name, true
+			return ad.Name, credentialKey(ad), true
 		}
 	}
-	return "", false
+	return "", "", false
+}
+
+// HasKey reports whether an entry with this key (from AuthenticateKey) is
+// still loaded.
+func (a *AdminStore) HasKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	for _, ad := range a.admins {
+		if subtle.ConstantTimeCompare([]byte(credentialKey(ad)), []byte(key)) == 1 {
+			return true
+		}
+	}
+	return false
+}
+
+func credentialKey(ad Admin) string {
+	sum := sha256.Sum256([]byte(ad.Name + "\x00" + ad.Salt + "\x00" + strings.ToLower(strings.TrimSpace(ad.Hash))))
+	return hex.EncodeToString(sum[:])
 }

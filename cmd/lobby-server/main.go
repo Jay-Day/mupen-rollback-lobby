@@ -9,11 +9,15 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/jay-day/rmgk-lobby/internal/config"
+	"github.com/jay-day/rmgk-lobby/internal/ipblock"
 	"github.com/jay-day/rmgk-lobby/internal/moderation"
+	"github.com/jay-day/rmgk-lobby/internal/modlog"
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
 	"github.com/jay-day/rmgk-lobby/internal/ratelimit"
 	"github.com/jay-day/rmgk-lobby/internal/state"
@@ -97,6 +101,45 @@ func main() {
 	}
 	hub := ws.NewHub(gameState, *udpPublicAddr, iceConfig, mod, settings)
 
+	// Failed moderator logins, counted per IP across the lobby's ADMIN_AUTH and
+	// the moderator website: adminLoginMaxFailures (default 5) in a row ban
+	// the IP, for adminLoginBanSeconds (default 0, for good); loopback gets a
+	// lockout instead.
+	guard := moderation.NewLoginGuard(mod)
+	guard.SetPolicy(func() moderation.LoginPolicy {
+		n, ban := settings.Get().AdminLoginPolicy()
+		return moderation.LoginPolicy{MaxFailures: n, BanDuration: ban}
+	})
+	hub.SetLoginGuard(guard)
+
+	// Per-IP limits on the requests that reach every player (lobby.json; see
+	// README "Rate limits"). Refusals add up to an automatic timeout.
+	actions := ratelimit.NewActionLimiter()
+	actions.SetLimits(func() ratelimit.ActionLimits { return settings.Get().ActionLimits() })
+	if limitLoopback {
+		actions.SetExemptLoopback(false)
+		slog.Warn("TEST BUILD (ratelimit_loopback): request limits and their automatic bans apply to loopback " +
+			"addresses too. Don't deploy this binary.")
+	}
+	hub.SetActionLimiter(actions)
+
+	// The moderators' log: chat, rooms, games and moderator actions go to the
+	// server log (journald) as structured lines. The rate limit report is
+	// kept in a file so it survives restarts: ratelimits.json beside the ban
+	// list, so a server that already sets RMGK_BANLIST_PATH needs nothing
+	// new. RMGK_RATELIMITS_PATH overrides it; "off" doesn't save it.
+	ratePath := envOr("RMGK_RATELIMITS_PATH", filepath.Join(filepath.Dir(banPath), "ratelimits.json"))
+	if strings.EqualFold(ratePath, "off") {
+		ratePath = ""
+	}
+	modLog, err := modlog.Open(ratePath)
+	if err != nil {
+		slog.Error("rate limit report unreadable; starting it empty and not saving it", "path", ratePath, "err", err)
+		modLog, _ = modlog.Open("")
+	}
+	hub.SetModLog(modLog)
+	slog.Info("rate limit report loaded", "path", ratePath, "records", hub.LoadRateLimits())
+
 	udpListenAddr, err := net.ResolveUDPAddr("udp", *udpAddr)
 	if err != nil {
 		slog.Error("failed to resolve UDP address", "err", err)
@@ -114,9 +157,16 @@ func main() {
 	rootCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// AWS ranges download in the background; until the first fetch succeeds
+	// nothing is blocked (fail open). Fetched even while blockAWS is off so
+	// flipping it on in lobby.json takes effect immediately.
+	awsRanges := ipblock.NewAWS()
+	go awsRanges.Run(rootCtx)
+
 	go anchor.Run(rootCtx)
 	go gate.Janitor(rootCtx)
 	go hub.Run(rootCtx)
+	go hub.RunRateLimits(rootCtx)
 
 	go config.WatchFile(rootCtx, configPath, configPollInterval, settings.Reload)
 	go config.WatchFile(rootCtx, adminsPath, configPollInterval, func() {
@@ -148,6 +198,13 @@ func main() {
 		// ServeWS blocks for the connection's lifetime; balance the
 		// active-connection count when it ends, however it ends.
 		defer gate.Release(ip)
+		// Checked after the connect gate so a flood from AWS is throttled
+		// (and its log lines bounded) like any other.
+		if settings.Get().BlockAWS && awsRanges.Contains(ip) {
+			http.Error(w, "connections from cloud servers are not allowed", http.StatusForbidden)
+			slog.Info("rejected aws ip", "ip", ip)
+			return
+		}
 		hub.ServeWS(w, r, ip)
 	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -158,6 +215,9 @@ func main() {
 	srv := &http.Server{
 		Addr:    *wsAddr,
 		Handler: mux,
+		// Only the request headers: a WebSocket is hijacked once they're read,
+		// so this never cuts a long-lived connection.
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	sigCh := make(chan os.Signal, 1)
@@ -177,6 +237,12 @@ func main() {
 	defer shutdownCancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("http shutdown error", "err", err)
+	}
+	// bans made since the last write, then the rate limit report's last changes
+	mod.FlushBans()
+	hub.SaveRateLimits()
+	if err := modLog.Close(); err != nil {
+		slog.Warn("moderator log close error", "err", err)
 	}
 }
 

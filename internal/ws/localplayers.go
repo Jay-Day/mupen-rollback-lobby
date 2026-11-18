@@ -130,7 +130,7 @@ func (h *Hub) handleLocalPlayerAdd(c *Client, env protocol.Envelope) {
 	// the presence update arrives.
 	c.sendEnvelope(protocol.TypeLocalPlayerAdded, env.ID, protocol.LocalPlayerAddedPayload{UserID: local.ID, Name: name})
 	h.broadcastPresenceAdded(local)
-	if c.isModerator {
+	if on, _ := c.moderatorState(); on {
 		h.broadcastModPeers()
 	}
 }
@@ -158,7 +158,7 @@ func (h *Hub) handleLocalPlayerRemove(c *Client, env protocol.Envelope) {
 	slog.Info("local player removed", "owner", c.user.Username, "name", local.Username, "id", local.ID)
 	c.sendEnvelope(protocol.TypeLocalPlayerRemoved, env.ID, protocol.LocalPlayerRemovedPayload{UserID: local.ID})
 	h.broadcastPresenceRemoved(local.ID)
-	if c.isModerator {
+	if on, _ := c.moderatorState(); on {
 		h.broadcastModPeers()
 	}
 }

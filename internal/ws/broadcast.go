@@ -12,6 +12,7 @@ import (
 
 	"github.com/jay-day/rmgk-lobby/internal/config"
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
+	"github.com/jay-day/rmgk-lobby/internal/ratelimit"
 	"github.com/jay-day/rmgk-lobby/internal/state"
 )
 
@@ -34,6 +35,10 @@ type broadcast struct {
 	closed     bool
 	liveFrame  int   // broadcaster's latest stamped live krec frame
 	written    int64 // spool bytes written, enforced against maxSpoolBytes
+	// The audience size last sent to the lobby (-1: none yet), so a change
+	// that leaves it the same (a viewer re-subscribing) isn't sent to
+	// everyone again. Written under roomListMu and mu.
+	published int
 
 	// Latest complete savestate keyframe (compressed bytes) + the first krec input
 	// record to consume after restore, so a late spectator fast-forwards only the tail.
@@ -96,9 +101,12 @@ const keyframeChunkBytes = 512 * 1024
 
 // New clients use small paced chunks so chat can preempt between them; older
 // clients used 512 KiB chunks. Bound both the shape and total decoded bytes.
+// The total is the largest keyframe a viewer accepts: a 24 MiB state, or its
+// compressed form's 10-byte header (LobbyClient.cpp, MAX_KEYFRAME_ENCODED_BYTES).
+// Anything larger would be stored and sent only for every viewer to refuse it.
 const (
 	maxKeyframeChunks = 512
-	maxKeyframeBytes  = 32 << 20
+	maxKeyframeBytes  = 24<<20 + 10
 )
 
 // maxSpoolBytes caps one broadcast's spool file. A krec is input records — even
@@ -202,6 +210,7 @@ func (m *broadcastManager) begin(matchID, roomID, broadcasterID uint64, particip
 		spectators:       make(map[uint64]*broadcastSpectator),
 		keyframeOnDemand: keyframeOnDemand,
 		startedAt:        time.Now(),
+		published:        -1,
 	}
 	return true
 }
@@ -524,7 +533,12 @@ func (m *broadcastManager) notifyViewerCount(matchID uint64) {
 		MatchID:     b.matchID,
 		ViewerCount: len(b.spectators),
 	}
+	unchanged := b.published == payload.ViewerCount
+	b.published = payload.ViewerCount
 	b.mu.Unlock()
+	if unchanged {
+		return // everyone already has this count
+	}
 	m.hub.broadcastToAll(protocol.TypeBroadcastViewerCount, payload, 0)
 }
 
@@ -753,9 +767,13 @@ func (m *broadcastManager) spectateStart(c *Client, matchID uint64) {
 
 	waiting := sc.waitingKeyframe // the pump owns it once unlocked
 	b.spectators[c.user.ID] = sc
+	viewers := len(b.spectators)
 	b.mu.Unlock()
 	if asked {
 		m.requestKeyframe(b, now)
+	}
+	if m.hub != nil {
+		m.hub.modlog.GameSpectators(matchID, viewers)
 	}
 	m.notifyViewerCount(matchID)
 	go m.pumpSpectator(b, c.user.ID, sc)
@@ -864,15 +882,18 @@ func (m *broadcastManager) spectateStop(userID, matchID uint64) {
 // players, who can answer. A viewer whose client still says the players can't read
 // this keeps that promise: their lines reach the other viewers only. A sender who's
 // neither watching nor playing a match being broadcast is ignored.
-func (m *broadcastManager) spectatorChat(c *Client, payload protocol.ChatMsgPayload) {
+//
+// It reports the match and room of the broadcast the line reached (for the
+// moderators' log), ok false when it went nowhere.
+func (m *broadcastManager) spectatorChat(c *Client, payload protocol.ChatMsgPayload) (matchID, roomID uint64, ok bool) {
 	b, fromPlayer := m.chatBroadcastOf(c)
 	if b == nil {
-		return
+		return 0, 0, false
 	}
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
-		return
+		return 0, 0, false
 	}
 	recipients := make(map[*Client]struct{}, len(b.spectators)+maxRoomPlayers)
 	for _, sc := range b.spectators {
@@ -888,6 +909,7 @@ func (m *broadcastManager) spectatorChat(c *Client, payload protocol.ChatMsgPayl
 	for recipient := range recipients {
 		recipient.sendEnvelope(protocol.TypeChatMsg, "", payload)
 	}
+	return b.matchID, b.roomID, true
 }
 
 // chatBroadcastOf finds the broadcast whose chat c is on, and whether c is on it as
@@ -929,6 +951,29 @@ func (m *broadcastManager) chatPlayersOf(b *broadcast) []*Client {
 		}
 	}
 	return out
+}
+
+// watching names a live broadcast userID is subscribed to, for the
+// moderators' log; ok is false when they watch none.
+func (m *broadcastManager) watching(userID uint64) (matchID, roomID uint64, ok bool) {
+	if m == nil {
+		return 0, 0, false
+	}
+	m.mu.Lock()
+	live := make([]*broadcast, 0, len(m.byMatch))
+	for _, b := range m.byMatch {
+		live = append(live, b)
+	}
+	m.mu.Unlock()
+	for _, b := range live {
+		b.mu.Lock()
+		on := !b.closed && b.spectators[userID] != nil
+		b.mu.Unlock()
+		if on {
+			return b.matchID, b.roomID, true
+		}
+	}
+	return 0, 0, false
 }
 
 // endByMatch ends a broadcast regardless of who triggered it (match is over).
@@ -1067,6 +1112,17 @@ func (h *Hub) handleBroadcastBegin(c *Client, env protocol.Envelope) {
 		slog.Debug("BROADCAST_BEGIN rejected: not host", "user", c.user.ID, "match", req.MatchID)
 		return
 	}
+	// One live replay per match: clients send BROADCAST_BEGIN once, at
+	// MATCH_BEGIN, and each one (with the BROADCAST_END that follows) reaches
+	// every player twice. There is no failure reply; the host's client never
+	// asks again anyway.
+	if match.LiveReplayStarted() {
+		if log, more := liveReplayLog.Allow(c.ip); log {
+			slog.Info("BROADCAST_BEGIN refused: this match's live replay already started",
+				"user", c.user.Username, "ip", c.ip, "match", match.ID, "more_since_last_line", more)
+		}
+		return
+	}
 	participantIDs := make([]uint64, 0, len(match.Players))
 	for _, player := range match.Players {
 		if player != nil {
@@ -1074,6 +1130,7 @@ func (h *Hub) handleBroadcastBegin(c *Client, env protocol.Envelope) {
 		}
 	}
 	if h.broadcasts.begin(match.ID, match.RoomID, c.user.ID, participantIDs, req.Manifest, req.KeyframeOnDemand) {
+		match.MarkLiveReplayStarted()
 		slog.Info("broadcast begin", "match", match.ID, "by", c.user.Username,
 			"keyframe_on_demand", req.KeyframeOnDemand)
 		// Older hosts do not publish the pre-match room setting. Once their
@@ -1116,6 +1173,17 @@ func (h *Hub) handleBroadcastEnd(c *Client, env protocol.Envelope) {
 func (h *Hub) handleSpectateStart(c *Client, env protocol.Envelope) {
 	var req protocol.SpectateStartRequest
 	if err := json.Unmarshal(env.Data, &req); err != nil {
+		return
+	}
+	// Each start streams the keyframe and the match so far (megabytes) and
+	// reaches every player (viewer count, presence). A refused client closes
+	// its viewer ("Couldn't watch: <reason>"), so end any subscription it has
+	// to this match too, keeping both sides in agreement.
+	if ok, retry := h.allowAction(c, ratelimit.ActionSpectate); !ok {
+		h.broadcasts.spectateStop(c.user.ID, req.MatchID)
+		c.sendEnvelope(protocol.TypeSpectateFail, "", protocol.SpectateFailPayload{
+			MatchID: req.MatchID, Reason: tooFast("You're opening live replays too fast.", retry),
+		})
 		return
 	}
 	h.broadcasts.spectateStart(c, req.MatchID)

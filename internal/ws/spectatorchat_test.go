@@ -244,7 +244,7 @@ func TestPlayersAnswersObeyMuteAndFilter(t *testing.T) {
 	f.h.dispatch(mira, raw("a badword here"))
 	f.heardNothing("viewer")
 
-	f.h.mod.Mute("198.51.100.1", "mira", "mod", "", 0)
+	f.h.mod.MuteNamed("198.51.100.1", "mira", "mod", "", 0)
 	f.h.dispatch(mira, raw("hello"))
 	f.heardNothing("viewer")
 }

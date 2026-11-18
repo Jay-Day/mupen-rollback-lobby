@@ -55,8 +55,62 @@ type Settings struct {
 	ConnectBanSeconds    int `json:"connectBanSeconds"`
 	MaxConnectionsPerIP  int `json:"maxConnectionsPerIP"`
 
-	minClient ReleaseVersion
+	// Per-IP limits on the lobby requests that reach every connected player
+	// (or cost the server bulk data): one IP may make each kind *Limit times
+	// per *WindowSeconds; 0 lifts that limit. See README "Rate limits".
+	RoomCreateLimit          int `json:"roomCreateLimit"`
+	RoomCreateWindowSeconds  int `json:"roomCreateWindowSeconds"`
+	MatchStartLimit          int `json:"matchStartLimit"`
+	MatchStartWindowSeconds  int `json:"matchStartWindowSeconds"`
+	RoomJoinLimit            int `json:"roomJoinLimit"`
+	RoomJoinWindowSeconds    int `json:"roomJoinWindowSeconds"`
+	SpectateLimit            int `json:"spectateLimit"`
+	SpectateWindowSeconds    int `json:"spectateWindowSeconds"`
+	RoomUpdateLimit          int `json:"roomUpdateLimit"`
+	RoomUpdateWindowSeconds  int `json:"roomUpdateWindowSeconds"`
+	LobbyUpdateLimit         int `json:"lobbyUpdateLimit"`
+	LobbyUpdateWindowSeconds int `json:"lobbyUpdateWindowSeconds"`
+
+	// Every refused request is a strike: AbuseBanStrikes of them within
+	// AbuseBanWindowSeconds ban the IP for AbuseBanSeconds (0 strikes turns
+	// the automatic ban off). The moderators' Rate limits report keeps an IP
+	// for AbuseReportDays after its last refused request.
+	AbuseBanStrikes       int `json:"abuseBanStrikes"`
+	AbuseBanWindowSeconds int `json:"abuseBanWindowSeconds"`
+	AbuseBanSeconds       int `json:"abuseBanSeconds"`
+	AbuseReportDays       int `json:"abuseReportDays"`
+
+	// The full room list goes to every player at most once per this many
+	// milliseconds; changes in between go out together, once, at the end of
+	// the interval. 0 sends a list for every change.
+	RoomListMinIntervalMs int `json:"roomListMinIntervalMs"`
+
+	// AdminLoginMaxFailures wrong moderator passwords in a row from one IP
+	// (the desktop client's /login) ban it for
+	// AdminLoginBanSeconds; 0 seconds is permanent. Loopback is locked out
+	// for 15 minutes instead of banned.
+	AdminLoginMaxFailures int `json:"adminLoginMaxFailures"`
+	AdminLoginBanSeconds  int `json:"adminLoginBanSeconds"`
+
+	// Refuse connections from AWS address space (Amazon's published
+	// ip-ranges.json, refreshed by the server). Players don't connect from
+	// cloud servers; scripted floods do.
+	BlockAWS bool `json:"blockAWS"`
+
+	minClient    ReleaseVersion
+	actionLimits ratelimit.ActionLimits // built from the keys above; read only
 }
+
+// Bounds for the request limits.
+const (
+	MaxActionLimit           = 1000 // the limiter keeps at most this many requests per window
+	MaxActionWindowSeconds   = 3600
+	MaxAbuseBanStrikes       = 1000
+	MaxAbuseBanWindowSeconds = 24 * 3600
+	MaxAbuseBanSeconds       = 30 * 24 * 3600
+	MaxAbuseReportDays       = 365
+	MaxRoomListMinIntervalMs = 5000
+)
 
 // Bounds for the keyframe interval. Clients clamp to the same range.
 const (
@@ -64,9 +118,18 @@ const (
 	MaxLiveReplayKeyframeSeconds = 600
 )
 
+// Bounds for the moderator login guard.
+const (
+	MaxAdminLoginMaxFailures = 1000
+	MaxAdminLoginBanSeconds  = 10 * 365 * 24 * 3600 // about 10 years; 0 is permanent
+)
+
 // Defaults returns the settings used when the file is missing.
 func Defaults() *Settings {
 	limits := ratelimit.DefaultLimits()
+	actions := ratelimit.DefaultActionLimits()
+	count := func(k ratelimit.ActionKind) int { return actions.Rates[k].Count }
+	window := func(k ratelimit.ActionKind) int { return int(actions.Rates[k].Window / time.Second) }
 	s := &Settings{
 		MinClientVersion:          "0.9.13b",
 		LiveReplayKeyframeSeconds: 30,
@@ -75,9 +138,52 @@ func Defaults() *Settings {
 		ConnectWindowSeconds:      int(limits.Window / time.Second),
 		ConnectBanSeconds:         int(limits.BanDuration / time.Second),
 		MaxConnectionsPerIP:       limits.MaxConcurrent,
+		RoomCreateLimit:           count(ratelimit.ActionRoomCreate),
+		RoomCreateWindowSeconds:   window(ratelimit.ActionRoomCreate),
+		MatchStartLimit:           count(ratelimit.ActionMatchStart),
+		MatchStartWindowSeconds:   window(ratelimit.ActionMatchStart),
+		RoomJoinLimit:             count(ratelimit.ActionRoomJoin),
+		RoomJoinWindowSeconds:     window(ratelimit.ActionRoomJoin),
+		SpectateLimit:             count(ratelimit.ActionSpectate),
+		SpectateWindowSeconds:     window(ratelimit.ActionSpectate),
+		RoomUpdateLimit:           count(ratelimit.ActionRoomUpdate),
+		RoomUpdateWindowSeconds:   window(ratelimit.ActionRoomUpdate),
+		LobbyUpdateLimit:          count(ratelimit.ActionLobbyUpdate),
+		LobbyUpdateWindowSeconds:  window(ratelimit.ActionLobbyUpdate),
+		AbuseBanStrikes:           actions.BanStrikes,
+		AbuseBanWindowSeconds:     int(actions.BanWindow / time.Second),
+		AbuseBanSeconds:           int(actions.BanDuration / time.Second),
+		AbuseReportDays:           int(actions.ReportTTL / (24 * time.Hour)),
+		RoomListMinIntervalMs:     250,
+		AdminLoginMaxFailures:     5,
+		AdminLoginBanSeconds:      0,
+		BlockAWS:                  true,
 	}
 	s.minClient, _ = ParseReleaseVersion(s.MinClientVersion)
+	s.actionLimits = s.buildActionLimits()
 	return s
+}
+
+// buildActionLimits turns the request-limit keys into the limiter's form.
+func (s *Settings) buildActionLimits() ratelimit.ActionLimits {
+	rate := func(count, windowSeconds int) ratelimit.Rate {
+		return ratelimit.Rate{Count: count, Window: time.Duration(windowSeconds) * time.Second}
+	}
+	return ratelimit.ActionLimits{
+		Rates: map[ratelimit.ActionKind]ratelimit.Rate{
+			ratelimit.ActionRoomCreate:  rate(s.RoomCreateLimit, s.RoomCreateWindowSeconds),
+			ratelimit.ActionMatchStart:  rate(s.MatchStartLimit, s.MatchStartWindowSeconds),
+			ratelimit.ActionRoomJoin:    rate(s.RoomJoinLimit, s.RoomJoinWindowSeconds),
+			ratelimit.ActionSpectate:    rate(s.SpectateLimit, s.SpectateWindowSeconds),
+			ratelimit.ActionRoomUpdate:  rate(s.RoomUpdateLimit, s.RoomUpdateWindowSeconds),
+			ratelimit.ActionLobbyUpdate: rate(s.LobbyUpdateLimit, s.LobbyUpdateWindowSeconds),
+		},
+		BanStrikes:  s.AbuseBanStrikes,
+		BanWindow:   time.Duration(s.AbuseBanWindowSeconds) * time.Second,
+		BanDuration: time.Duration(s.AbuseBanSeconds) * time.Second,
+		ReportTTL:   time.Duration(s.AbuseReportDays) * 24 * time.Hour,
+		MaxIPs:      ratelimit.DefaultActionMaxIPs,
+	}
 }
 
 var defaults = Defaults()
@@ -129,7 +235,56 @@ func (s *Settings) validate() error {
 			return fmt.Errorf("%s must be at least 1, got %d", f.name, f.value)
 		}
 	}
+	for _, f := range []struct {
+		name     string
+		value    int
+		min, max int
+		unit     string
+	}{
+		{"roomCreateLimit", s.RoomCreateLimit, 0, MaxActionLimit, " (0 lifts the limit)"},
+		{"matchStartLimit", s.MatchStartLimit, 0, MaxActionLimit, " (0 lifts the limit)"},
+		{"roomJoinLimit", s.RoomJoinLimit, 0, MaxActionLimit, " (0 lifts the limit)"},
+		{"spectateLimit", s.SpectateLimit, 0, MaxActionLimit, " (0 lifts the limit)"},
+		{"roomUpdateLimit", s.RoomUpdateLimit, 0, MaxActionLimit, " (0 lifts the limit)"},
+		{"lobbyUpdateLimit", s.LobbyUpdateLimit, 0, MaxActionLimit, " (0 lifts the limit)"},
+		{"roomCreateWindowSeconds", s.RoomCreateWindowSeconds, 1, MaxActionWindowSeconds, ""},
+		{"matchStartWindowSeconds", s.MatchStartWindowSeconds, 1, MaxActionWindowSeconds, ""},
+		{"roomJoinWindowSeconds", s.RoomJoinWindowSeconds, 1, MaxActionWindowSeconds, ""},
+		{"spectateWindowSeconds", s.SpectateWindowSeconds, 1, MaxActionWindowSeconds, ""},
+		{"roomUpdateWindowSeconds", s.RoomUpdateWindowSeconds, 1, MaxActionWindowSeconds, ""},
+		{"lobbyUpdateWindowSeconds", s.LobbyUpdateWindowSeconds, 1, MaxActionWindowSeconds, ""},
+		{"abuseBanStrikes", s.AbuseBanStrikes, 0, MaxAbuseBanStrikes, " (0 turns the automatic ban off)"},
+		{"abuseBanWindowSeconds", s.AbuseBanWindowSeconds, 1, MaxAbuseBanWindowSeconds, ""},
+		// at least 1: a ban without a duration would be permanent
+		{"abuseBanSeconds", s.AbuseBanSeconds, 1, MaxAbuseBanSeconds, ""},
+		{"abuseReportDays", s.AbuseReportDays, 1, MaxAbuseReportDays, ""},
+		{"roomListMinIntervalMs", s.RoomListMinIntervalMs, 0, MaxRoomListMinIntervalMs, " (0 sends every change at once)"},
+	} {
+		if f.value < f.min || f.value > f.max {
+			return fmt.Errorf("%s must be %d-%d%s, got %d", f.name, f.min, f.max, f.unit, f.value)
+		}
+	}
+	s.actionLimits = s.buildActionLimits()
+	for _, f := range []struct {
+		name     string
+		value    int
+		min, max int
+		unit     string
+	}{
+		{"adminLoginMaxFailures", s.AdminLoginMaxFailures, 1, MaxAdminLoginMaxFailures, ""},
+		{"adminLoginBanSeconds", s.AdminLoginBanSeconds, 0, MaxAdminLoginBanSeconds, " (0 bans for good)"},
+	} {
+		if f.value < f.min || f.value > f.max {
+			return fmt.Errorf("%s must be %d-%d%s, got %d", f.name, f.min, f.max, f.unit, f.value)
+		}
+	}
 	return nil
+}
+
+// AdminLoginPolicy is adminLoginMaxFailures and adminLoginBanSeconds: how
+// many failures ban an IP, and for how long (0: permanent).
+func (s *Settings) AdminLoginPolicy() (maxFailures int, ban time.Duration) {
+	return s.AdminLoginMaxFailures, time.Duration(s.AdminLoginBanSeconds) * time.Second
 }
 
 // unknownKeys lists the top-level keys in data that Settings doesn't have.
@@ -176,6 +331,15 @@ func (s *Settings) ConnectLimits() ratelimit.Limits {
 		BanDuration:   time.Duration(s.ConnectBanSeconds) * time.Second,
 		MaxConcurrent: s.MaxConnectionsPerIP,
 	}
+}
+
+// ActionLimits are the per-IP request limits, for ratelimit.ActionLimiter.
+// The same value (and map) comes back on every call; treat it as read only.
+func (s *Settings) ActionLimits() ratelimit.ActionLimits { return s.actionLimits }
+
+// RoomListMinInterval is roomListMinIntervalMs (0: every change goes out).
+func (s *Settings) RoomListMinInterval() time.Duration {
+	return time.Duration(s.RoomListMinIntervalMs) * time.Millisecond
 }
 
 // Store holds the current settings and reloads them from their file.
@@ -257,9 +421,20 @@ func diff(a, b *Settings) []any {
 	sort.Strings(keys)
 	var out []any
 	for _, k := range keys {
-		if fmt.Sprint(am[k]) != fmt.Sprint(bm[k]) {
-			out = append(out, k, fmt.Sprintf("%v (was %v)", bm[k], am[k]))
+		if was, now := logValue(am[k]), logValue(bm[k]); was != now {
+			out = append(out, k, now+" (was "+was+")")
 		}
 	}
 	return out
+}
+
+// logValue renders one setting for the reload log line: lists as JSON
+// (["203.0.113.7","10.0.0.0/8"], [] when empty), everything else as is.
+func logValue(v any) string {
+	switch v.(type) {
+	case []any, map[string]any:
+		b, _ := json.Marshal(v)
+		return string(b)
+	}
+	return fmt.Sprint(v)
 }

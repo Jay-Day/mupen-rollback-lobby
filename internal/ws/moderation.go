@@ -2,6 +2,7 @@ package ws
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -9,13 +10,18 @@ import (
 	"time"
 
 	"github.com/jay-day/rmgk-lobby/internal/moderation"
+	"github.com/jay-day/rmgk-lobby/internal/modlog"
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
 	"github.com/jay-day/rmgk-lobby/internal/usernames"
 )
 
 // maxAuthFails is how many bad ADMIN_AUTH passwords one connection gets
-// before it is disconnected.
+// before it is disconnected. The login guard (SetLoginGuard) also counts them
+// per IP, with the moderator website's, and bans the IP at its limit.
 const maxAuthFails = 5
+
+// guardBanNotice is what a connection hears when the login guard bans its IP.
+const guardBanNotice = "This address was banned after too many failed moderator logins."
 
 // handleAdminAuth validates a password against the configured admins and, on
 // success, elevates this connection to moderator for its lifetime.
@@ -30,8 +36,41 @@ func (h *Hub) handleAdminAuth(c *Client, env protocol.Envelope) {
 	if err := json.Unmarshal(env.Data, &req); err != nil {
 		return
 	}
-	name, ok := h.mod.AuthenticateAdmin(req.Password)
-	if !ok {
+	if c.fromWeb {
+		// A web page opened this connection (the desktop client sends no
+		// Origin). Any site can do that from a visitor's browser, so its
+		// passwords are never checked and never counted: it can't guess one,
+		// and it can't get the visitor's address banned by failing. It gets
+		// the same answer as a wrong password.
+		if !c.webAuthSeen {
+			c.webAuthSeen = true
+			slog.Info("admin auth from a web page refused (not checked or counted)", "user", c.user.Username, "ip", c.ip)
+		}
+		c.sendEnvelope(protocol.TypeAdminAuthFail, env.ID, protocol.ModNoticePayload{
+			Text: "Incorrect password.", Severity: "error",
+		})
+		return
+	}
+	var name, key string
+	result := h.guard.Try(c.ip, "lobby", func() bool {
+		var ok bool
+		name, key, ok = h.mod.AuthenticateAdminKey(req.Password)
+		return ok
+	})
+	switch result {
+	case moderation.LoginRefused:
+		// a loopback address the guard locked out doesn't get to try
+		slog.Info("admin auth refused: locked out", "user", c.user.Username, "ip", c.ip)
+		c.sendEnvelope(protocol.TypeAdminAuthFail, env.ID, protocol.ModNoticePayload{
+			Text: "Too many failed login attempts. Try again later.", Severity: "error",
+		})
+		return
+	case moderation.LoginBanned:
+		c.authFails++
+		slog.Info("admin auth failed", "user", c.user.Username, "ip", c.ip, "fails", c.authFails)
+		return // the ban closed every connection from the IP, this one too
+	}
+	if result != moderation.LoginOK {
 		c.authFails++
 		slog.Info("admin auth failed", "user", c.user.Username, "ip", c.ip, "fails", c.authFails)
 		if c.authFails >= maxAuthFails {
@@ -44,21 +83,21 @@ func (h *Hub) handleAdminAuth(c *Client, env protocol.Envelope) {
 		})
 		return
 	}
-	c.isModerator = true
-	c.adminName = name
+	c.setModerator(true, name, key)
 	slog.Info("admin authenticated", "admin", name, "user", c.user.Username, "ip", c.ip)
 	c.sendEnvelope(protocol.TypeAdminAuthOK, env.ID, protocol.AdminAuthOKResponse{Name: name})
+	h.audit(name, "sign-in", "Signed in to the lobby as "+c.user.Username, modlog.SourceLobby, c.ip)
 	h.broadcastModPeers()
 }
 
 // handleAdminLogout gives the moderator role back for the rest of the session.
 func (h *Hub) handleAdminLogout(c *Client, env protocol.Envelope) {
-	if !c.isModerator {
+	on, name := c.moderatorState()
+	if !on {
 		return
 	}
-	slog.Info("admin logged out", "admin", c.adminName, "user", c.user.Username)
-	c.isModerator = false
-	c.adminName = ""
+	slog.Info("admin logged out", "admin", name, "user", c.user.Username)
+	c.setModerator(false, "", "")
 	c.sendEnvelope(protocol.TypeAdminLoggedOut, env.ID, struct{}{})
 	h.broadcastModPeers()
 }
@@ -68,13 +107,11 @@ func (h *Hub) handleAdminLogout(c *Client, env protocol.Envelope) {
 // counts: findClientByUsername reaches the connection through any of them.
 func (h *Hub) broadcastModPeers() {
 	var mods []*Client
-	h.mu.Lock()
-	for _, cl := range h.clients {
-		if cl.user != nil && cl.isModerator {
+	for _, cl := range h.clientList() {
+		if on, _ := cl.moderatorState(); on {
 			mods = append(mods, cl)
 		}
 	}
-	h.mu.Unlock()
 	payload := protocol.ModPeersPayload{UserIDs: []uint64{}}
 	for _, cl := range mods {
 		for _, u := range cl.user.Group() {
@@ -86,10 +123,48 @@ func (h *Hub) broadcastModPeers() {
 	}
 }
 
+// loginGuardBanned runs after the login guard bans an IP (from the lobby or
+// the moderator website): every lobby connection from it is closed, and the
+// ban goes into the moderators' log and audit trail.
+func (h *Hub) loginGuardBanned(ban moderation.GuardBan) {
+	action, detail := "ban", "Banned "+ban.IP+": "+ban.Reason+" ("+ban.Where+")"
+	if ban.Duration > 0 {
+		action = "timeout"
+		detail = "Timed out " + ban.IP + untilSuffix(timeFromDur(ban.Duration)) + ": " + ban.Reason + " (" + ban.Where + ")"
+	}
+	h.modlog.Event(modlog.Event{Type: modlog.EventModeration, IP: ban.IP, Text: moderation.AutoBanBy + ": " + detail})
+	h.audit(moderation.AutoBanBy, action, detail, modlog.SourceAuto, ban.IP)
+	for _, tc := range h.clientList() {
+		if moderation.CanonicalIP(tc.ip) == ban.IP {
+			go tc.disconnect(guardBanNotice)
+		}
+	}
+}
+
+// activeModerator reports whether c is a moderator whose admins.json entry
+// still exists unchanged; one whose entry was removed or whose password
+// changed is signed out of the lobby here (and told so).
+func (h *Hub) activeModerator(c *Client) bool {
+	active, demoted := c.activeModerator(h.mod)
+	if demoted {
+		slog.Info("moderator signed out: their admins.json entry is gone or changed", "user", c.user.Username, "ip", c.ip)
+		c.notice("warn", "Your moderator sign-in is no longer valid.")
+		h.broadcastModPeers()
+	}
+	return active
+}
+
+// audit records a moderator action in the audit trail (and the server log).
+func (h *Hub) audit(admin, action, detail, source, ip string) {
+	h.modlog.Audit(modlog.AuditEntry{Admin: admin, Action: action, Detail: detail, Source: source, IP: ip})
+}
+
 // handleModAction executes a moderator command. Requires an authenticated
-// moderator connection.
+// moderator connection. Every change is audited (source "lobby").
 func (h *Hub) handleModAction(c *Client, env protocol.Envelope) {
-	if !c.isModerator || h.mod == nil {
+	// Checked against admins.json on every action: a moderator removed from
+	// it (or given a new password) loses the lobby's powers here.
+	if h.mod == nil || !h.activeModerator(c) {
 		c.notice("error", "You are not authorized to do that.")
 		return
 	}
@@ -119,7 +194,8 @@ func (h *Hub) handleModAction(c *Client, env protocol.Envelope) {
 			c.notice("error", "Usage: /unban <ip>")
 			return
 		}
-		if h.mod.Unban(target, c.adminName) {
+		if h.LiftSanction(c.adminName, "unban", target) {
+			h.audit(c.adminName, "unban", "Unbanned "+NormalizeIP(target), modlog.SourceLobby, c.ip)
 			c.notice("info", "Unbanned "+target+".")
 		} else {
 			c.notice("warn", "No ban found for "+target+".")
@@ -131,7 +207,8 @@ func (h *Hub) handleModAction(c *Client, env protocol.Envelope) {
 			c.notice("error", "Usage: /unmute <ip>")
 			return
 		}
-		if h.mod.Unmute(target, c.adminName) {
+		if h.LiftSanction(c.adminName, "unmute", target) {
+			h.audit(c.adminName, "unmute", "Unmuted "+NormalizeIP(target), modlog.SourceLobby, c.ip)
 			c.notice("info", "Unmuted "+target+".")
 		} else {
 			c.notice("warn", "No mute found for "+target+".")
@@ -148,19 +225,13 @@ func (h *Hub) handleModAction(c *Client, env protocol.Envelope) {
 			c.notice("error", "Usage: closeroom <roomId>")
 			return
 		}
-		room := h.state.GetRoom(roomID)
-		if room == nil {
+		reason := strings.TrimSpace(req.Reason)
+		name, ok := h.closeRoom(roomID, c.adminName, reason)
+		if !ok {
 			c.notice("warn", "Room not found (already gone?).")
 			return
 		}
-		name := room.Name
-		if room.Host == nil {
-			// Hostless rooms shouldn't exist; reap the record directly.
-			h.state.RemoveRoom(roomID)
-			h.broadcastRoomList()
-		} else {
-			h.removeUserFromRoom(room.Host, room, "admin_closed")
-		}
+		h.audit(c.adminName, "closeroom", closeRoomDetail(roomID, name, reason), modlog.SourceLobby, c.ip)
 		h.modConfirm(c, "Closed room \""+name+"\".")
 		return
 	}
@@ -177,7 +248,7 @@ func (h *Hub) handleModAction(c *Client, env protocol.Envelope) {
 	}
 	// Name them as the moderator did: this may be a local player, and whatever
 	// happens next reaches the whole connection.
-	tname, tip := tc.user.Username, tc.ip
+	tname := tc.user.Username
 	for _, u := range tc.user.Group() {
 		if usernames.Same(u.Username, target) {
 			tname = u.Username
@@ -191,7 +262,7 @@ func (h *Hub) handleModAction(c *Client, env protocol.Envelope) {
 			}
 		}
 		c.sendEnvelope(protocol.TypeModTargetInfo, env.ID, protocol.ModTargetInfoPayload{
-			Target: tname, Others: others, Moderator: tc.isModerator,
+			Target: tname, Others: others, Moderator: h.activeModerator(tc),
 		})
 		return
 	}
@@ -199,43 +270,133 @@ func (h *Hub) handleModAction(c *Client, env protocol.Envelope) {
 		c.notice("warn", "You can't moderate yourself.")
 		return
 	}
-	if tc.isModerator {
+	if h.activeModerator(tc) {
 		c.notice("warn", target+" is a moderator.")
 		return
 	}
 	reason := strings.TrimSpace(req.Reason)
+	out, err := h.sanction(tc, tname, c.adminName, action, reason, dur)
+	switch {
+	case errors.Is(err, ErrNeedsDuration):
+		c.notice("error", "Timeout needs a duration, e.g. /timeout "+tname+" 10m.")
+		return
+	case err != nil:
+		c.notice("error", "Unknown action: "+action)
+		return
+	}
+	h.audit(c.adminName, action, out.Detail, modlog.SourceLobby, c.ip)
+	h.modConfirm(c, out.Confirm)
+	h.sendModResult(c, action, out)
+}
 
+// Errors from the moderation actions the website calls.
+var (
+	ErrNotConnected  = errors.New("that user isn't connected")
+	ErrModerator     = errors.New("that user is a moderator")
+	ErrNeedsDuration = errors.New("a timeout needs a duration")
+	ErrUnknownAction = errors.New("unknown action")
+)
+
+// ModOutcome is what a moderator action did.
+type ModOutcome struct {
+	Target  string    // the name the moderator acted on
+	IP      string    // the connection's IP, which unban and unmute take
+	Until   time.Time // zero = permanent (a kick has none)
+	Confirm string    // the confirmation the lobby shows the moderator
+	Detail  string    // the audit trail's line
+}
+
+// sanction kicks, mutes, times out or bans the connection tc; admin is who
+// did it, and tname the name they acted on (a local player's, maybe: the
+// whole connection is sanctioned either way). The player hears the same
+// messages whether it came from the lobby or the website.
+func (h *Hub) sanction(tc *Client, tname, admin, action, reason string, dur time.Duration) (ModOutcome, error) {
+	tip := tc.ip
+	out := ModOutcome{Target: tname, IP: tip}
 	switch action {
 	case "kick":
-		tc.disconnect("You were kicked by a moderator" + reasonSuffix(reason) + ".")
-		h.modConfirm(c, "Kicked "+tname+".")
-		h.sendModResult(c, action, tname, "", 0)
-
+		out.Confirm = "Kicked " + tname + "."
+		out.Detail = "Kicked " + tname + " (" + tip + ")" + reasonSuffix(reason)
 	case "mute":
-		h.mod.Mute(tip, tname, c.adminName, reason, dur)
-		tc.notice("warn", "You were muted by a moderator"+untilSuffix(timeFromDur(dur))+reasonSuffix(reason)+".")
-		h.modConfirm(c, "Muted "+tname+" ("+tip+")"+untilSuffix(timeFromDur(dur))+".")
-		h.sendModResult(c, action, tname, tip, dur)
-
+		out.Until = timeFromDur(dur)
+		out.Confirm = "Muted " + tname + " (" + tip + ")" + untilSuffix(out.Until) + "."
+		out.Detail = "Muted " + tname + " (" + tip + ")" + untilSuffix(out.Until) + reasonSuffix(reason)
 	case "timeout":
 		if dur <= 0 {
-			c.notice("error", "Timeout needs a duration, e.g. /timeout "+tname+" 10m.")
-			return
+			return out, ErrNeedsDuration
 		}
-		h.mod.Ban(tip, tname, c.adminName, reason, dur)
-		tc.disconnect("You were timed out by a moderator" + untilSuffix(timeFromDur(dur)) + reasonSuffix(reason) + ".")
-		h.modConfirm(c, "Timed out "+tname+" ("+tip+")"+untilSuffix(timeFromDur(dur))+".")
-		h.sendModResult(c, action, tname, tip, dur)
-
+		out.Until = timeFromDur(dur)
+		out.Confirm = "Timed out " + tname + " (" + tip + ")" + untilSuffix(out.Until) + "."
+		out.Detail = "Timed out " + tname + " (" + tip + ")" + untilSuffix(out.Until) + reasonSuffix(reason)
 	case "ban":
-		h.mod.Ban(tip, tname, c.adminName, reason, 0) // permanent
-		tc.disconnect("You were banned by a moderator" + reasonSuffix(reason) + ".")
-		h.modConfirm(c, "Banned "+tname+" ("+tip+").")
-		h.sendModResult(c, action, tname, tip, 0)
-
+		out.Confirm = "Banned " + tname + " (" + tip + ")."
+		out.Detail = "Banned " + tname + " (" + tip + ")" + reasonSuffix(reason)
 	default:
-		c.notice("error", "Unknown action: "+action)
+		return out, ErrUnknownAction
 	}
+	if h.mod == nil {
+		return out, ErrUnknownAction
+	}
+	// the timeline line goes in before the disconnect's own lines
+	h.logSanction(tc, admin, out.Detail)
+	// A disconnect waits for the client to answer the close, so it runs on
+	// its own: a stalled client mustn't hold up the moderator. The ban is in
+	// place before it starts, so the player can't come straight back.
+	switch action {
+	case "kick":
+		go tc.disconnect("You were kicked by a moderator" + reasonSuffix(reason) + ".")
+	case "mute":
+		h.mod.MuteNamed(tip, tname, admin, reason, dur)
+		tc.notice("warn", "You were muted by a moderator"+untilSuffix(out.Until)+reasonSuffix(reason)+".")
+	case "timeout":
+		h.mod.BanNamed(tip, tname, admin, reason, dur)
+		go tc.disconnect("You were timed out by a moderator" + untilSuffix(out.Until) + reasonSuffix(reason) + ".")
+	case "ban":
+		h.mod.BanNamed(tip, tname, admin, reason, 0) // permanent
+		go tc.disconnect("You were banned by a moderator" + reasonSuffix(reason) + ".")
+	}
+	return out, nil
+}
+
+// logSanction puts a moderator action on the target's room and game timeline.
+func (h *Hub) logSanction(tc *Client, admin, detail string) {
+	if h.modlog == nil || tc.user == nil {
+		return
+	}
+	e := modlog.Event{Type: modlog.EventModeration, Name: tc.user.Username, IP: tc.ip, Text: admin + ": " + detail}
+	if room := tc.user.CurrentRoom; room != nil {
+		e.RoomID = room.ID
+		if m := tc.user.CurrentMatch; m != nil {
+			e.MatchID = m.ID
+		}
+	}
+	h.modlog.Event(e)
+}
+
+// closeRoom dissolves a room (ending its match, if one runs) the way a host
+// leaving does: peers get MATCH_PEER_LEFT, everyone ROOM_LEFT with reason
+// admin_closed. Reports the room's name, or false when it's gone.
+func (h *Hub) closeRoom(roomID uint64, admin, reason string) (string, bool) {
+	room := h.state.GetRoom(roomID)
+	if room == nil {
+		return "", false
+	}
+	name := room.Name
+	h.modlog.Event(modlog.Event{Type: modlog.EventModeration, RoomID: roomID,
+		Text: admin + ": " + closeRoomDetail(roomID, name, reason)})
+	if room.Host == nil {
+		// Hostless rooms shouldn't exist; reap the record directly.
+		h.state.RemoveRoom(roomID)
+		h.modlog.RoomClosed(roomID, name, modlog.EndModerator, "")
+		h.broadcastRoomList()
+	} else {
+		h.removeUserFromRoom(room.Host, room, "admin_closed")
+	}
+	return name, true
+}
+
+func closeRoomDetail(roomID uint64, name, reason string) string {
+	return fmt.Sprintf("Closed room #%d \"%s\"%s", roomID, name, reasonSuffix(reason))
 }
 
 // modConfirm sends the acting moderator a confirmation and logs the action.
@@ -245,14 +406,18 @@ func (h *Hub) modConfirm(c *Client, text string) {
 }
 
 // sendModResult tells the moderator's client what just took effect, so it can
-// offer Undo. The IP is what unban and unmute take.
-func (h *Hub) sendModResult(c *Client, action, target, ip string, dur time.Duration) {
+// offer Undo. The IP is what unban and unmute take; a kick has nothing to undo.
+func (h *Hub) sendModResult(c *Client, action string, out ModOutcome) {
+	ip := out.IP
+	if action == "kick" {
+		ip = ""
+	}
 	var until int64
-	if t := timeFromDur(dur); !t.IsZero() {
-		until = t.UnixMilli()
+	if !out.Until.IsZero() {
+		until = out.Until.UnixMilli()
 	}
 	c.sendEnvelope(protocol.TypeModResult, "", protocol.ModResultPayload{
-		Action: action, Target: target, IP: ip, Until: until,
+		Action: action, Target: out.Target, IP: ip, Until: until,
 	})
 }
 

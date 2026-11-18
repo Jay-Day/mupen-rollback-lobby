@@ -2,6 +2,8 @@ package ws
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,32 @@ import (
 )
 
 var testRom = protocol.RomInfo{Name: "rom", MD5: "ABC"}
+
+// signInTestModerator makes c a moderator the way ADMIN_AUTH does, as "Mod"
+// with a credential in the hub's admins.json, so activeModerator (which checks
+// it on every action) keeps them signed in.
+func signInTestModerator(t *testing.T, h *Hub, c *Client) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "admins.json")
+	admins, _ := json.Marshal([]moderation.Admin{{Name: "Mod", Salt: "s", Hash: moderation.HashPassword("s", testModPassword)}})
+	if err := os.WriteFile(path, admins, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := moderation.LoadAdmins(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.mod == nil {
+		h.mod = moderation.NewManager(moderation.NewFilter(nil), store, "")
+	} else {
+		h.mod.SetAdmins(store)
+	}
+	name, key, ok := h.mod.AuthenticateAdminKey(testModPassword)
+	if !ok {
+		t.Fatal("the test moderator's password was refused")
+	}
+	c.setModerator(true, name, key)
+}
 
 func (f *lateJoinFixture) socialUser(name string) *state.User {
 	u := f.capableUser(name)
@@ -492,7 +520,7 @@ func TestShieldIsTheModeratorsNotTheirGuests(t *testing.T) {
 	sam := f.addLocal("mod", "sam")
 	kart := f.socialUser("kart")
 	c := f.client("mod")
-	c.isModerator = true
+	signInTestModerator(t, f.h, c)
 
 	send := func(as uint64) protocol.ChatMsgPayload {
 		t.Helper()
@@ -548,7 +576,7 @@ func TestPrivateMessagesObeyMuteAndFilter(t *testing.T) {
 	if envs := f.drain("kart"); len(envs) != 0 {
 		t.Fatalf("filter let it through: %+v", envs)
 	}
-	f.h.mod.Mute("198.51.100.1", "mira", "mod", "", 0)
+	f.h.mod.MuteNamed("198.51.100.1", "mira", "mod", "", 0)
 	f.h.dispatch(send(), raw("hello"))
 	if envs := f.drain("kart"); len(envs) != 0 {
 		t.Fatalf("mute let it through: %+v", envs)
@@ -576,7 +604,7 @@ func TestModPeersFollowTheRoster(t *testing.T) {
 	f := newLateJoinFixture(t, 4)
 	mod := f.socialUser("mod")
 	c := f.h.clients[mod.ID]
-	c.isModerator = true
+	signInTestModerator(t, f.h, c)
 	roster := func(msgType string, data any) []uint64 {
 		t.Helper()
 		f.drain("mod")
@@ -607,8 +635,7 @@ func TestInspectAndResultForModerators(t *testing.T) {
 	f.drain("mira")
 
 	modClient := f.h.clients[mod.ID]
-	modClient.isModerator = true
-	modClient.adminName = "Mod"
+	signInTestModerator(t, f.h, modClient)
 	act := func(action, who, dur string) []protocol.Envelope {
 		t.Helper()
 		data, _ := json.Marshal(protocol.ModActionRequest{Action: action, Target: who, Duration: dur, Reason: "spam"})
@@ -642,7 +669,7 @@ func TestModPeersReachOnlyModerators(t *testing.T) {
 	modClient, otherClient := f.client("mod"), f.client("other")
 	f.h.clients[mod.ID] = modClient
 	f.h.clients[other.ID] = otherClient
-	modClient.isModerator = true
+	signInTestModerator(t, f.h, modClient)
 	f.drain("mod")
 
 	f.h.broadcastModPeers()

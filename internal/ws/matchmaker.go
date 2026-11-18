@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
+	"github.com/jay-day/rmgk-lobby/internal/ratelimit"
 	"github.com/jay-day/rmgk-lobby/internal/state"
 )
 
@@ -135,6 +136,17 @@ func (h *Hub) handleQuickMatchJoin(c *Client, env protocol.Envelope) {
 
 	if h.matchmaker.contains(c.user.ID) {
 		return // already queued
+	}
+	// Searching reaches every player (presence), and two searchers make a
+	// room, so it spends the room_join budget. The button only shows
+	// "searching" on a QUICK_MATCH_STATUS saying so; this one says it isn't.
+	if ok, retry := h.allowAction(c, ratelimit.ActionRoomJoin); !ok {
+		c.sendEnvelope(protocol.TypeQuickMatchStatus, env.ID, protocol.QuickMatchStatusPayload{
+			Searching: false,
+			QueueSize: h.matchmaker.size(),
+		})
+		h.refusalNotice(c, ratelimit.ActionRoomJoin, tooFast("You're starting quick match searches too fast.", retry))
+		return
 	}
 
 	h.matchmaker.add(c.user.ID, req.Rom)
@@ -291,6 +303,7 @@ func (h *Hub) quickMatchAttempt(searcher *state.User) {
 	}
 
 	h.state.AddRoom(room)
+	h.logRoomCreated(room, "Quick match")
 
 	// Send ROOM_JOIN_OK to both so their UIs switch into the in-room view.
 	payload := roomStatePayload(room)

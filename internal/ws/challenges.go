@@ -249,7 +249,7 @@ func (h *Hub) handleChallengeSend(c *Client, env protocol.Envelope) {
 			slog.Info("challenge note blocked", "user", c.user.Username, "ip", c.ip, "term", term)
 			return
 		}
-		if _, muted := h.mod.IsMuted(c.ip); muted && !c.isModerator {
+		if _, muted := h.mod.IsMuted(c.ip); muted && !h.activeModerator(c) {
 			note = ""
 		}
 	}

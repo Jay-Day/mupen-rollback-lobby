@@ -110,7 +110,7 @@ func TestModeratorsReachPrivateMessagesOff(t *testing.T) {
 	f.send("kart", protocol.TypePMSettings, protocol.PMSettingsRequest{Off: true})
 	f.drain("kart")
 	c := f.client("mod")
-	c.isModerator = true
+	signInTestModerator(t, f.h, c)
 
 	send := func(as uint64) []protocol.Envelope {
 		t.Helper()

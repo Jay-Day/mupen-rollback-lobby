@@ -14,7 +14,7 @@ import (
 // semi-stable identifier we have — there are no accounts).
 type Sanction struct {
 	IP     string    `json:"ip"`
-	Name   string    `json:"name,omitempty"` // who it was applied to; empty on older entries
+	Name   string    `json:"name,omitempty"` // who it was aimed at, for the record ("" when not known)
 	Reason string    `json:"reason"`
 	By     string    `json:"by"`    // moderator name
 	Set    time.Time `json:"set"`   // when applied
@@ -28,6 +28,12 @@ func (s Sanction) expired(now time.Time) bool {
 
 // Manager owns the filter, admin credentials, and the ban/mute state. Bans
 // (including timeouts) persist to disk; mutes are in-memory only.
+//
+// mu guards the maps and is taken on every connect, site request and chat
+// line (IsBanned, IsMuted), so the ban file is never written under it: a
+// change bumps banGen and wakes one writer goroutine, which copies the list
+// under mu and writes it outside. Changes made while it writes are saved
+// together by its next write. FlushBans writes at once (at shutdown).
 type Manager struct {
 	// Swapped whole when their files are edited (SetFilter, SetAdmins).
 	filter atomic.Pointer[Filter]
@@ -37,15 +43,22 @@ type Manager struct {
 	bans    map[string]Sanction // ip -> ban/timeout (persisted)
 	mutes   map[string]Sanction // ip -> mute (in-memory)
 	banPath string
+	banGen  uint64 // bumped on every change to bans (guarded by mu)
+
+	saveKick   chan struct{} // wakes the writer; holds at most one wake-up
+	writerOnce sync.Once
+	saveMu     sync.Mutex // one write at a time
+	savedGen   uint64     // the banGen the file holds (guarded by saveMu)
 }
 
 // NewManager wires the filter and admin store together and loads any persisted
 // ban list from banPath (missing file is fine).
 func NewManager(filter *Filter, admins *AdminStore, banPath string) *Manager {
 	m := &Manager{
-		bans:    make(map[string]Sanction),
-		mutes:   make(map[string]Sanction),
-		banPath: banPath,
+		bans:     make(map[string]Sanction),
+		mutes:    make(map[string]Sanction),
+		banPath:  banPath,
+		saveKick: make(chan struct{}, 1),
 	}
 	m.filter.Store(filter)
 	m.admins.Store(admins)
@@ -66,6 +79,16 @@ func (m *Manager) FilterMessage(msg string) (string, bool) {
 func (m *Manager) AuthenticateAdmin(password string) (string, bool) {
 	return m.admins.Load().Authenticate(password)
 }
+
+// AuthenticateAdminKey is AuthenticateAdmin plus a key for the credential
+// that matched (see AdminStore.AuthenticateKey).
+func (m *Manager) AuthenticateAdminKey(password string) (name, key string, ok bool) {
+	return m.admins.Load().AuthenticateKey(password)
+}
+
+// AdminKeyValid reports whether the credential a key names is still in
+// admins.json, unchanged.
+func (m *Manager) AdminKeyValid(key string) bool { return m.admins.Load().HasKey(key) }
 
 func (m *Manager) FilterSize() int { return m.filter.Load().Size() }
 func (m *Manager) AdminCount() int { return m.admins.Load().Count() }
@@ -105,7 +128,12 @@ func (m *Manager) IsMuted(ip string) (Sanction, bool) {
 }
 
 // Ban applies a ban (dur == 0 => permanent; dur > 0 => timeout that expires).
-func (m *Manager) Ban(ip, name, by, reason string, dur time.Duration) {
+func (m *Manager) Ban(ip, by, reason string, dur time.Duration) {
+	m.BanNamed(ip, "", by, reason, dur)
+}
+
+// BanNamed is Ban that also records the name the ban was aimed at.
+func (m *Manager) BanNamed(ip, name, by, reason string, dur time.Duration) {
 	now := time.Now()
 	s := Sanction{IP: ip, Name: name, Reason: reason, By: by, Set: now}
 	if dur > 0 {
@@ -119,7 +147,12 @@ func (m *Manager) Ban(ip, name, by, reason string, dur time.Duration) {
 }
 
 // Mute silences an IP's chat for dur (dur == 0 => until manually unmuted).
-func (m *Manager) Mute(ip, name, by, reason string, dur time.Duration) {
+func (m *Manager) Mute(ip, by, reason string, dur time.Duration) {
+	m.MuteNamed(ip, "", by, reason, dur)
+}
+
+// MuteNamed is Mute that also records the name the mute was aimed at.
+func (m *Manager) MuteNamed(ip, name, by, reason string, dur time.Duration) {
 	now := time.Now()
 	s := Sanction{IP: ip, Name: name, Reason: reason, By: by, Set: now}
 	if dur > 0 {
@@ -218,26 +251,61 @@ func (m *Manager) loadBans() {
 	slog.Info("ban list loaded", "path", m.banPath, "count", len(m.bans))
 }
 
-// saveBansLocked writes the ban map to disk. Caller must hold m.mu.
+// saveBansLocked marks the ban list changed and wakes the writer, without
+// waiting for it. Caller must hold m.mu.
 func (m *Manager) saveBansLocked() {
 	if m.banPath == "" {
 		return
 	}
+	m.banGen++
+	m.writerOnce.Do(func() {
+		go func() {
+			for range m.saveKick {
+				m.FlushBans()
+			}
+		}()
+	})
+	select {
+	case m.saveKick <- struct{}{}:
+	default: // a write is already due; it will include this change
+	}
+}
+
+// FlushBans writes the ban list now if it changed since the last write, and
+// returns once the file holds every change made before the call. The server
+// calls it at shutdown; tests call it before reading the file.
+func (m *Manager) FlushBans() {
+	if m.banPath == "" {
+		return
+	}
+	m.saveMu.Lock()
+	defer m.saveMu.Unlock()
+	m.mu.Lock()
+	gen := m.banGen
 	list := make([]Sanction, 0, len(m.bans))
 	for _, s := range m.bans {
 		list = append(list, s)
 	}
+	m.mu.Unlock()
+	if gen == m.savedGen {
+		return
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].IP < list[j].IP })
 	data, err := json.MarshalIndent(list, "", "  ")
 	if err != nil {
-		slog.Warn("ban list marshal failed", "err", err)
+		slog.Error("ban list not saved: marshal failed", "err", err)
 		return
 	}
 	tmp := m.banPath + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		slog.Warn("ban list write failed", "path", tmp, "err", err)
+		slog.Error("ban list not saved: bans made since the last save will be lost at restart",
+			"path", tmp, "err", err)
 		return
 	}
 	if err := os.Rename(tmp, m.banPath); err != nil {
-		slog.Warn("ban list rename failed", "path", m.banPath, "err", err)
+		slog.Error("ban list not saved: bans made since the last save will be lost at restart",
+			"path", m.banPath, "err", err)
+		return
 	}
+	m.savedGen = gen
 }

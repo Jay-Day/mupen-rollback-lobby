@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jay-day/rmgk-lobby/internal/moderation"
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
@@ -126,6 +127,7 @@ func TestGameOptionsAreOffUntilTheHostTurnsThemOn(t *testing.T) {
 	}
 
 	// An empty list turns them all off.
+	f.sendNextRoomListAtOnce()
 	f.setGameOptions("host", protocol.RoomUpdateGameOptionsRequest{Options: []protocol.GameOption{}})
 	if f.room.GameOptions != nil {
 		t.Fatalf("the host could not turn game options off: %+v", f.room.GameOptions)
@@ -458,4 +460,13 @@ func TestGameOptionsLastTheRoomsLife(t *testing.T) {
 	if guest.CurrentRoom == nil || guest.CurrentRoom.GameOptions != nil {
 		t.Fatal("a new room doesn't start with no game options")
 	}
+}
+
+// sendNextRoomListAtOnce lets the hub's next room list out straight away, as
+// if roomListMinIntervalMs had passed: the fixture's hub doesn't Run, so a
+// held-back list would never go out.
+func (f *lateJoinFixture) sendNextRoomListAtOnce() {
+	f.h.roomListMu.Lock()
+	f.h.roomListLast = time.Time{}
+	f.h.roomListMu.Unlock()
 }
