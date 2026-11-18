@@ -158,8 +158,8 @@ timeout off (the limits still apply).
 Every IP that had a request refused in the last `abuseReportDays` (7) days
 has a record: when it was first and last refused, how many requests of each
 kind, the names it used and its automatic timeouts. The records are kept in
-`ratelimits.json` (`RMGK_RATELIMITS_PATH`; changes at most every 30 seconds,
-and at shutdown) and loaded at startup, so `cat` it on the server to see who
+`ratelimits.json` beside `bans.json` (changes at most every 30 seconds, and
+at shutdown) and loaded at startup, so `cat` it on the server to see who
 has been hitting the limits. At most 5,000 IPs are tracked; the least
 recently refused go first. The server log gets the first refusal for an IP
 and kind, then at most one summary line a minute.
@@ -292,7 +292,7 @@ lines a minute, not every line.
 | --- | --- | --- |
 | `admins.json` | `RMGK_ADMINS_PATH` | Moderator names and salted password hashes (`cmd/modhash`). Re-read when it changes. |
 | `bans.json` | `RMGK_BANLIST_PATH` | Bans and timeouts, including the automatic ones. Read at startup, written on every change. |
-| `ratelimits.json` | `RMGK_RATELIMITS_PATH` | The Rate limits report. `off` keeps it in memory only. |
+| `ratelimits.json` | `RMGK_RATELIMITS_PATH` | The Rate limits report. Defaults to the folder `bans.json` is in; `off` keeps it in memory only. |
 | `lobby.json` | `RMGK_CONFIG_PATH` | Runtime settings, including the request limits and the login ban. |
 
 A systemd unit with `ProtectSystem=strict` must list the folder these are

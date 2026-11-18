@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -122,9 +123,10 @@ func main() {
 
 	// The moderators' log: chat, rooms, games and moderator actions go to the
 	// server log (journald) as structured lines. The rate limit report is
-	// kept in RMGK_RATELIMITS_PATH so it survives restarts; "off" doesn't
-	// save it.
-	ratePath := envOr("RMGK_RATELIMITS_PATH", "ratelimits.json")
+	// kept in a file so it survives restarts: ratelimits.json beside the ban
+	// list, so a server that already sets RMGK_BANLIST_PATH needs nothing
+	// new. RMGK_RATELIMITS_PATH overrides it; "off" doesn't save it.
+	ratePath := envOr("RMGK_RATELIMITS_PATH", filepath.Join(filepath.Dir(banPath), "ratelimits.json"))
 	if strings.EqualFold(ratePath, "off") {
 		ratePath = ""
 	}
