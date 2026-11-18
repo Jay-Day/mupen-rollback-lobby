@@ -33,6 +33,21 @@ func (s *State) NextUserID() uint64  { return s.nextUserID.Add(1) }
 func (s *State) NextRoomID() uint64  { return s.nextRoomID.Add(1) }
 func (s *State) NextMatchID() uint64 { return s.nextMatchID.Add(1) }
 
+// SkipIDs makes the next room and match ids larger than room and match, so
+// ids a log kept from before a restart never name a new room or match.
+func (s *State) SkipIDs(room, match uint64) {
+	raise := func(counter *atomic.Uint64, past uint64) {
+		for {
+			cur := counter.Load()
+			if cur >= past || counter.CompareAndSwap(cur, past) {
+				return
+			}
+		}
+	}
+	raise(&s.nextRoomID, room)
+	raise(&s.nextMatchID, match)
+}
+
 // -- Users --
 
 func (s *State) AddUser(u *User) error {

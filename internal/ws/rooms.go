@@ -6,7 +6,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jay-day/rmgk-lobby/internal/modlog"
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
+	"github.com/jay-day/rmgk-lobby/internal/ratelimit"
 	"github.com/jay-day/rmgk-lobby/internal/state"
 )
 
@@ -72,6 +74,12 @@ func (h *Hub) handleRoomCreate(c *Client, env protocol.Envelope) {
 		c.sendRoomCreateFail(env.ID, protocol.ReasonAlreadyInRoom)
 		return
 	}
+	// A new room reaches every player (room list and presence). Today's
+	// clients show the reason as it is, so it is the whole sentence.
+	if ok, retry := h.allowAction(c, ratelimit.ActionRoomCreate); !ok {
+		c.sendRoomCreateFail(env.ID, tooFast("You're creating rooms too fast.", retry))
+		return
+	}
 
 	visibility := state.VisibilityPublic
 	if req.Visibility == "invite_only" {
@@ -110,6 +118,7 @@ func (h *Hub) handleRoomCreate(c *Client, env protocol.Envelope) {
 	slog.Info("room created",
 		"id", room.ID, "host", c.user.Username, "rom", room.RomName,
 		"max", room.MaxPlayers, "delay", room.Delay, "pred", room.Prediction)
+	h.logRoomCreated(room, "")
 
 	// 1) Tell the host
 	c.sendEnvelope(protocol.TypeRoomCreated, env.ID, protocol.RoomCreatedResponse{RoomID: room.ID})
@@ -128,8 +137,11 @@ func (h *Hub) handleRoomLeave(c *Client, env protocol.Envelope) {
 		// (likely because the host disconnected and the room dissolved before
 		// the ROOM_LEFT push reached this client). Send ROOM_LEFT anyway so
 		// the UI un-sticks.
-		slog.Info("ROOM_LEAVE with no current room — sending fallback ROOM_LEFT",
-			"user", c.user.Username)
+		// Leaving is never limited, so this line is throttled per IP.
+		if log, more := roomLeaveLog.Allow(c.ip); log {
+			slog.Info("ROOM_LEAVE with no current room — sending fallback ROOM_LEFT",
+				"user", c.user.Username, "more_since_last_line", more)
+		}
 		sendRoomLeft(c.user, "left")
 		return
 	}
@@ -145,6 +157,12 @@ func (h *Hub) handleRoomJoin(c *Client, env protocol.Envelope) {
 
 	if c.user.CurrentRoom != nil {
 		c.sendRoomJoinFail(env.ID, protocol.ReasonAlreadyInRoom)
+		return
+	}
+	// Every attempt counts, wrong passwords included. Clients show an
+	// unknown reason as it is.
+	if ok, retry := h.allowAction(c, ratelimit.ActionRoomJoin); !ok {
+		c.sendRoomJoinFail(env.ID, tooFast("You're joining rooms too fast.", retry))
 		return
 	}
 
@@ -186,6 +204,7 @@ func (h *Hub) handleRoomJoin(c *Client, env protocol.Envelope) {
 	slog.Info("room joined",
 		"id", room.ID, "user", c.user.Username,
 		"slot", len(room.Players), "of", room.MaxPlayers)
+	h.logRoomJoined(room, c.user, c.ip)
 
 	// Tell the joiner first so their UI flips into the room view.
 	c.sendEnvelope(protocol.TypeRoomJoinOK, env.ID, roomStatePayload(room))
@@ -257,6 +276,11 @@ func (h *Hub) handleRoomStart(c *Client, env protocol.Envelope) {
 		slog.Debug("ROOM_START rejected: a player can't play with save data", "room", room.ID)
 		return
 	}
+	// ROOM_START has no failure reply; clients show a notice in the room chat.
+	if ok, retry := h.allowAction(c, ratelimit.ActionMatchStart); !ok {
+		h.refusalNotice(c, ratelimit.ActionMatchStart, tooFast("You're starting games too fast.", retry))
+		return
+	}
 
 	h.startMatchInRoom(room, c.user.Username)
 }
@@ -278,6 +302,10 @@ func (h *Hub) handleRoomUpdateSettings(c *Client, env protocol.Envelope) {
 	}
 	if room.State != state.RoomStateWaiting {
 		slog.Debug("ROOM_UPDATE_SETTINGS rejected: not waiting", "room", room.ID, "state", room.State)
+		return
+	}
+	if ok, retry := h.allowAction(c, ratelimit.ActionRoomUpdate); !ok {
+		h.refuseRoomUpdate(c, room, retry)
 		return
 	}
 
@@ -333,6 +361,10 @@ func (h *Hub) handleRoomUpdateDelay(c *Client, env protocol.Envelope) {
 	if room == nil || !acceptsRollbackSettings(room) {
 		return
 	}
+	if ok, retry := h.allowAction(c, ratelimit.ActionRoomUpdate); !ok {
+		h.refuseRoomUpdate(c, room, retry)
+		return
+	}
 	if req.Delay < minDelay {
 		req.Delay = minDelay
 	} else if req.Delay > maxDelay {
@@ -356,6 +388,10 @@ func (h *Hub) handleRoomUpdatePlayerSettings(c *Client, env protocol.Envelope) {
 	}
 	room := c.user.CurrentRoom
 	if room == nil || room.State != state.RoomStateWaiting {
+		return
+	}
+	if ok, retry := h.allowAction(c, ratelimit.ActionRoomUpdate); !ok {
+		h.refuseRoomUpdate(c, room, retry)
 		return
 	}
 	if req.Delay < minDelay {
@@ -403,6 +439,10 @@ func (h *Hub) handleRoomUpdatePrediction(c *Client, env protocol.Envelope) {
 			"room", room.ID, "state", room.State)
 		return
 	}
+	if ok, retry := h.allowAction(c, ratelimit.ActionRoomUpdate); !ok {
+		h.refuseRoomUpdate(c, room, retry)
+		return
+	}
 	if req.Prediction < minPrediction {
 		req.Prediction = minPrediction
 	} else if req.Prediction > maxPrediction {
@@ -437,6 +477,10 @@ func (h *Hub) handleRoomUpdateLiveReplay(c *Client, env protocol.Envelope) {
 		slog.Debug("ROOM_UPDATE_LIVE_REPLAY rejected: not waiting", "room", room.ID, "state", room.State)
 		return
 	}
+	if ok, retry := h.allowAction(c, ratelimit.ActionRoomUpdate); !ok {
+		h.refuseRoomUpdate(c, room, retry)
+		return
+	}
 	if !room.SetLiveReplayEnabled(req.Enabled) {
 		return
 	}
@@ -463,6 +507,10 @@ func (h *Hub) handleRoomUpdateLateJoin(c *Client, env protocol.Envelope) {
 	if room.State != state.RoomStateWaiting || room.QuickMatch {
 		slog.Debug("ROOM_UPDATE_LATE_JOIN rejected: not waiting, or quick match",
 			"room", room.ID, "state", room.State, "quick", room.QuickMatch)
+		return
+	}
+	if ok, retry := h.allowAction(c, ratelimit.ActionRoomUpdate); !ok {
+		h.refuseRoomUpdate(c, room, retry)
 		return
 	}
 	if !room.SetLateJoinEnabled(req.Enabled) {
@@ -500,6 +548,10 @@ func (h *Hub) handleRoomUpdateSaveData(c *Client, env protocol.Envelope) {
 	if room.State != state.RoomStateWaiting || room.QuickMatch {
 		slog.Debug("ROOM_UPDATE_SAVE_DATA rejected: not waiting, or quick match",
 			"room", room.ID, "state", room.State, "quick", room.QuickMatch)
+		return
+	}
+	if ok, retry := h.allowAction(c, ratelimit.ActionRoomUpdate); !ok {
+		h.refuseRoomUpdate(c, room, retry)
 		return
 	}
 
@@ -601,6 +653,10 @@ func (h *Hub) handleRoomSwapSlots(c *Client, env protocol.Envelope) {
 		slog.Debug("ROOM_SWAP_SLOTS rejected: invalid slots", "room", room.ID, "a", req.SlotA, "b", req.SlotB)
 		return
 	}
+	if ok, retry := h.allowAction(c, ratelimit.ActionRoomUpdate); !ok {
+		h.refuseRoomUpdate(c, room, retry)
+		return
+	}
 	if !room.SwapSlots(req.SlotA, req.SlotB) {
 		return // both slots empty — nothing changed, skip the rebroadcast
 	}
@@ -633,7 +689,13 @@ func (h *Hub) handleRoomKick(c *Client, env protocol.Envelope) {
 			"host", c.user.Username, "target", req.UserID, "room", room.ID)
 		return
 	}
+	if ok, retry := h.allowAction(c, ratelimit.ActionLobbyUpdate); !ok {
+		h.refusalNotice(c, ratelimit.ActionLobbyUpdate, tooFast("You're removing players too fast.", retry))
+		return
+	}
 	slog.Info("room kick", "host", c.user.Username, "target", target.Username, "room", room.ID)
+	h.modlog.Event(modlog.Event{Type: modlog.EventRoomKick, RoomID: room.ID, Name: target.Username,
+		IP: target.PublicIP, Text: c.user.Username + " (host) kicked " + target.Username})
 	room.MarkKicked(target.ID, target.Username)
 	h.removeUserFromRoom(target, room, "kicked")
 }
@@ -674,6 +736,7 @@ func (h *Hub) startMatchInRoom(room *state.Room, initiator string) {
 	h.state.AddMatch(match)
 	room.MarkStarted()
 	room.SetState(state.RoomStateInGame)
+	h.logGameStarted(room, match)
 
 	// Push the new room state first so clients know we've left "waiting".
 	h.broadcastRoomState(room)
@@ -742,6 +805,10 @@ func (h *Hub) removeUserFromRoom(u *state.User, room *state.Room, reason string)
 	var matchID uint64
 	if room.State == state.RoomStateInGame && u.CurrentMatch != nil {
 		matchID = u.CurrentMatch.ID
+		if room.Host != nil && room.Host.ID == u.ID {
+			// the host takes the match with them (logged before their own leave)
+			h.modlog.GameEnded(matchID, gameEndReason(room, reason))
+		}
 		h.broadcastMatchPeerLeft(room, u, matchID, reason)
 	}
 
@@ -775,7 +842,11 @@ func (h *Hub) removeUserFromRoom(u *state.User, room *state.Room, reason string)
 			sendRoomLeft(member, memberReason)
 		}
 		h.state.RemoveRoom(room.ID)
+		h.logRoomLeft(room, u, reason)
+		h.modlog.RoomClosed(room.ID, room.Name, gameEndReason(room, reason),
+			"Room \""+room.Name+"\" closed: "+roomClosedText(reason))
 	} else {
+		h.logRoomLeft(room, u, reason)
 		// Otherwise the room still exists; push updated state to remaining members.
 		h.broadcastRoomState(room)
 	}
@@ -821,9 +892,12 @@ func sendRoomLeft(u *state.User, reason string) {
 	}
 	select {
 	case u.Send <- env:
-		slog.Info("sendRoomLeft delivered", "user", u.Username, "id", u.ID)
+		slog.Debug("sendRoomLeft delivered", "user", u.Username, "id", u.ID)
 	default:
-		slog.Warn("sendRoomLeft dropped (channel full)", "user", u.Username, "id", u.ID)
+		// a client that sends ROOM_LEAVE without reading would log this at will
+		if log, more := roomLeaveLog.Allow("dropped " + u.Username); log {
+			slog.Warn("sendRoomLeft dropped (channel full)", "user", u.Username, "id", u.ID, "more_since_last_line", more)
+		}
 	}
 }
 
@@ -872,6 +946,7 @@ func (h *Hub) broadcastMatchPeerLeft(room *state.Room, departing *state.User, ma
 	if reason != "kicked" {
 		h.sendRoomChatAs(room, departing, "I dropped from the game.")
 	}
+	h.modlog.GamePlayerLeft(matchID, departing.ID, reason)
 }
 
 // sendRoomChatAs pushes a chat line to a room attributed to a specific user, so
@@ -908,6 +983,9 @@ func (h *Hub) handleMatchFinished(c *Client, env protocol.Envelope) {
 
 	isHost := room.Host != nil && room.Host.ID == c.user.ID
 	slog.Info("match drop", "match", match.ID, "user", c.user.Username, "room", room.ID, "host", isHost)
+	if isHost {
+		h.modlog.GameEnded(match.ID, modlog.EndFinished)
+	}
 
 	// Tell the other room members the dropper is out. Informational only —
 	// the dropper's seat row stays in the player list.
@@ -967,6 +1045,7 @@ func (h *Hub) handleMatchConnected(c *Client, env protocol.Envelope) {
 		match.SetState(state.MatchStateActive)
 		slog.Info("match active", "id", match.ID, "by", c.user.Username)
 	}
+	h.modlog.GameConnected(match.ID)
 }
 
 // handleMatchPunchFailed lets a client report that its punch attempt to a peer
@@ -977,8 +1056,18 @@ func (h *Hub) handleMatchPunchFailed(c *Client, env protocol.Envelope) {
 	if err := json.Unmarshal(env.Data, &req); err != nil {
 		return
 	}
-	slog.Warn("match punch failed",
-		"match", req.MatchID, "peer", req.PeerUserID, "reporter", c.user.Username)
+	// A client can send this at will, so its log line is throttled per IP.
+	if log, more := punchFailLog.Allow(c.ip); log {
+		slog.Warn("match punch failed", "match", req.MatchID, "peer", req.PeerUserID,
+			"reporter", c.user.Username, "more_since_last_line", more)
+	}
+	if m := c.user.CurrentMatch; m != nil && m.ID == req.MatchID {
+		peer := ""
+		if u := h.state.GetUser(req.PeerUserID); u != nil {
+			peer = u.Username
+		}
+		h.modlog.GamePunchFailed(req.MatchID, c.user.Username, peer)
+	}
 }
 
 func (h *Hub) buildRoomListPayload() protocol.RoomListPayload {
@@ -1016,18 +1105,6 @@ func (h *Hub) buildRoomListPayload() protocol.RoomListPayload {
 		})
 	}
 	return payload
-}
-
-func (h *Hub) broadcastRoomList() {
-	h.roomListMu.Lock()
-	defer h.roomListMu.Unlock()
-	h.broadcastToAll(protocol.TypeRoomList, h.buildRoomListPayload(), 0)
-}
-
-func (h *Hub) sendRoomListTo(c *Client) {
-	h.roomListMu.Lock()
-	defer h.roomListMu.Unlock()
-	c.sendEnvelope(protocol.TypeRoomList, "", h.buildRoomListPayload())
 }
 
 // broadcastRoomState sends the full room state to every user currently in it.

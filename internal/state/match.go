@@ -30,6 +30,24 @@ type Match struct {
 	Epoch int
 	// Admit is the late join hand-off in progress, if any.
 	Admit *Admission
+
+	// liveReplay is set once the match's live replay has started. A match
+	// gets one: clients send BROADCAST_BEGIN once, at MATCH_BEGIN.
+	liveReplay bool
+}
+
+// LiveReplayStarted reports whether the match's live replay has started.
+func (m *Match) LiveReplayStarted() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.liveReplay
+}
+
+// MarkLiveReplayStarted records that the match's live replay has started.
+func (m *Match) MarkLiveReplayStarted() {
+	m.mu.Lock()
+	m.liveReplay = true
+	m.mu.Unlock()
 }
 
 // Admission is a late join hand-off: the host adding Joiner to the match.
