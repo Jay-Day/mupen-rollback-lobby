@@ -84,6 +84,11 @@ type Settings struct {
 	AdminLoginMaxFailures int `json:"adminLoginMaxFailures"`
 	AdminLoginBanSeconds  int `json:"adminLoginBanSeconds"`
 
+	// Refuse connections from AWS address space (Amazon's published
+	// ip-ranges.json, refreshed by the server). Players don't connect from
+	// cloud servers; scripted floods do.
+	BlockAWS bool `json:"blockAWS"`
+
 	minClient    ReleaseVersion
 	actionLimits ratelimit.ActionLimits // built from the keys above; read only
 }
@@ -144,6 +149,7 @@ func Defaults() *Settings {
 		RoomListMinIntervalMs:     250,
 		AdminLoginMaxFailures:     5,
 		AdminLoginBanSeconds:      0,
+		BlockAWS:                  true,
 	}
 	s.minClient, _ = ParseReleaseVersion(s.MinClientVersion)
 	s.actionLimits = s.buildActionLimits()
