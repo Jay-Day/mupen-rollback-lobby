@@ -1,5 +1,5 @@
 // Command lobby-sim keeps a handful of made-up players online in a local
-// lobby, so the moderator site's Live page has something to show: two rooms
+// lobby, so the limits and the moderator log have something to see: two rooms
 // (one in a running, broadcast match with a spectator watching), lobby, room
 // and spectator chat, and two players sharing an address. It runs until
 // stopped (Ctrl+C) or for --duration.

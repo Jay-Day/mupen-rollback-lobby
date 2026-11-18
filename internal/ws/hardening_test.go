@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -93,9 +94,8 @@ func TestLoginGuardPolicy(t *testing.T) {
 	if !banned || s.Until.IsZero() || time.Until(s.Until) < 59*time.Minute || s.Reason != moderation.LoginBanReason(2) {
 		t.Fatalf("ban = %+v %v", s, banned)
 	}
-	audit, _, _ := f.log.AuditLog(bg, 0, 5)
-	if len(audit) == 0 || audit[0].Action != "timeout" || !strings.Contains(audit[0].Detail, "Timed out "+ip+" until") {
-		t.Fatalf("audit = %+v", audit)
+	if audit := f.logs.lines("moderator action"); !hasLine(audit, "action=timeout", "Timed out "+ip+" until") {
+		t.Fatalf("audit = %q", audit)
 	}
 }
 
@@ -139,24 +139,25 @@ func TestBlockedChatIsSampledPerIP(t *testing.T) {
 	}
 	a.sync()
 	b.sync()
-	f.log.Flush()
-	rows, _, _ := f.log.ChatLog(bg, modlog.ChatQuery{IP: ip})
-	if len(rows) != blockedLogBurst {
-		t.Fatalf("logged %d blocked lines, want %d: %+v", len(rows), blockedLogBurst, rows)
+	blocked := func() []string {
+		var out []string
+		for _, line := range f.logs.lines("chat") {
+			if strings.Contains(line, "ip="+ip) {
+				out = append(out, line)
+			}
+		}
+		return out
+	}
+	if rows := blocked(); len(rows) != blockedLogBurst {
+		t.Fatalf("logged %d blocked lines, want %d: %q", len(rows), blockedLogBurst, rows)
 	}
 	// the window ends: its last line goes in, standing for the others
 	f.hub.flushBlockedChat(time.Now().Add(blockedLogWindow + time.Second))
-	f.log.Flush()
-	rows, _, _ = f.log.ChatLog(bg, modlog.ChatQuery{IP: ip})
-	if len(rows) != blockedLogBurst+1 || rows[0].Suppressed != 8-blockedLogBurst-1 || rows[0].Blocked != modlog.BlockedMuted {
-		t.Fatalf("after the window = %+v", rows)
-	}
-	total := 0
-	for _, r := range rows {
-		total += 1 + r.Suppressed
-	}
-	if total != 8 {
-		t.Fatalf("rows stand for %d lines, want 8", total)
+	rows := blocked()
+	last := rows[len(rows)-1]
+	if len(rows) != blockedLogBurst+1 || !strings.Contains(last, "blocked=muted") ||
+		!strings.Contains(last, fmt.Sprintf("suppressed=%d", 8-blockedLogBurst-1)) {
+		t.Fatalf("after the window = %q", rows)
 	}
 }
 

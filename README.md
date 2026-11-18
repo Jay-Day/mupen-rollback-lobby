@@ -63,11 +63,6 @@ missing file or key uses the default:
   "abuseBanSeconds": 3600,
   "abuseReportDays": 7,
   "roomListMinIntervalMs": 250,
-  "chatLogDays": 90,
-  "connectionLogDays": 90,
-  "gameLogDays": 365,
-  "modLogMaxMB": 1024,
-  "adminAllowedIPs": [],
   "adminLoginMaxFailures": 5,
   "adminLoginBanSeconds": 0
 }
@@ -85,12 +80,7 @@ missing file or key uses the default:
 | `abuseBanStrikes`, `abuseBanWindowSeconds`, `abuseBanSeconds` | 0-1000 refused requests within 1-86400 seconds time the IP out for 1 second to 30 days; 0 strikes turns that off. See [Rate limits](#rate-limits). |
 | `abuseReportDays` | 1-365. Days the moderators' Rate limits report keeps an IP after its last refused request. |
 | `roomListMinIntervalMs` | 0-5000. The full room list goes to every player at most once per this many milliseconds; 0 sends one for every change. |
-| `chatLogDays` | 0-3650. Days the moderator log keeps chat (blocked lines too); 0 keeps it forever. Pruned every few hours. |
-| `connectionLogDays` | 0-3650. Days it keeps connections, which hold IP addresses; 0 keeps them forever. |
-| `gameLogDays` | 0-3650. Days it keeps games and room events; 0 keeps them forever. The moderators' audit log is never pruned. |
-| `modLogMaxMB` | 0-1048576. Most data the moderator log may hold, in megabytes; past it the oldest chat and connections are pruned first (games and room events only after those), never the audit log. 0: no cap, only the days above. Checked every 10 minutes. |
-| `adminAllowedIPs` | IPs and CIDR ranges (`"203.0.113.7"`, `"198.51.100.0/24"`, `"2001:db8::/48"`) that may reach the moderator site at all. Empty: no limit beyond where it listens. Loopback is always allowed. Anyone else's connection is reset before any HTTP. Not a substitute for a host firewall. |
-| `adminLoginMaxFailures` | 1-1000. Wrong moderator passwords in a row from one IP (site and lobby `/login` together) before it is banned. |
+| `adminLoginMaxFailures` | 1-1000. Wrong moderator passwords in a row from one IP (the lobby's `/login`) before it is banned. |
 | `adminLoginBanSeconds` | 0-315360000. How long that ban lasts; 0 is for good. Loopback is never banned: it is locked out of moderator logins for 15 minutes instead. |
 
 If an edit doesn't parse or a value is out of range, the server logs an error
@@ -156,27 +146,23 @@ wait in seconds:
 Every refused request is a strike. `abuseBanStrikes` (40) strikes within
 `abuseBanWindowSeconds` (10 minutes) time the IP out for `abuseBanSeconds`
 (1 hour): a ban by **automatic** with a reason starting "Rate limit:", saved
-in `bans.json` and listed on the Sanctions page. Every connection from the
+in `bans.json`. Every connection from the
 IP is closed with a message saying until when it's blocked (a signed-in
-moderator's excepted), and the audit log gets an entry. Like any ban, it
-keeps out everyone behind that address. Lift it early with Unban on the
-Sanctions or Rate limits page, or `/unban <ip>` in the lobby; the next run of
-strikes can time it out again. `abuseBanStrikes: 0` turns the automatic
+moderator's excepted), and a `moderator action` line goes to the server log.
+Like any ban, it keeps out everyone behind that address. Lift it early with
+`/unban <ip>` in the lobby; the next run of strikes can time it out again. `abuseBanStrikes: 0` turns the automatic
 timeout off (the limits still apply).
 
 ### The Rate limits report
 
-The moderator site's **Rate limits** tab shows the limits in effect and every
-IP that had a request refused in the last `abuseReportDays` (7) days: when it
-was first and last refused, how many requests of each kind, the names it
-used, who is on it now, its automatic timeouts and its current ban or mute.
-Ban, time out or unban it there, or Forget its record (which also resets its
-budgets). The records are saved in `modlog.db` (their changes at most every
-30 seconds, and at shutdown) and loaded at startup; with the log off they are
-kept in memory only. At most 5,000 IPs are tracked; the least recently
-refused go first. Refusals reach the moderator log only through this report,
-not one row each. The server log gets the first refusal for an IP and kind,
-then at most one summary line a minute.
+Every IP that had a request refused in the last `abuseReportDays` (7) days
+has a record: when it was first and last refused, how many requests of each
+kind, the names it used and its automatic timeouts. The records are kept in
+`ratelimits.json` (`RMGK_RATELIMITS_PATH`; changes at most every 30 seconds,
+and at shutdown) and loaded at startup, so `cat` it on the server to see who
+has been hitting the limits. At most 5,000 IPs are tracked; the least
+recently refused go first. The server log gets the first refusal for an IP
+and kind, then at most one summary line a minute.
 
 ### Room list coalescing
 
@@ -208,128 +194,43 @@ take part. 0 sends a list for every change, as before.
   re-reads the whole spool to find the keyframe's place.
 
 
-## Moderator site
+## Moderation
 
-The server has a website for moderators: **Live** (who's online, rooms and
-the lobby chat as it happens, with kick, mute, timeout, ban and close room),
-**Chat** (the chat log, including lines the filter, a mute or the flood
-limit stopped), **People** (every IP a name used and every name seen on an
-IP, to find alts), **Games** (every match with its players, late joiners,
-leavers and timeline), **Sanctions** (bans and mutes; ban or mute any IP),
-**Rate limits** (the limits in effect and the IPs they refused; see
-[Rate limits](#rate-limits)) and **Audit log** (every moderator action, from
-the site or the lobby, and the server's automatic bans).
-
-Moderators sign in with the same password as the lobby's `/login`: an entry
-in `admins.json`, made with `cmd/modhash`. Use a long random password:
+Moderators sign in from the desktop client with `/login`, against an entry
+in `admins.json` made with `cmd/modhash`. Use a long random password:
 `go run ./cmd/modhash <name>` makes one up (24 characters, printed once to
 the terminal; give it to the moderator privately) and prints the entry to
 paste into the `admins.json` array. `go run ./cmd/modhash <name> <password>`
 uses one you chose.
 
-### Reaching it
-
-The site has its own listener, apart from the players' `/ws` port:
-
-| Setting | Default | Effect |
-| --- | --- | --- |
-| `--admin-addr` | `127.0.0.1:8081` | Where the site listens. `off` (or empty) turns it off. |
-| `RMGK_ADMIN_ADDR` | unset | The same, for a systemd unit; `--admin-addr` wins when both are given. |
-
-There is no TLS certificate, so the site is plain HTTP, and **a password
-typed into it crosses the network in the clear** unless something else
-encrypts it. The same is true of the lobby's own `/login`: it is the same
-credential, sent over `ws://` in clear text, so anyone who can watch the
-moderator's traffic (a shared Wi-Fi, a LAN party, an ISP) can read it there
-too, whatever the site does. So:
-
-- give every moderator a long random password (`cmd/modhash`, above), never
-  one used anywhere else, and change it if it may have been seen;
-- reach the site through an SSH tunnel; and
-- once the server has a domain name, put both the lobby and the site behind
-  TLS (`wss://` and `https://`).
-
-The two setups:
-
-1. **SSH tunnel (the default, recommended).** Leave `--admin-addr` alone. On
-   your own computer run `ssh -L 8081:127.0.0.1:8081 user@server` and open
-   <http://127.0.0.1:8081/>. Nothing is exposed; SSH encrypts everything.
-2. **An open port for known addresses.** Start the server with
-   `--admin-addr :8081`, list the moderators' IPs in lobby.json
-   `adminAllowedIPs`, and allow only those in the host firewall, for example
-   `ufw allow from 203.0.113.7 to any port 8081 proto tcp`. The firewall is
-   the real protection; `adminAllowedIPs` is a second line behind it. The
-   password still travels unencrypted, so prefer the tunnel where you can.
+**`/login` crosses the network in the clear**: the lobby runs on `ws://`, so
+anyone who can watch a moderator's traffic (a shared Wi-Fi, a LAN party, an
+ISP) can read the password. Give every moderator a long random password used
+nowhere else, change it if it may have been seen, and move the lobby to
+`wss://` once the server has a domain name.
 
 **Nothing may proxy `/ws` from loopback.** The lobby takes every player's
 address from the TCP connection; behind a reverse proxy on the same machine
 every player would arrive from 127.0.0.1, which the connect limits, request
-limits and login bans all leave alone. The lobby must take players' connections
-itself.
+limits and login bans all leave alone.
 
-At startup the server logs where the site listens, or that it's off. It warns
-loudly when the site listens beyond loopback with `adminAllowedIPs` empty
-(and again whenever lobby.json is reloaded that way).
+### How logins are protected
 
-### How it's protected
-
-- The client address is the TCP peer address only; no `X-Forwarded-For` or
-  similar header is believed (there is no proxy).
-- Addresses outside a non-empty `adminAllowedIPs`, and banned addresses, get
-  nothing: the listener resets their connection as soon as it accepts it,
-  before reading any HTTP, the way a closed port's connection ends. So they
-  can't hold the site's connections either. One address may hold at most 8
-  of the site's 64 connections (loopback, which every tunnel user shares, 32),
-  every signed-out response closes its connection, and a connection that
-  sends nothing is dropped after 5 seconds. Loopback is always let through.
-  None of this replaces a host firewall.
-- The site answers only to an IP address or `localhost` in the address bar,
-  so a web page can't point its own domain at a moderator's tunnel (DNS
-  rebinding).
-- Signed out, only the sign-in page (`GET /`) and the sign-in request answer;
-  everything else is a bare 404, Go's own (none of the site's headers), as on
-  any Go server. The sign-in page names no server, version, count or
-  moderator, and every failed sign-in gets the same "Sign-in failed." answer.
-- **5 wrong passwords in a row from one IP ban that IP for good**, whether
-  they're typed into the site or the desktop client's `/login` (one count for
-  both; a correct password resets it). `adminLoginMaxFailures` and
+- **5 wrong passwords in a row from one IP ban that IP for good** (a correct
+  password resets the count). `adminLoginMaxFailures` and
   `adminLoginBanSeconds` in lobby.json change the count and make the ban a
-  timeout, without a restart. The ban closes the IP's lobby connections and
-  shows on the Sanctions page and in the Audit log. Loopback addresses are
-  never banned (everyone using the tunnel arrives from 127.0.0.1); after the
-  same number of failures from loopback, sign-ins from that address are
-  refused for 15 minutes instead. Password checks run one at a time, so
-  parallel requests can't sneak in extra guesses.
+  timeout, without a restart. The ban closes the IP's lobby connections.
+  Loopback addresses are never banned; after the same number of failures
+  from loopback, logins from that address are refused for 15 minutes
+  instead. Password checks run one at a time, so parallel requests can't
+  sneak in extra guesses.
 - A web page can open a WebSocket to the lobby from any visitor's browser.
   The browser marks such a connection with an `Origin` header (RMG-K's desktop
   client never sends one), and on such a connection `/login` is refused with
   the usual wrong-password answer, unchecked and uncounted: a page can neither
   guess passwords through its visitors nor get their addresses banned.
-- A lobby moderator whose `admins.json` entry is removed, or whose password
-  changes, loses the lobby's moderator powers at their next action (and the
-  site can then kick or ban them like anyone else).
-- The site won't ban (or time out) the address the moderator is signed in
-  from, and asks before banning an address another signed-in moderator uses.
-- A session is a random 256-bit token in an `HttpOnly`, `SameSite=Strict`
-  cookie (not `Secure`: there's no HTTPS for it to need). The server keeps
-  only its hash, in memory. It works only from the IP that signed in and ends
-  after 12 hours, after 60 minutes without the moderator doing anything (the
-  pages' own refreshes don't count), at sign-out, when that moderator's
-  `admins.json` entry is removed or its password changes, and when the server
-  restarts. At most 32 sessions exist at once.
-- Every API call needs the `X-RMGK-Admin: 1` header; changes are POSTs with
-  a JSON body, and a request whose `Origin` or `Referer` names another host is
-  refused. Another site can't make a signed-in browser do anything.
-- The sign-in page and every signed-in response carry `Cache-Control: no-store`,
-  `nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`,
-  `X-Robots-Tag: noindex, nofollow` and a `Content-Security-Policy` that
-  allows only the page's own inline script and style (by hash) and requests
-  back to the site. Nothing is loaded from anywhere else. Player names, chat
-  and room names reach the page only as text, never as markup.
-- Request bodies are capped at 16 KiB, query parameters are checked, every
-  list (the Sanctions lists too) is paged (at most 500 rows), log searches
-  stop after 10 seconds, and the HTTP server has read, write and idle
-  timeouts.
+- A moderator whose `admins.json` entry is removed, or whose password
+  changes, loses the moderator powers at their next action.
 
 Open items, known and not yet addressed:
 
@@ -343,12 +244,10 @@ Open items, known and not yet addressed:
 
 ### Unbanning an address that locked itself out
 
-A moderator who mistyped the password 5 times has banned their own IP: the
-site gives them nothing and the lobby refuses them. To lift it:
+A moderator who mistyped the password 5 times has banned their own IP. To
+lift it:
 
-- Sign in through the SSH tunnel (loopback is never banned) and press Unban
-  on the Sanctions page, or
-- have another moderator do it there, or type `/unban <ip>` in the lobby, or
+- have another moderator type `/unban <ip>` in the lobby, or
 - stop the server, delete the entry from `bans.json`, and start it again
   (bans are read only at startup, and the next ban or unban rewrites the
   file, so an edit made while it runs can be lost).
@@ -362,35 +261,30 @@ force until the server restarts).
 
 ### The moderator log
 
-Connections (with IPs), chat, games and room events, and the audit log, go
-into a SQLite file of their own, written in the background so the lobby never
-waits on the disk.
+What moderators need to look back on goes to the server's own log (journald
+on the servers) as one structured line each, so it is read with `journalctl`
+and `grep`; how far back it goes is journald's retention.
 
-| Setting | Default | Effect |
-| --- | --- | --- |
-| `RMGK_MODLOG_DB_PATH` | `modlog.db` | The file (with `-wal` and `-shm` beside it). `off` turns logging off; the site's log pages then say so, and live moderation still works. |
+| Line (`msg`) | What it records |
+| --- | --- |
+| `hello accepted`, `connection opened` | A connection: name, user id, IP, then client version and country |
+| `chat` | Every lobby, room and spectator chat line, with the sender's name, id and IP; a line the filter, a mute or the flood limit stopped also has `blocked` |
+| `lobby event` | Rooms created, joined, left, kicked from and closed, with names and IPs |
+| `game event` | Games started (every player with their IP), late joins, players leaving, failed connections and how each game ended |
+| `moderator action` | Every moderator action from the lobby, and the server's automatic bans |
 
-The file holds IP addresses and chat, so the server creates it readable by
-its owner only (mode 0600) and tightens an existing one. Rows older than
-`chatLogDays`, `connectionLogDays` and `gameLogDays` are pruned; the audit
-log is kept. After a restart, new room and match ids continue past the
-highest ones in the log, so an id never names two different rooms or games.
+For example, on a server running with `--log-json`:
 
-Its size is bounded too:
+```text
+journalctl -u rmgk-lobby --since today | grep '"msg":"chat"' | grep '"ip":"203.0.113.5"'
+journalctl -u rmgk-lobby --since today | grep '"msg":"moderator action"'
+```
 
-- Chat the lobby stopped (the filter, a mute, the flood limit) is sampled per
-  address: the first 3 such lines a minute are logged, the rest counted; the
-  next line logged from that address (or, when the minute ends, the last one
-  held back) carries the count, shown on the Chat page as "+N more lines not
-  logged". A muted spammer costs a few rows a minute, not every line.
-- `modLogMaxMB` (default 1024) caps the data. Over it, the oldest chat and
-  connections are pruned (a warning is logged each time) until it is 10% under;
-  games and room events only after those are gone; the audit log and the
-  Rate limits report never.
-- A file created by this version gives pruned space back to the disk
-  (incremental auto-vacuum). An older file reuses the freed space for new rows
-  instead, so it stops growing; `sqlite3 modlog.db VACUUM` with the server
-  stopped shrinks it once.
+Chat the lobby stopped (the filter, a mute, the flood limit) is sampled per
+address: the first 3 such lines a minute are logged, the rest counted; the
+next line logged from that address (or, when the minute ends, the last one
+held back) carries the count as `suppressed`. A muted spammer costs a few
+lines a minute, not every line.
 
 ### Files
 
@@ -398,19 +292,20 @@ Its size is bounded too:
 | --- | --- | --- |
 | `admins.json` | `RMGK_ADMINS_PATH` | Moderator names and salted password hashes (`cmd/modhash`). Re-read when it changes. |
 | `bans.json` | `RMGK_BANLIST_PATH` | Bans and timeouts, including the automatic ones. Read at startup, written on every change. |
-| `modlog.db` | `RMGK_MODLOG_DB_PATH` | The moderator log, audit log and Rate limits report. |
-| `lobby.json` | `RMGK_CONFIG_PATH` | Runtime settings, including the log retention and size cap, `adminAllowedIPs` and the login ban. |
+| `ratelimits.json` | `RMGK_RATELIMITS_PATH` | The Rate limits report. `off` keeps it in memory only. |
+| `lobby.json` | `RMGK_CONFIG_PATH` | Runtime settings, including the request limits and the login ban. |
+
+A systemd unit with `ProtectSystem=strict` must list the folder these are
+written to in `ReadWritePaths=`, or every write fails.
 
 ### Trying it locally
 
 ```text
 go run ./cmd/modhash Wren rig-mod-password        # a test password; paste into admins.json as [ {...} ]
-go run ./cmd/modlog-seed --db modlog.db --bans bans.json
-go run ./cmd/lobby-server --ws-addr 127.0.0.1:18480 --udp-addr 127.0.0.1:18482 --admin-addr 127.0.0.1:18481
+go run ./cmd/lobby-server --ws-addr 127.0.0.1:18480 --udp-addr 127.0.0.1:18482
 go run ./cmd/lobby-sim --url ws://127.0.0.1:18480/ws --flood
 ```
 
-Then open <http://127.0.0.1:18481/>. `modlog-seed` writes a few made-up days
-of history (documentation-range addresses only); `lobby-sim` keeps fake
-players online, each from its own loopback address (127.0.0.10 and up), with
-two rooms, a broadcast match with a spectator, and chat.
+`lobby-sim` keeps fake players online, each from its own loopback address
+(127.0.0.10 and up), with two rooms, a broadcast match with a spectator, and
+chat.

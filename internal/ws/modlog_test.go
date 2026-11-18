@@ -31,6 +31,7 @@ type modFixture struct {
 	mod      *moderation.Manager
 	guard    *moderation.LoginGuard
 	log      *modlog.Logger
+	logs     *logCapture // the server log lines while the test runs
 	url      string
 	cfgPath  string // lobby.json (see setConfig)
 	settings *config.Store
@@ -58,10 +59,11 @@ func newModFixture(t *testing.T, setup ...func(*Hub)) *modFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	log, err := modlog.Open(filepath.Join(dir, "modlog.db"))
+	log, err := modlog.Open(filepath.Join(dir, "ratelimits.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	logs := captureLogs(t)
 	hub := NewHub(state.New(), "", protocol.ICEConfiguration{}, mod, settings)
 	hub.SetModLog(log)
 	guard := moderation.NewLoginGuard(mod)
@@ -79,7 +81,7 @@ func newModFixture(t *testing.T, setup ...func(*Hub)) *modFixture {
 		cancel()
 		log.Close()
 	})
-	return &modFixture{t: t, hub: hub, mod: mod, guard: guard, log: log,
+	return &modFixture{t: t, hub: hub, mod: mod, guard: guard, log: log, logs: logs,
 		url: "ws" + strings.TrimPrefix(server.URL, "http"), cfgPath: cfgPath, settings: settings}
 }
 
@@ -263,90 +265,57 @@ func TestModLogRecordsASession(t *testing.T) {
 
 	bee.conn.Close(websocket.StatusNormalClosure, "")
 	f.waitOnline(2)
-	f.log.Flush()
 
-	// connections
-	conns, _, err := f.log.Connections(bg, modlog.ConnQuery{Name: "bee"})
-	if err != nil || len(conns) != 1 {
-		t.Fatalf("bee's connections = %+v %v", conns, err)
-	}
-	if c := conns[0]; c.IP != "2001:db8::7" || c.Disconnected == 0 || c.Version != "vdev-1" {
-		t.Fatalf("bee's connection = %+v", c)
-	}
-	if conns, _, _ := f.log.Connections(bg, modlog.ConnQuery{Name: "Ace"}); len(conns) != 1 || conns[0].Disconnected != 0 {
-		t.Fatalf("ace's connection = %+v", conns)
+	// connections: the version and country line
+	if !hasLine(f.logs.lines("connection opened"), "user=Bee", "ip=2001:db8::7", "version=vdev-1") {
+		t.Fatalf("bee's connection = %q", f.logs.lines("connection opened"))
 	}
 
-	// chat
-	all, _, _ := f.log.ChatLog(bg, modlog.ChatQuery{Limit: 500})
-	count := func(match func(modlog.ChatRow) bool) int {
+	// chat: every line, delivered or blocked, with who sent it and from where
+	chat := f.logs.lines("chat")
+	count := func(parts ...string) int {
 		n := 0
-		for _, m := range all {
-			if match(m) {
+		for _, line := range chat {
+			if hasLine([]string{line}, parts...) {
 				n++
 			}
 		}
 		return n
 	}
-	if n := count(func(m modlog.ChatRow) bool {
-		return m.Channel == "lobby" && m.From == "Ace" && m.Blocked == "" && m.IP == "203.0.113.5"
-	}); n != 1 {
-		t.Fatalf("ace's delivered lobby lines = %d: %+v", n, all)
+	if !hasLine(chat, "channel=lobby", "user=Ace", "ip=203.0.113.5", `text="anyone up for Smash Remix?"`) {
+		t.Fatalf("ace's lobby line missing: %q", chat)
 	}
-	if n := count(func(m modlog.ChatRow) bool { return m.Blocked == modlog.BlockedFilter && m.Text == "you badword" }); n != 1 {
-		t.Fatalf("filtered lines = %d", n)
+	if count(`text="you badword"`, "blocked=filter") != 1 {
+		t.Fatalf("filtered line missing: %q", chat)
 	}
-	if n := count(func(m modlog.ChatRow) bool {
-		return m.Channel == "room" && m.RoomID == room.RoomID && m.RoomName == "Remix FFA" && m.MatchID == 0
-	}); n != 1 {
-		t.Fatalf("room chat before the match = %d: %+v", n, all)
+	roomID := fmt.Sprintf("room=%d", room.RoomID)
+	if !hasLine(chat, "channel=room", roomID, `room_name="Remix FFA"`, "text=glhf") || hasLine(chat, "text=glhf", "match=") {
+		t.Fatalf("room chat before the match: %q", chat)
 	}
-	if n := count(func(m modlog.ChatRow) bool { return m.Channel == "room" && m.MatchID == match.MatchID }); n != 1 {
-		t.Fatalf("room chat during the match = %d", n)
+	if !hasLine(chat, "channel=room", fmt.Sprintf("match=%d", match.MatchID), "text=gg") {
+		t.Fatalf("room chat during the match: %q", chat)
 	}
-	if n := count(func(m modlog.ChatRow) bool { return m.From == "Spammy" && m.Blocked == "" }); n != 5 {
+	if n := count("user=Spammy") - count("user=Spammy", "blocked="); n != 5 {
 		t.Fatalf("spam delivered = %d", n)
 	}
-	if n := count(func(m modlog.ChatRow) bool { return m.From == "Spammy" && m.Blocked == modlog.BlockedFlood }); n != 3 {
-		t.Fatalf("flood rows = %d, want 3", n)
+	if n := count("user=Spammy", "blocked=flood"); n != 3 {
+		t.Fatalf("flood lines = %d, want 3", n)
 	}
 
-	// the game
-	games, _, _ := f.log.Games(bg, modlog.GameQuery{})
-	if len(games) != 1 {
-		t.Fatalf("games = %+v", games)
-	}
-	g := games[0]
-	if g.MatchID != match.MatchID || g.RoomID != room.RoomID || g.Game != "Smash Remix" || g.RomMD5 != "ABCD" ||
-		g.EndReason != modlog.EndFinished || g.Ended == 0 || len(g.Players) != 2 {
-		t.Fatalf("game = %+v", g)
-	}
-	for _, p := range g.Players {
-		switch p.Name {
-		case "Ace":
-			if p.IP != "203.0.113.5" || p.Slot != 1 || p.Left != 0 {
-				t.Fatalf("ace = %+v", p)
-			}
-		case "Bee":
-			if p.Left == 0 || p.IP != "2001:db8::7" {
-				t.Fatalf("bee = %+v", p)
-			}
+	// the game: start with players and IPs, a player leaving, the end
+	game := f.logs.lines("game event")
+	matchID := fmt.Sprintf("match=%d", match.MatchID)
+	for _, want := range [][]string{
+		{"type=game_started", matchID, "Ace@203.0.113.5", "Bee@2001:db8::7", `game="Smash Remix"`},
+		{"type=player_left", matchID, `how="closed the game"`},
+		{"type=game_ended", matchID, "reason=finished"},
+	} {
+		if !hasLine(game, want...) {
+			t.Fatalf("game lines lack %q:\n%s", want, strings.Join(game, "\n"))
 		}
 	}
-	_, events, chats, err := f.log.GameByID(bg, g.ID)
-	if err != nil || chats != 1 {
-		t.Fatalf("game detail chats = %d %v", chats, err)
-	}
-	var texts []string
-	for _, e := range events {
-		texts = append(texts, e.Type+": "+e.Text)
-	}
-	joined := strings.Join(texts, "\n")
-	for _, want := range []string{"game_started: Game started: Ace (P1), Bee (P2)", "player_left: Bee closed the game",
-		"game_ended: Game ended: finished", "room_joined: Bee joined the room"} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("game events lack %q:\n%s", want, joined)
-		}
+	if !hasLine(f.logs.lines("lobby event"), "type=room_joined", "user=Bee", roomID) {
+		t.Fatalf("room join line missing")
 	}
 }
 
@@ -448,17 +417,25 @@ func TestWebModerationMatchesTheLobby(t *testing.T) {
 	}
 
 	// the lobby's actions are in the audit trail
-	audit, _, _ := f.log.AuditLog(bg, 0, 50)
-	found := map[string]bool{}
-	for _, e := range audit {
-		found[e.Admin+" "+e.Action+" "+e.Source] = true
-		if e.Action == "kick" && e.Detail != "Kicked Cee (203.0.113.20): spam" {
-			t.Fatalf("kick audit = %+v", e)
+	audit := f.logs.lines("moderator action")
+	if !hasLine(audit, `admin=Mod action=kick detail="Kicked Cee (203.0.113.20): spam" source=lobby`) ||
+		!hasLine(audit, "admin=Mod action=sign-in", "source=lobby") {
+		t.Fatalf("audit = %q", audit)
+	}
+}
+
+// hasLine reports whether one of lines contains every part.
+func hasLine(lines []string, parts ...string) bool {
+	for _, line := range lines {
+		all := true
+		for _, p := range parts {
+			all = all && strings.Contains(line, p)
+		}
+		if all {
+			return true
 		}
 	}
-	if !found["Mod kick lobby"] || !found["Mod sign-in lobby"] {
-		t.Fatalf("audit = %+v", audit)
-	}
+	return false
 }
 
 func TestWebCloseRoomEndsTheGame(t *testing.T) {
@@ -501,10 +478,8 @@ func TestWebCloseRoomEndsTheGame(t *testing.T) {
 	if _, ok := f.hub.CloseRoom("WebMod", room.RoomID, ""); ok {
 		t.Fatal("closed a room twice")
 	}
-	f.log.Flush()
-	games, _, _ := f.log.Games(bg, modlog.GameQuery{})
-	if len(games) != 1 || games[0].EndReason != modlog.EndModerator {
-		t.Fatalf("games = %+v", games)
+	if !hasLine(f.logs.lines("lobby event"), "type=room_closed", `end_reason="closed by moderator"`) {
+		t.Fatalf("room close lines = %q", f.logs.lines("lobby event"))
 	}
 }
 
@@ -546,10 +521,9 @@ func TestAdminAuthFailuresBanTheIP(t *testing.T) {
 	if _, err := f.dial(ip); err == nil {
 		t.Fatal("the banned IP connected again")
 	}
-	audit, _, _ := f.log.AuditLog(bg, 0, 10)
-	if len(audit) == 0 || audit[0].Admin != "auto" || audit[0].Action != "ban" || audit[0].Source != modlog.SourceAuto ||
-		!strings.Contains(audit[0].Detail, "Banned "+ip+": 5 failed moderator logins in a row (lobby)") {
-		t.Fatalf("audit = %+v", audit)
+	if audit := f.logs.lines("moderator action"); !hasLine(audit, "admin=auto action=ban",
+		"Banned "+ip+": 5 failed moderator logins in a row (lobby)", "source=auto") {
+		t.Fatalf("audit = %q", audit)
 	}
 
 	// a success in between starts the IP's count over (each connection keeps
@@ -597,11 +571,8 @@ func TestAdminAuthLoopbackIsLockedOutNotBanned(t *testing.T) {
 
 func TestModLogLateJoinerAndLeaver(t *testing.T) {
 	f := newLateJoinFixture(t, 3)
-	log, err := modlog.Open(filepath.Join(t.TempDir(), "modlog.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { log.Close() })
+	logs := captureLogs(t)
+	log, _ := modlog.Open("")
 	f.h.SetModLog(log)
 	f.user("host", true)
 	f.user("guest", true)
@@ -621,26 +592,19 @@ func TestModLogLateJoinerAndLeaver(t *testing.T) {
 	}
 	f.send("guest", protocol.TypeMatchFinished, struct{}{})
 	f.send("host", protocol.TypeRoomLeave, struct{}{}) // takes the match with them
-	log.Flush()
 
-	games, _, _ := log.Games(bg, modlog.GameQuery{})
-	if len(games) != 1 || games[0].EndReason != modlog.EndHostLeft || games[0].Ended == 0 {
-		t.Fatalf("games = %+v", games)
+	game := logs.lines("game event")
+	matchID := fmt.Sprintf("match=%d", match.ID)
+	for _, want := range [][]string{
+		{"type=player_joined", matchID, "user=joiner", "slot=3"},
+		{"type=player_left", matchID, fmt.Sprintf("id=%d", f.users["guest"].ID)},
+	} {
+		if !hasLine(game, want...) {
+			t.Fatalf("game lines lack %q:\n%s", want, strings.Join(game, "\n"))
+		}
 	}
-	byName := map[string]modlog.PlayerRow{}
-	for _, p := range games[0].Players {
-		byName[p.Name] = p
-	}
-	if p := byName["joiner"]; p.JoinedLate == 0 || p.Slot != 3 {
-		t.Fatalf("joiner = %+v", p)
-	}
-	if p := byName["guest"]; p.Left == 0 || p.JoinedLate != 0 {
-		t.Fatalf("guest = %+v", p)
-	}
-	if p := byName["host"]; p.Left != 0 {
-		t.Fatalf("the host's leave ended the game, it isn't a leave: %+v", p)
-	}
-	if room, match := log.MaxIDs(); room != f.room.ID || match != games[0].MatchID {
-		t.Fatalf("max ids = %d %d", room, match)
+	if !hasLine(logs.lines("lobby event"), "type=room_closed", `end_reason="host left"`) &&
+		!hasLine(game, "type=game_ended", matchID, `reason="host left"`) {
+		t.Fatalf("the game's end isn't logged as the host leaving")
 	}
 }

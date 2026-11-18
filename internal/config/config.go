@@ -11,10 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/netip"
 	"os"
 	"sort"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -79,31 +77,14 @@ type Settings struct {
 	// the interval. 0 sends a list for every change.
 	RoomListMinIntervalMs int `json:"roomListMinIntervalMs"`
 
-	// How many days the moderators' log keeps chat, connections (with IPs)
-	// and games; 0 keeps them forever. Older rows are pruned every few hours.
-	ChatLogDays       int `json:"chatLogDays"`
-	ConnectionLogDays int `json:"connectionLogDays"`
-	GameLogDays       int `json:"gameLogDays"`
-
-	// Addresses (IPs and CIDR ranges) that may reach the moderator website.
-	// Empty: no restriction beyond where the site listens (--admin-addr).
-	// Loopback is always allowed.
-	AdminAllowedIPs []string `json:"adminAllowedIPs"`
-
 	// AdminLoginMaxFailures wrong moderator passwords in a row from one IP
-	// (the site and the desktop client's /login together) ban it for
+	// (the desktop client's /login) ban it for
 	// AdminLoginBanSeconds; 0 seconds is permanent. Loopback is locked out
 	// for 15 minutes instead of banned.
 	AdminLoginMaxFailures int `json:"adminLoginMaxFailures"`
 	AdminLoginBanSeconds  int `json:"adminLoginBanSeconds"`
 
-	// The moderators' log may hold at most this many megabytes of data; past
-	// it the oldest chat and connections are pruned first (the audit log
-	// never). 0: no cap, only the retention days.
-	ModLogMaxMB int `json:"modLogMaxMB"`
-
 	minClient    ReleaseVersion
-	adminAllowed []netip.Prefix
 	actionLimits ratelimit.ActionLimits // built from the keys above; read only
 }
 
@@ -124,17 +105,10 @@ const (
 	MaxLiveReplayKeyframeSeconds = 600
 )
 
-// MaxLogDays bounds the log retention settings (about 10 years).
-const MaxLogDays = 3650
-
-// maxAdminAllowedIPs bounds adminAllowedIPs, which is checked on every request.
-const maxAdminAllowedIPs = 256
-
-// Bounds for the moderator login guard and the log's size cap.
+// Bounds for the moderator login guard.
 const (
 	MaxAdminLoginMaxFailures = 1000
 	MaxAdminLoginBanSeconds  = 10 * 365 * 24 * 3600 // about 10 years; 0 is permanent
-	MaxModLogMaxMB           = 1 << 20              // 1 TiB
 )
 
 // Defaults returns the settings used when the file is missing.
@@ -168,13 +142,8 @@ func Defaults() *Settings {
 		AbuseBanSeconds:           int(actions.BanDuration / time.Second),
 		AbuseReportDays:           int(actions.ReportTTL / (24 * time.Hour)),
 		RoomListMinIntervalMs:     250,
-		ChatLogDays:               90,
-		ConnectionLogDays:         90,
-		GameLogDays:               365,
-		AdminAllowedIPs:           []string{},
 		AdminLoginMaxFailures:     5,
 		AdminLoginBanSeconds:      0,
-		ModLogMaxMB:               1024,
 	}
 	s.minClient, _ = ParseReleaseVersion(s.MinClientVersion)
 	s.actionLimits = s.buildActionLimits()
@@ -283,18 +252,6 @@ func (s *Settings) validate() error {
 	}
 	s.actionLimits = s.buildActionLimits()
 	for _, f := range []struct {
-		name  string
-		value int
-	}{
-		{"chatLogDays", s.ChatLogDays},
-		{"connectionLogDays", s.ConnectionLogDays},
-		{"gameLogDays", s.GameLogDays},
-	} {
-		if f.value < 0 || f.value > MaxLogDays {
-			return fmt.Errorf("%s must be 0 (keep forever) to %d, got %d", f.name, MaxLogDays, f.value)
-		}
-	}
-	for _, f := range []struct {
 		name     string
 		value    int
 		min, max int
@@ -302,82 +259,18 @@ func (s *Settings) validate() error {
 	}{
 		{"adminLoginMaxFailures", s.AdminLoginMaxFailures, 1, MaxAdminLoginMaxFailures, ""},
 		{"adminLoginBanSeconds", s.AdminLoginBanSeconds, 0, MaxAdminLoginBanSeconds, " (0 bans for good)"},
-		{"modLogMaxMB", s.ModLogMaxMB, 0, MaxModLogMaxMB, " (0 sets no cap)"},
 	} {
 		if f.value < f.min || f.value > f.max {
 			return fmt.Errorf("%s must be %d-%d%s, got %d", f.name, f.min, f.max, f.unit, f.value)
 		}
 	}
-	if s.AdminAllowedIPs == nil { // "adminAllowedIPs": null
-		s.AdminAllowedIPs = []string{}
-	}
-	if len(s.AdminAllowedIPs) > maxAdminAllowedIPs {
-		return fmt.Errorf("adminAllowedIPs may list at most %d entries, got %d", maxAdminAllowedIPs, len(s.AdminAllowedIPs))
-	}
-	s.adminAllowed = make([]netip.Prefix, 0, len(s.AdminAllowedIPs))
-	for _, entry := range s.AdminAllowedIPs {
-		p, err := parseIPOrPrefix(entry)
-		if err != nil {
-			return fmt.Errorf("adminAllowedIPs: %q is not an IP address or CIDR range like 203.0.113.0/24", entry)
-		}
-		s.adminAllowed = append(s.adminAllowed, p)
-	}
 	return nil
-}
-
-// parseIPOrPrefix reads "203.0.113.7", "2001:db8::1" or "203.0.113.0/24".
-func parseIPOrPrefix(s string) (netip.Prefix, error) {
-	s = strings.TrimSpace(s)
-	if strings.Contains(s, "/") {
-		p, err := netip.ParsePrefix(s)
-		if err != nil {
-			return netip.Prefix{}, err
-		}
-		if p.Addr().Is4In6() {
-			return netip.Prefix{}, errors.New("IPv4-mapped prefix")
-		}
-		return p.Masked(), nil
-	}
-	a, err := netip.ParseAddr(s)
-	if err != nil {
-		return netip.Prefix{}, err
-	}
-	if a.Zone() != "" {
-		return netip.Prefix{}, errors.New("zoned address")
-	}
-	a = a.Unmap()
-	return netip.PrefixFrom(a, a.BitLen()), nil
 }
 
 // AdminLoginPolicy is adminLoginMaxFailures and adminLoginBanSeconds: how
 // many failures ban an IP, and for how long (0: permanent).
 func (s *Settings) AdminLoginPolicy() (maxFailures int, ban time.Duration) {
 	return s.AdminLoginMaxFailures, time.Duration(s.AdminLoginBanSeconds) * time.Second
-}
-
-// ModLogMaxBytes is modLogMaxMB in bytes (0: no cap).
-func (s *Settings) ModLogMaxBytes() int64 { return int64(s.ModLogMaxMB) << 20 }
-
-// AdminAllowed is adminAllowedIPs, parsed (empty: no restriction).
-func (s *Settings) AdminAllowed() []netip.Prefix { return s.adminAllowed }
-
-// AdminIPAllowed reports whether ip may reach the moderator website: always
-// for loopback, otherwise when adminAllowedIPs is empty or lists it.
-func (s *Settings) AdminIPAllowed(ip string) bool {
-	a, err := netip.ParseAddr(ip)
-	if err != nil {
-		return false
-	}
-	a = a.Unmap().WithZone("")
-	if a.IsLoopback() || len(s.adminAllowed) == 0 {
-		return true
-	}
-	for _, p := range s.adminAllowed {
-		if p.Contains(a) {
-			return true
-		}
-	}
-	return false
 }
 
 // unknownKeys lists the top-level keys in data that Settings doesn't have.

@@ -455,10 +455,9 @@ func TestAutomaticBanClosesTheIPAndIsAudited(t *testing.T) {
 	if _, err := f.dial(playerIP); err == nil {
 		t.Fatal("a banned IP connected")
 	}
-	rows, _, err := f.log.AuditLog(context.Background(), 0, 10)
-	if err != nil || len(rows) == 0 || rows[0].Admin != moderation.AutoBanBy || rows[0].Action != "timeout" ||
-		rows[0].Source != "auto" || rows[0].IP != playerIP {
-		t.Fatalf("audit = %+v (%v)", rows, err)
+	if audit := f.logs.lines("moderator action"); !hasLine(audit, "admin="+moderation.AutoBanBy, "action=timeout",
+		"source=auto", "ip="+playerIP) {
+		t.Fatalf("audit = %q", audit)
 	}
 	rep := f.hub.RateLimitReport()
 	if len(rep.Records) != 1 || rep.Records[0].AutoBans != 1 || rep.Records[0].TotalRefused != 3 {

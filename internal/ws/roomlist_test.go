@@ -295,15 +295,19 @@ func TestLeaveWithoutARoomLogsSparingly(t *testing.T) {
 }
 
 func TestRateLimitReportSurvivesARestart(t *testing.T) {
-	log, err := modlog.Open(filepath.Join(t.TempDir(), "modlog.db"))
-	if err != nil {
-		t.Fatal(err)
+	path := filepath.Join(t.TempDir(), "ratelimits.json")
+	// Each hub opens the file afresh, as a restarted server does.
+	open := func() *modlog.Logger {
+		l, err := modlog.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return l
 	}
-	t.Cleanup(func() { log.Close() })
 	limits := ratelimit.DefaultActionLimits()
 	newHub := func() *Hub {
 		h := NewHub(state.New(), "", protocol.ICEConfiguration{}, nil, nil)
-		h.SetModLog(log)
+		h.SetModLog(open())
 		l := ratelimit.NewActionLimiter()
 		l.SetLimits(func() ratelimit.ActionLimits { return limits })
 		h.SetActionLimiter(l)
@@ -314,7 +318,6 @@ func TestRateLimitReportSurvivesARestart(t *testing.T) {
 		h1.actions.Allow("203.0.113.9", ratelimit.ActionRoomCreate, "Ace")
 	}
 	h1.SaveRateLimits()
-	log.Flush()
 
 	h2 := newHub()
 	if n := h2.LoadRateLimits(); n != 1 {
@@ -330,8 +333,7 @@ func TestRateLimitReportSurvivesARestart(t *testing.T) {
 		t.Fatal("forget")
 	}
 	h2.SaveRateLimits()
-	log.Flush()
-	if saved, err := log.RateLimits(); err != nil || len(saved) != 0 {
-		t.Fatalf("after forgetting, the log holds %v (%v)", saved, err)
+	if saved, err := open().RateLimits(); err != nil || len(saved) != 0 {
+		t.Fatalf("after forgetting, the file holds %v (%v)", saved, err)
 	}
 }
