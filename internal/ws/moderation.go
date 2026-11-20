@@ -12,6 +12,7 @@ import (
 	"github.com/jay-day/rmgk-lobby/internal/moderation"
 	"github.com/jay-day/rmgk-lobby/internal/modlog"
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
+	"github.com/jay-day/rmgk-lobby/internal/usernames"
 )
 
 // maxAuthFails is how many bad ADMIN_AUTH passwords one connection gets
@@ -86,6 +87,40 @@ func (h *Hub) handleAdminAuth(c *Client, env protocol.Envelope) {
 	slog.Info("admin authenticated", "admin", name, "user", c.user.Username, "ip", c.ip)
 	c.sendEnvelope(protocol.TypeAdminAuthOK, env.ID, protocol.AdminAuthOKResponse{Name: name})
 	h.audit(name, "sign-in", "Signed in to the lobby as "+c.user.Username, modlog.SourceLobby, c.ip)
+	h.broadcastModPeers()
+}
+
+// handleAdminLogout gives the moderator role back for the rest of the session.
+func (h *Hub) handleAdminLogout(c *Client, env protocol.Envelope) {
+	on, name := c.moderatorState()
+	if !on {
+		return
+	}
+	slog.Info("admin logged out", "admin", name, "user", c.user.Username)
+	c.setModerator(false, "", "")
+	c.sendEnvelope(protocol.TypeAdminLoggedOut, env.ID, struct{}{})
+	h.broadcastModPeers()
+}
+
+// broadcastModPeers tells every moderator who else is one, so their menus can
+// grey out what the server would refuse. Everyone on a moderator's connection
+// counts: findClientByUsername reaches the connection through any of them.
+func (h *Hub) broadcastModPeers() {
+	var mods []*Client
+	for _, cl := range h.clientList() {
+		if on, _ := cl.moderatorState(); on {
+			mods = append(mods, cl)
+		}
+	}
+	payload := protocol.ModPeersPayload{UserIDs: []uint64{}}
+	for _, cl := range mods {
+		for _, u := range cl.user.Group() {
+			payload.UserIDs = append(payload.UserIDs, u.ID)
+		}
+	}
+	for _, cl := range mods {
+		cl.sendEnvelope(protocol.TypeModPeers, "", payload)
+	}
 }
 
 // loginGuardBanned runs after the login guard bans an IP (from the lobby or
@@ -114,6 +149,7 @@ func (h *Hub) activeModerator(c *Client) bool {
 	if demoted {
 		slog.Info("moderator signed out: their admins.json entry is gone or changed", "user", c.user.Username, "ip", c.ip)
 		c.notice("warn", "Your moderator sign-in is no longer valid.")
+		h.broadcastModPeers()
 	}
 	return active
 }
@@ -210,6 +246,26 @@ func (h *Hub) handleModAction(c *Client, env protocol.Envelope) {
 		c.notice("warn", "User \""+target+"\" is not connected.")
 		return
 	}
+	// Name them as the moderator did: this may be a local player, and whatever
+	// happens next reaches the whole connection.
+	tname := tc.user.Username
+	for _, u := range tc.user.Group() {
+		if usernames.Same(u.Username, target) {
+			tname = u.Username
+		}
+	}
+	if action == "inspect" {
+		var others []string
+		for _, u := range tc.user.Group() {
+			if u.Username != tname {
+				others = append(others, u.Username)
+			}
+		}
+		c.sendEnvelope(protocol.TypeModTargetInfo, env.ID, protocol.ModTargetInfoPayload{
+			Target: tname, Others: others, Moderator: h.activeModerator(tc),
+		})
+		return
+	}
 	if tc.user.ID == c.user.ID {
 		c.notice("warn", "You can't moderate yourself.")
 		return
@@ -219,9 +275,7 @@ func (h *Hub) handleModAction(c *Client, env protocol.Envelope) {
 		return
 	}
 	reason := strings.TrimSpace(req.Reason)
-	tname := tc.user.Username
-
-	out, err := h.sanction(tc, c.adminName, action, reason, dur)
+	out, err := h.sanction(tc, tname, c.adminName, action, reason, dur)
 	switch {
 	case errors.Is(err, ErrNeedsDuration):
 		c.notice("error", "Timeout needs a duration, e.g. /timeout "+tname+" 10m.")
@@ -232,6 +286,7 @@ func (h *Hub) handleModAction(c *Client, env protocol.Envelope) {
 	}
 	h.audit(c.adminName, action, out.Detail, modlog.SourceLobby, c.ip)
 	h.modConfirm(c, out.Confirm)
+	h.sendModResult(c, action, out)
 }
 
 // Errors from the moderation actions the website calls.
@@ -252,10 +307,11 @@ type ModOutcome struct {
 }
 
 // sanction kicks, mutes, times out or bans the connection tc; admin is who
-// did it. The player hears the same messages whether it came from the lobby
-// or the website.
-func (h *Hub) sanction(tc *Client, admin, action, reason string, dur time.Duration) (ModOutcome, error) {
-	tname, tip := tc.user.Username, tc.ip
+// did it, and tname the name they acted on (a local player's, maybe: the
+// whole connection is sanctioned either way). The player hears the same
+// messages whether it came from the lobby or the website.
+func (h *Hub) sanction(tc *Client, tname, admin, action, reason string, dur time.Duration) (ModOutcome, error) {
+	tip := tc.ip
 	out := ModOutcome{Target: tname, IP: tip}
 	switch action {
 	case "kick":
@@ -349,14 +405,37 @@ func (h *Hub) modConfirm(c *Client, text string) {
 	slog.Info("mod action", "admin", c.adminName, "detail", text)
 }
 
+// sendModResult tells the moderator's client what just took effect, so it can
+// offer Undo. The IP is what unban and unmute take; a kick has nothing to undo.
+func (h *Hub) sendModResult(c *Client, action string, out ModOutcome) {
+	ip := out.IP
+	if action == "kick" {
+		ip = ""
+	}
+	var until int64
+	if !out.Until.IsZero() {
+		until = out.Until.UnixMilli()
+	}
+	c.sendEnvelope(protocol.TypeModResult, "", protocol.ModResultPayload{
+		Action: action, Target: out.Target, IP: ip, Until: until,
+	})
+}
+
 // findClientByUsername returns the connected client with a matching username
-// (case-insensitive), or nil. Usernames are unique among live connections.
+// (case-insensitive), or nil. Usernames are unique among live connections. A
+// local player's name finds the connection it shares: sanctions apply to the
+// whole PC.
 func (h *Hub) findClientByUsername(name string) *Client {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for _, cl := range h.clients {
-		if cl.user != nil && strings.EqualFold(cl.user.Username, name) {
-			return cl
+		if cl.user == nil {
+			continue
+		}
+		for _, u := range cl.user.Group() {
+			if usernames.Same(u.Username, name) {
+				return cl
+			}
 		}
 	}
 	return nil
@@ -370,7 +449,7 @@ func toModSanctions(in []moderation.Sanction) []protocol.ModSanction {
 			until = s.Until.UnixMilli()
 		}
 		out = append(out, protocol.ModSanction{
-			IP: s.IP, Reason: s.Reason, By: s.By, Until: until,
+			IP: s.IP, Name: s.Name, Reason: s.Reason, By: s.By, Until: until,
 		})
 	}
 	return out

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jay-day/rmgk-lobby/internal/config"
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
 	"github.com/jay-day/rmgk-lobby/internal/ratelimit"
 	"github.com/jay-day/rmgk-lobby/internal/state"
@@ -44,12 +45,24 @@ type broadcast struct {
 	// 0 = none yet (spectators fall back to full-spool replay).
 	keyframeFrame int
 	keyframeData  []byte
+	keyframeAt    time.Time // when it was stored
+	keyframeSeq   uint64    // counts stored keyframes, so a waiting viewer can tell a newer one
 	// In-progress reassembly of a chunked BROADCAST_KEYFRAME upload.
 	kfAsmFrame  int
 	kfAsmCount  int
 	kfAsmGot    int
 	kfAsmBytes  int
 	kfAsmChunks [][]byte
+
+	// On demand (lobby.json liveReplayKeyframeOnDemand, and the broadcaster
+	// said in BROADCAST_BEGIN that it can): the broadcaster uploads a keyframe
+	// only when asked. The cached one serves joiners while it's younger than
+	// the lobby's keyframe interval; a later joiner waits while a new one is
+	// asked for. Fixed for the broadcast's life, so a config change mid-match
+	// can't leave a periodic broadcaster waiting for asks, or the reverse.
+	keyframeOnDemand bool
+	startedAt        time.Time // frame 0 serves as a keyframe stored at this time
+	kfRequestedAt    time.Time // last BROADCAST_KEYFRAME_REQUEST; zero = none outstanding
 }
 
 // broadcastSpectator owns an ordered cursor into the broadcast spool. Logical
@@ -72,6 +85,14 @@ type broadcastSpectator struct {
 	keyframeChunk int
 	beginSent     bool
 	stopped       bool // protected by broadcast.mu
+
+	// An on-demand join waiting for a keyframe newer than waitSeq. Only
+	// SPECTATE_BEGIN goes out meanwhile, so the cursors above are untouched
+	// when one arrives or waitDeadline passes. Protected by broadcast.mu.
+	waitingKeyframe bool
+	waitSeq         uint64
+	waitSince       time.Time
+	waitDeadline    time.Time
 }
 
 // keyframeChunkBytes is the raw savestate slice size per keyframe message. base64
@@ -80,9 +101,12 @@ const keyframeChunkBytes = 512 * 1024
 
 // New clients use small paced chunks so chat can preempt between them; older
 // clients used 512 KiB chunks. Bound both the shape and total decoded bytes.
+// The total is the largest keyframe a viewer accepts: a 24 MiB state, or its
+// compressed form's 10-byte header (LobbyClient.cpp, MAX_KEYFRAME_ENCODED_BYTES).
+// Anything larger would be stored and sent only for every viewer to refuse it.
 const (
 	maxKeyframeChunks = 512
-	maxKeyframeBytes  = 32 << 20
+	maxKeyframeBytes  = 24<<20 + 10
 )
 
 // maxSpoolBytes caps one broadcast's spool file. A krec is input records — even
@@ -98,6 +122,13 @@ const (
 	spectateQueueReserve   = 8
 	spectateRetryInterval  = 20 * time.Millisecond
 )
+
+// keyframeRequestTimeout bounds how long an on-demand join waits for the
+// broadcaster's new keyframe. Capture waits for rollback to confirm the frame,
+// then the client compresses a few MB and uploads them in paced chunks. Past
+// it, the viewer starts from what's cached, and the ask counts as unanswered,
+// so the next joiner asks again.
+const keyframeRequestTimeout = 10 * time.Second
 
 // broadcastManager owns all live broadcasts, keyed by match id.
 type broadcastManager struct {
@@ -141,8 +172,10 @@ func (m *broadcastManager) roomBroadcast(roomID uint64) (matchID uint64, ok bool
 
 // begin registers a new broadcast and opens its spool file. Returns false if
 // the match is already being broadcast (first broadcaster wins) or the file
-// can't be opened.
-func (m *broadcastManager) begin(matchID, roomID, broadcasterID uint64, participantIDs []uint64, manifest string) bool {
+// can't be opened. keyframeOnDemand means the broadcaster uploads keyframes
+// when asked rather than on a timer.
+func (m *broadcastManager) begin(matchID, roomID, broadcasterID uint64, participantIDs []uint64, manifest string,
+	keyframeOnDemand bool) bool {
 	// Keep the base64 manifest plus its envelope below the 1 MiB WebSocket limit.
 	// Empty is allowed for older broadcasters; new viewers reject missing settings.
 	const maxManifestBytes = 512 * 1024
@@ -167,15 +200,17 @@ func (m *broadcastManager) begin(matchID, roomID, broadcasterID uint64, particip
 		return false
 	}
 	m.byMatch[matchID] = &broadcast{
-		matchID:        matchID,
-		roomID:         roomID,
-		broadcasterID:  broadcasterID,
-		participantIDs: append([]uint64(nil), participantIDs...),
-		manifest:       manifest,
-		path:           path,
-		file:           f,
-		spectators:     make(map[uint64]*broadcastSpectator),
-		published:      -1,
+		matchID:          matchID,
+		roomID:           roomID,
+		broadcasterID:    broadcasterID,
+		participantIDs:   append([]uint64(nil), participantIDs...),
+		manifest:         manifest,
+		path:             path,
+		file:             f,
+		spectators:       make(map[uint64]*broadcastSpectator),
+		keyframeOnDemand: keyframeOnDemand,
+		startedAt:        time.Now(),
+		published:        -1,
 	}
 	return true
 }
@@ -294,10 +329,114 @@ func (m *broadcastManager) keyframe(senderID, matchID uint64, frame, chunkIndex,
 	}
 	b.keyframeFrame = frame
 	b.keyframeData = buf
+	b.keyframeAt = time.Now()
+	b.keyframeSeq++
 	b.kfAsmChunks = nil
 	b.kfAsmGot = 0
 	b.kfAsmBytes = 0
-	slog.Info("broadcast keyframe stored", "match", matchID, "frame", frame, "bytes", len(buf))
+	// Any new keyframe answers an outstanding ask: it's as fresh as the one
+	// asked for, and the cache is fresh again until it ages out.
+	b.kfRequestedAt = time.Time{}
+	waiting := 0
+	for _, sc := range b.spectators {
+		if !sc.waitingKeyframe {
+			continue
+		}
+		waiting++
+		select {
+		case sc.wake <- struct{}{}:
+		default:
+		}
+	}
+	slog.Info("broadcast keyframe stored", "match", matchID, "frame", frame, "bytes", len(buf),
+		"waiting_viewers", waiting)
+}
+
+// keyframeMaxAge is how long a cached keyframe keeps serving viewers who join
+// an on-demand broadcast: the lobby's keyframe interval, read at each join.
+func (m *broadcastManager) keyframeMaxAge() time.Duration {
+	if m.hub == nil {
+		return time.Duration(config.Defaults().LiveReplayKeyframeSeconds) * time.Second
+	}
+	return time.Duration(m.hub.cfg().LiveReplayKeyframeSeconds) * time.Second
+}
+
+// keyframeFresh reports whether an on-demand broadcast can serve a joiner from
+// what it has. Until the first keyframe, frame 0 stands in for one stored when
+// the broadcast began: replaying from the start then covers no more than a
+// cached keyframe could leave to fast-forward, and the broadcaster's emulator
+// may still be booting, too early to capture one. Call with b.mu held.
+func (b *broadcast) keyframeFresh(now time.Time, maxAge time.Duration) bool {
+	if b.keyframeFrame > 0 && len(b.keyframeData) > 0 {
+		return now.Sub(b.keyframeAt) < maxAge
+	}
+	return now.Sub(b.startedAt) < maxAge
+}
+
+// claimKeyframeRequest reports whether the caller should ask the broadcaster
+// for a keyframe, and records the ask. One ask is outstanding at a time, so
+// everyone joining meanwhile waits for the same keyframe; an ask unanswered
+// for keyframeRequestTimeout no longer counts. Call with b.mu held.
+func (b *broadcast) claimKeyframeRequest(now time.Time) bool {
+	if !b.kfRequestedAt.IsZero() && now.Sub(b.kfRequestedAt) < keyframeRequestTimeout {
+		return false
+	}
+	b.kfRequestedAt = now
+	return true
+}
+
+// requestKeyframe sends BROADCAST_KEYFRAME_REQUEST for an ask claimed at `at`.
+// Call without broadcast locks. A full broadcaster queue releases the claim,
+// so a waiting viewer's pump asks again on its next tick.
+func (m *broadcastManager) requestKeyframe(b *broadcast, at time.Time) {
+	var broadcaster *Client
+	if m.hub != nil {
+		broadcaster = m.hub.getClient(b.broadcasterID)
+	}
+	if broadcaster == nil {
+		return // disconnecting: ending the broadcast ends the wait too
+	}
+	if broadcaster.trySendEnvelope(protocol.TypeBroadcastKeyframeRequest, "",
+		protocol.BroadcastKeyframeRequestPayload{MatchID: b.matchID}) {
+		slog.Info("broadcast keyframe requested", "match", b.matchID)
+		return
+	}
+	b.mu.Lock()
+	if b.kfRequestedAt.Equal(at) {
+		b.kfRequestedAt = time.Time{}
+	}
+	b.mu.Unlock()
+}
+
+// attachKeyframe starts a spectator that has been sent nothing but
+// SPECTATE_BEGIN from the cached keyframe: the savestate, the krec header, then
+// the spool tail from the keyframe's next input record. The spectator restores
+// the savestate and consumes that record first, so catch-up is bounded to the
+// tail regardless of how long the match has run. It returns the krec bytes
+// that are history at this point, or false when there's no keyframe or its
+// record isn't in the spool (yet). Call with b.mu held.
+func (b *broadcast) attachKeyframe(sc *broadcastSpectator) (int64, bool) {
+	if b.keyframeFrame <= 0 || len(b.keyframeData) == 0 {
+		return 0, false
+	}
+	data, err := os.ReadFile(b.path)
+	if err != nil {
+		slog.Warn("broadcast: keyframe spool read failed", "path", b.path, "err", err)
+	}
+	off := krecFrameOffset(data, b.keyframeFrame)
+	if off <= 0 {
+		return 0, false
+	}
+	hs := 272
+	if len(data) >= 4 && string(data[0:4]) == "KRC1" {
+		hs = 400
+	}
+	sc.headerSize = int64(hs)
+	sc.tailStart = off
+	sc.inHeader = true
+	sc.keyframeFrame = b.keyframeFrame
+	sc.keyframeData = b.keyframeData
+	return int64(hs) + b.written - off, true
 }
 
 // krecFrameOffset returns the byte offset of the (frame)-th input (0x12) record in
@@ -439,11 +578,15 @@ func (m *broadcastManager) pumpSpectator(b *broadcast, userID uint64, sc *broadc
 // spectate stop/end and with replacement subscriptions from the same user.
 func (m *broadcastManager) pumpSpectatorChunk(b *broadcast, userID uint64, sc *broadcastSpectator) (bool, bool) {
 	viewersChanged := false
+	var askAt time.Time
 	b.mu.Lock()
 	defer func() {
 		b.mu.Unlock()
 		if viewersChanged {
 			m.notifyViewerCount(b.matchID)
+		}
+		if !askAt.IsZero() {
+			m.requestKeyframe(b, askAt)
 		}
 	}()
 	if b.closed || sc.stopped || b.spectators[userID] != sc {
@@ -455,6 +598,42 @@ func (m *broadcastManager) pumpSpectatorChunk(b *broadcast, userID uint64, sc *b
 			return false, true
 		}
 		sc.beginSent = true
+		return true, true
+	}
+
+	// An on-demand join holds its stream until the keyframe it's waiting for
+	// arrives (keyframe wakes this pump) or its deadline passes (the ticker).
+	if sc.waitingKeyframe {
+		now := time.Now()
+		if b.keyframeSeq != sc.waitSeq {
+			if history, ok := b.attachKeyframe(sc); ok {
+				sc.waitingKeyframe = false
+				slog.Info("spectate start", "mode", "keyframe-on-demand", "match", b.matchID,
+					"user", sc.client.user.Username, "history_bytes", history,
+					"waited_ms", now.Sub(sc.waitSince).Milliseconds())
+				return true, true
+			}
+			// Its input record hasn't reached the spool yet; the next
+			// BROADCAST_DATA wakes this pump to look again.
+		}
+		if now.Before(sc.waitDeadline) {
+			// Ask again only while nothing newer has been stored: once it
+			// has, the wait is just for its input record to reach the spool.
+			if b.keyframeSeq == sc.waitSeq && b.claimKeyframeRequest(now) {
+				askAt = now // the last ask timed out or never reached the broadcaster
+			}
+			return false, true
+		}
+		// No keyframe in time: start from what's cached, as a periodic
+		// broadcast would.
+		sc.waitingKeyframe = false
+		mode, history := "full-fallback", b.written
+		if n, ok := b.attachKeyframe(sc); ok {
+			mode, history = "keyframe-fallback", n
+		}
+		slog.Info("spectate start", "mode", mode, "match", b.matchID,
+			"user", sc.client.user.Username, "history_bytes", history,
+			"waited_ms", now.Sub(sc.waitSince).Milliseconds())
 		return true, true
 	}
 
@@ -532,7 +711,9 @@ func (m *broadcastManager) pumpSpectatorChunk(b *broadcast, userID uint64, sc *b
 // spectateStart serves the krec history-so-far to a new spectator, then
 // registers them for the live tail. The snapshot read and the registration
 // happen under the broadcast lock, so the history plus all subsequent live
-// chunks form a gap-free, duplicate-free stream.
+// chunks form a gap-free, duplicate-free stream. On an on-demand broadcast
+// whose cached keyframe is too old, the spectator is registered but held
+// after SPECTATE_BEGIN while the broadcaster is asked for a new keyframe.
 func (m *broadcastManager) spectateStart(c *Client, matchID uint64) {
 	m.mu.Lock()
 	b := m.byMatch[matchID]
@@ -544,6 +725,7 @@ func (m *broadcastManager) spectateStart(c *Client, matchID uint64) {
 		return
 	}
 
+	maxAge := m.keyframeMaxAge()
 	b.mu.Lock()
 	if b.closed {
 		b.mu.Unlock()
@@ -563,42 +745,45 @@ func (m *broadcastManager) spectateStart(c *Client, matchID uint64) {
 	}
 	mode := "full"
 	historyBytes := b.written
+	now := time.Now()
+	asked := false
 
-	// Prefer the keyframe path: if we hold a complete keyframe whose next input is
-	// locatable in the spool, send the savestate + only the krec [header + tail from
-	// that input]. The spectator restores the savestate and consumes that record
-	// first, so catch-up is bounded to the tail regardless of how
-	// long the match has run. Fall back to the full spool (frame 0) otherwise —
-	// e.g. during startup before any keyframe exists.
-	if b.keyframeFrame > 0 && len(b.keyframeData) > 0 {
-		data, err := os.ReadFile(b.path)
-		if err != nil {
-			slog.Warn("broadcast: keyframe spool read failed", "path", b.path, "err", err)
+	// Prefer the keyframe path (see attachKeyframe). Fall back to the full
+	// spool (frame 0) otherwise, e.g. during startup before any keyframe
+	// exists. An on-demand broadcast first makes sure what it has is fresh.
+	if b.keyframeOnDemand && !b.keyframeFresh(now, maxAge) {
+		sc.waitingKeyframe = true
+		sc.waitSeq = b.keyframeSeq
+		sc.waitSince = now
+		sc.waitDeadline = now.Add(keyframeRequestTimeout)
+		asked = b.claimKeyframeRequest(now)
+	} else if history, ok := b.attachKeyframe(sc); ok {
+		mode = "keyframe"
+		if b.keyframeOnDemand {
+			mode = "keyframe-cached"
 		}
-		if off := krecFrameOffset(data, b.keyframeFrame); off > 0 {
-			hs := 272
-			if len(data) >= 4 && string(data[0:4]) == "KRC1" {
-				hs = 400
-			}
-			sc.headerSize = int64(hs)
-			sc.tailStart = off
-			sc.inHeader = true
-			sc.keyframeFrame = b.keyframeFrame
-			sc.keyframeData = b.keyframeData
-			mode = "keyframe"
-			historyBytes = int64(hs) + b.written - off
-		}
+		historyBytes = history
 	}
 
+	waiting := sc.waitingKeyframe // the pump owns it once unlocked
 	b.spectators[c.user.ID] = sc
 	viewers := len(b.spectators)
 	b.mu.Unlock()
+	if asked {
+		m.requestKeyframe(b, now)
+	}
 	if m.hub != nil {
 		m.hub.modlog.GameSpectators(matchID, viewers)
 	}
 	m.notifyViewerCount(matchID)
 	go m.pumpSpectator(b, c.user.ID, sc)
 	m.syncSpectatingPresence(c.user.ID)
+	if waiting {
+		// The pump logs "spectate start" once it knows where the stream starts.
+		slog.Info("spectate waiting for keyframe", "match", matchID, "user", c.user.Username,
+			"asked", asked)
+		return
+	}
 	slog.Info("spectate start", "mode", mode, "match", matchID, "user", c.user.Username,
 		"history_bytes", historyBytes)
 }
@@ -606,7 +791,8 @@ func (m *broadcastManager) spectateStart(c *Client, matchID uint64) {
 // syncSpectatingPresence shows a lobby-idle user as "spectating" while they
 // watch any live stream, and returns them to idle once they watch none. Like
 // AFK, it only takes over the "doing nothing" states: a seated, searching or
-// playing user keeps their real state. Call with no broadcast locks held.
+// playing user keeps their real state. Local players watch with the PC they
+// sit at, as they go AFK with it. Call with no broadcast locks held.
 func (m *broadcastManager) syncSpectatingPresence(userID uint64) {
 	if m.hub == nil {
 		return
@@ -618,16 +804,19 @@ func (m *broadcastManager) syncSpectatingPresence(userID uint64) {
 		return // disconnected: presence removal already covers them
 	}
 
-	var changed bool
-	if m.isWatching(userID) {
-		changed = c.user.CompareAndSetState([]state.UserState{
-			state.UserStateIdle, state.UserStateBrowsing, state.UserStateAway,
-		}, state.UserStateSpectating)
-	} else {
-		changed = c.user.CompareAndSetState([]state.UserState{state.UserStateSpectating}, state.UserStateIdle)
-	}
-	if changed {
-		m.hub.broadcastPresenceUpdated(c.user)
+	watching := m.isWatching(userID)
+	for _, u := range c.user.Group() {
+		var changed bool
+		if watching {
+			changed = u.CompareAndSetState([]state.UserState{
+				state.UserStateIdle, state.UserStateBrowsing, state.UserStateAway,
+			}, state.UserStateSpectating)
+		} else {
+			changed = u.CompareAndSetState([]state.UserState{state.UserStateSpectating}, state.UserStateIdle)
+		}
+		if changed {
+			m.hub.broadcastPresenceUpdated(u)
+		}
 	}
 }
 
@@ -641,7 +830,7 @@ func (m *broadcastManager) settleLobbyState(u *state.User) {
 	}
 	m.presenceMu.Lock()
 	defer m.presenceMu.Unlock()
-	if m.isWatching(u.ID) {
+	if m.isWatching(u.Primary().ID) {
 		u.SetState(state.UserStateSpectating)
 	} else {
 		u.SetState(state.UserStateIdle)
@@ -688,40 +877,80 @@ func (m *broadcastManager) spectateStop(userID, matchID uint64) {
 	}
 }
 
-// spectatorChat relays a chat line from a spectator to every viewer of the
-// broadcast they're watching, the sender included so it echoes like room chat.
-// The match's players aren't spectators, so they never receive it. A sender
-// who isn't watching anything is ignored.
+// spectatorChat relays a chat line to everyone on a live replay's chat: its
+// viewers, the sender included so it echoes like room chat, and the match's
+// players, who can answer. A viewer whose client still says the players can't read
+// this keeps that promise: their lines reach the other viewers only. A sender who's
+// neither watching nor playing a match being broadcast is ignored.
 //
-// It reports the match and room of a broadcast the line reached (for the
+// It reports the match and room of the broadcast the line reached (for the
 // moderators' log), ok false when it went nowhere.
-func (m *broadcastManager) spectatorChat(senderID uint64, payload protocol.ChatMsgPayload) (matchID, roomID uint64, ok bool) {
-	m.mu.Lock()
-	all := make([]*broadcast, 0, len(m.byMatch))
-	for _, b := range m.byMatch {
-		all = append(all, b)
+func (m *broadcastManager) spectatorChat(c *Client, payload protocol.ChatMsgPayload) (matchID, roomID uint64, ok bool) {
+	b, fromPlayer := m.chatBroadcastOf(c)
+	if b == nil {
+		return 0, 0, false
 	}
-	m.mu.Unlock()
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return 0, 0, false
+	}
+	recipients := make(map[*Client]struct{}, len(b.spectators)+maxRoomPlayers)
+	for _, sc := range b.spectators {
+		recipients[sc.client] = struct{}{}
+	}
+	b.mu.Unlock()
+	if c.user.SpectatorChat {
+		for _, player := range m.chatPlayersOf(b) {
+			recipients[player] = struct{}{}
+		}
+	}
+	payload.FromPlayer = fromPlayer
+	for recipient := range recipients {
+		recipient.sendEnvelope(protocol.TypeChatMsg, "", payload)
+	}
+	return b.matchID, b.roomID, true
+}
 
-	for _, b := range all {
+// chatBroadcastOf finds the broadcast whose chat c is on, and whether c is on it as
+// one of the match's players rather than as a viewer.
+func (m *broadcastManager) chatBroadcastOf(c *Client) (*broadcast, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if match := c.user.CurrentMatch; match != nil && c.user.SpectatorChat {
+		if b := m.byMatch[match.ID]; b != nil {
+			return b, true
+		}
+	}
+	for _, b := range m.byMatch {
 		b.mu.Lock()
-		if b.closed || b.spectators[senderID] == nil {
-			b.mu.Unlock()
+		watching := b.spectators[c.user.ID] != nil
+		b.mu.Unlock()
+		if watching {
+			return b, false
+		}
+	}
+	return nil, false
+}
+
+// chatPlayersOf returns the connections playing b's match right now whose clients
+// can show its chat. Local players go through their owner's connection.
+func (m *broadcastManager) chatPlayersOf(b *broadcast) []*Client {
+	room := m.hub.state.GetRoom(b.roomID)
+	if room == nil {
+		return nil
+	}
+	var out []*Client
+	for _, seat := range room.Players {
+		u := seat.User
+		if u == nil || u.Owner != nil || !u.SpectatorChat || u.CurrentMatch == nil || u.CurrentMatch.ID != b.matchID {
 			continue
 		}
-		viewers := make([]*Client, 0, len(b.spectators))
-		for _, sc := range b.spectators {
-			viewers = append(viewers, sc.client)
-		}
-		b.mu.Unlock()
-		for _, c := range viewers {
-			c.sendEnvelope(protocol.TypeChatMsg, "", payload)
-		}
-		if !ok {
-			matchID, roomID, ok = b.matchID, b.roomID, true
+		if player := m.hub.getClient(u.ID); player != nil {
+			out = append(out, player)
 		}
 	}
-	return matchID, roomID, ok
+	return out
 }
 
 // watching names a live broadcast userID is subscribed to, for the
@@ -900,9 +1129,10 @@ func (h *Hub) handleBroadcastBegin(c *Client, env protocol.Envelope) {
 			participantIDs = append(participantIDs, player.ID)
 		}
 	}
-	if h.broadcasts.begin(match.ID, match.RoomID, c.user.ID, participantIDs, req.Manifest) {
+	if h.broadcasts.begin(match.ID, match.RoomID, c.user.ID, participantIDs, req.Manifest, req.KeyframeOnDemand) {
 		match.MarkLiveReplayStarted()
-		slog.Info("broadcast begin", "match", match.ID, "by", c.user.Username)
+		slog.Info("broadcast begin", "match", match.ID, "by", c.user.Username,
+			"keyframe_on_demand", req.KeyframeOnDemand)
 		// Older hosts do not publish the pre-match room setting. Once their
 		// broadcast actually starts, reconcile it so newer room members never
 		// display an unchecked Live Replay box for an active stream.

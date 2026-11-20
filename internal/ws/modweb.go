@@ -240,7 +240,7 @@ func (h *Hub) ModerateUser(admin string, userID uint64, action string, dur time.
 	if h.activeModerator(tc) {
 		return ModOutcome{Target: tc.user.Username, IP: tc.ip}, ErrModerator
 	}
-	return h.sanction(tc, admin, action, strings.TrimSpace(reason), dur)
+	return h.sanction(tc, tc.user.Username, admin, action, strings.TrimSpace(reason), dur)
 }
 
 // CloseRoom dissolves a room, as MOD_ACTION closeroom does; ok is false when

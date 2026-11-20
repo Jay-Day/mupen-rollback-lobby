@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"sync/atomic"
@@ -27,6 +28,9 @@ import (
 //	host   go                         → players, joiner; the server commits the join
 //	anyone abort                      → everyone else involved
 //
+// A hand-off adds a whole PC: adding any of its players adds all of them, and
+// the owner's client speaks for them. Admission.Joiner is that owner.
+//
 // Only one hand-off runs per match. A stale one (the host's client vanished
 // mid-way without the room dissolving) is replaced after admitStaleAfter.
 
@@ -34,7 +38,24 @@ const (
 	admitStaleAfter    = 90 * time.Second
 	admitMaxChunkB64   = 700 * 1024 // stays under the 1 MiB WebSocket read limit
 	admitMaxChunkCount = 256
+
+	// The most one hand-off relays of each chunked step, as the clients cap
+	// them on arrival: the pre-match settings (the size a broadcast's may be)
+	// and the encoded game state (the size a keyframe may be). A host that
+	// sends more is ending the hand-off, not completing it.
+	admitMaxManifestBytes = 512 * 1024
+	admitMaxStateBytes    = maxKeyframeBytes
 )
+
+// admitRelayLimit is the base64 size one hand-off may relay for a chunked
+// step. A blob is split anywhere, so every chunk may carry its own padding.
+func admitRelayLimit(step string) int {
+	raw := admitMaxStateBytes
+	if step == protocol.AdmitStepManifest {
+		raw = admitMaxManifestBytes
+	}
+	return base64.StdEncoding.EncodedLen(raw) + 4*admitMaxChunkCount
+}
 
 var admitIDs atomic.Uint64
 
@@ -89,7 +110,7 @@ func roomCanStartAlone(room *state.Room) bool {
 }
 
 func matchPeerFor(u *state.User, slot int) protocol.MatchPeer {
-	ip, port := u.GetUDPEndpoint()
+	ip, port := u.Primary().GetUDPEndpoint()
 	return protocol.MatchPeer{
 		UserID:       u.ID,
 		Username:     u.Username,
@@ -98,6 +119,7 @@ func matchPeerFor(u *state.User, slot int) protocol.MatchPeer {
 		LocalIP:      u.LocalIP,
 		Slot:         slot,
 		ICESupported: u.ICESupported,
+		PeerID:       u.Primary().ID,
 	}
 }
 
@@ -164,21 +186,30 @@ func (h *Hub) handleMatchAdmit(c *Client, env protocol.Envelope) {
 	}
 
 	var joiner *state.User
-	joinerSlot := 0
 	for _, seat := range room.Players {
 		if seat.User != nil && seat.User.ID == req.UserID {
-			joiner = seat.User
-			joinerSlot = seat.Slot
+			joiner = seat.User.Primary()
 		}
 	}
-	if joiner == nil || joiner.CurrentMatch != nil {
+	if joiner == nil {
 		c.sendMatchAdmitFail(req.MatchID, req.UserID, protocol.ReasonNotWaiting)
 		return
 	}
-	if !canLateJoin(joiner) || joinerSlot < 1 || joinerSlot > match.Seats ||
-		(room.SaveData != nil && !joiner.SaveData) {
-		c.sendMatchAdmitFail(req.MatchID, req.UserID, protocol.ReasonLateJoinUnsupported)
-		return
+	joinerSlot := seatSlotOf(room, joiner)
+	joiners := make([]protocol.MatchPeer, 0, maxPlayersPerPC)
+	for _, u := range joiner.Group() {
+		if u.CurrentMatch != nil {
+			c.sendMatchAdmitFail(req.MatchID, req.UserID, protocol.ReasonNotWaiting)
+			return
+		}
+		slot := seatSlotOf(room, u)
+		if !canLateJoin(u) || slot < 1 || slot > match.Seats ||
+			(room.SaveData != nil && !u.SaveData) ||
+			(len(room.GameOptionList()) > 0 && !u.GameOptions) {
+			c.sendMatchAdmitFail(req.MatchID, req.UserID, protocol.ReasonLateJoinUnsupported)
+			return
+		}
+		joiners = append(joiners, matchPeerFor(u, slot))
 	}
 	// Builds emulate differently (see the v0.9.14/v0.9.15 divergence), so a
 	// joiner must run exactly the host's build to stay in sync.
@@ -205,12 +236,11 @@ func (h *Hub) handleMatchAdmit(c *Client, env protocol.Envelope) {
 	}
 
 	players := activeMatchPlayers(room, match)
-	peers := make([]protocol.MatchPeer, 0, len(players)+1)
+	peers := make([]protocol.MatchPeer, 0, len(players)+len(joiners))
 	for _, seat := range players {
 		peers = append(peers, matchPeerFor(seat.User, seat.Slot))
 	}
-	joinerPeer := matchPeerFor(joiner, joinerSlot)
-	peers = append(peers, joinerPeer)
+	peers = append(peers, joiners...)
 
 	payload := protocol.MatchAdmitBeginPayload{
 		MatchID: match.ID,
@@ -218,8 +248,9 @@ func (h *Hub) handleMatchAdmit(c *Client, env protocol.Envelope) {
 		Epoch:   epoch,
 		Seats:   match.Seats,
 		HostID:  c.user.ID,
-		Joiner:  joinerPeer,
+		Joiner:  joiners[0],
 		Peers:   peers,
+		Joiners: joiners,
 	}
 	for _, seat := range players {
 		sendEnvelopeTo(seat.User, protocol.TypeMatchAdmitBegin, payload)
@@ -227,7 +258,7 @@ func (h *Hub) handleMatchAdmit(c *Client, env protocol.Envelope) {
 	sendEnvelopeTo(joiner, protocol.TypeMatchAdmitBegin, payload)
 
 	slog.Info("late join started", "match", match.ID, "admit", admit.ID, "joiner", joiner.Username,
-		"slot", joinerSlot, "epoch", epoch, "players", len(players))
+		"slot", joinerSlot, "seats", len(joiners), "epoch", epoch, "players", len(players))
 }
 
 func (h *Hub) handleMatchAdmitSignal(c *Client, env protocol.Envelope) {
@@ -257,11 +288,25 @@ func (h *Hub) handleMatchAdmitSignal(c *Client, env protocol.Envelope) {
 	isPlayer := c.user.CurrentMatch == match
 	sig.FromUserID = c.user.ID
 
+	// Only the settings and the game state carry data; every other step is a
+	// short signal, some of them relayed to every player.
+	isBlob := sig.Step == protocol.AdmitStepManifest || sig.Step == protocol.AdmitStepState
+	if !isBlob && (sig.Data != "" || sig.Count != 0) {
+		return
+	}
+
 	switch sig.Step {
 	case protocol.AdmitStepManifest, protocol.AdmitStepState:
-		if isHost {
-			sendEnvelopeTo(admit.Joiner, protocol.TypeMatchAdmitSignal, sig)
+		if !isHost {
+			return
 		}
+		if !match.CountAdmissionRelay(admit.ID, sig.Step, len(sig.Data), admitRelayLimit(sig.Step)) {
+			slog.Warn("late join: host sent more than a hand-off may relay",
+				"match", match.ID, "admit", admit.ID, "host", c.user.Username, "step", sig.Step)
+			h.abortAdmission(room, match, admit.ID, sig.Step+"_too_large", 0)
+			return
+		}
+		sendEnvelopeTo(admit.Joiner, protocol.TypeMatchAdmitSignal, sig)
 	case protocol.AdmitStepReady:
 		if isJoiner {
 			sendEnvelopeTo(room.Host, protocol.TypeMatchAdmitSignal, sig)
@@ -314,17 +359,22 @@ func (h *Hub) commitAdmission(room *state.Room, match *state.Match, admit *state
 	}
 	sendEnvelopeTo(joiner, protocol.TypeMatchAdmitSignal, sig)
 
-	match.AddPlayer(joiner)
-	joiner.CurrentMatch = match
-	joiner.SetState(state.UserStatePlaying)
-	h.modlog.GamePlayerJoined(match.ID, logPlayer(joiner, seatSlotOf(room, joiner)))
+	group := joiner.Group()
+	for _, u := range group {
+		match.AddPlayer(u)
+		u.CurrentMatch = match
+		u.SetState(state.UserStatePlaying)
+		h.modlog.GamePlayerJoined(match.ID, logPlayer(u, seatSlotOf(room, u)))
+	}
 
 	slog.Info("late join committed", "match", match.ID, "admit", admit.ID, "joiner", joiner.Username,
-		"slot", admit.Slot)
+		"slot", admit.Slot, "seats", len(group))
 
 	h.broadcastRoomState(room)
 	h.broadcastRoomList()
-	h.broadcastPresenceUpdated(joiner)
+	for _, u := range group {
+		h.broadcastPresenceUpdated(u)
+	}
 }
 
 // abortAdmission ends the hand-off and tells everyone involved except
@@ -365,7 +415,7 @@ func (h *Hub) abortAdmissionFor(room *state.Room, u *state.User, reason string) 
 		return
 	}
 	admit := match.CurrentAdmission()
-	if admit == nil || admit.Joiner == nil || admit.Joiner.ID != u.ID {
+	if admit == nil || admit.Joiner == nil || admit.Joiner.ID != u.Primary().ID {
 		return
 	}
 	h.abortAdmission(room, match, admit.ID, reason, 0)

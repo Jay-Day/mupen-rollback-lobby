@@ -148,7 +148,7 @@ func TestRoomListAndViewerCountsStayInOrder(t *testing.T) {
 	h, c, _ := listHub(t, 300*time.Millisecond)
 	addRoom(h, 1)
 	const matchID = 41
-	if !h.broadcasts.begin(matchID, 1, 77, []uint64{77}, "") {
+	if !h.broadcasts.begin(matchID, 1, 77, []uint64{77}, "", false) {
 		t.Fatal("begin")
 	}
 	t.Cleanup(func() { h.broadcasts.endByMatch(matchID) })
@@ -189,7 +189,7 @@ func TestViewerCountIsNotRepeated(t *testing.T) {
 	h, c, _ := listHub(t, 0)
 	addRoom(h, 1)
 	const matchID = 42
-	if !h.broadcasts.begin(matchID, 1, 77, []uint64{77}, "") {
+	if !h.broadcasts.begin(matchID, 1, 77, []uint64{77}, "", false) {
 		t.Fatal("begin")
 	}
 	t.Cleanup(func() { h.broadcasts.endByMatch(matchID) })

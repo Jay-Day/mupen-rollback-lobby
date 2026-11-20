@@ -70,6 +70,35 @@ func TestParseRejectsInvalid(t *testing.T) {
 	}
 }
 
+func TestKeyframeOnDemandSetting(t *testing.T) {
+	if Defaults().LiveReplayKeyframeOnDemand {
+		t.Fatal("keyframes on demand should be off by default")
+	}
+	s, unknown, err := Parse([]byte(`{"liveReplayKeyframeOnDemand": true, "liveReplayKeyframeSeconds": 45}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unknown) != 0 {
+		t.Fatalf("unexpected unknown keys %v", unknown)
+	}
+	if !s.LiveReplayKeyframeOnDemand || s.LiveReplayKeyframeSeconds != 45 {
+		t.Fatalf("parsed %+v", s)
+	}
+	if _, _, err := Parse([]byte(`{"liveReplayKeyframeOnDemand": "yes"}`)); err == nil {
+		t.Fatal("a non-boolean liveReplayKeyframeOnDemand was accepted")
+	}
+	changes := diff(Defaults(), s)
+	found := false
+	for i := 0; i+1 < len(changes); i += 2 {
+		if changes[i] == "liveReplayKeyframeOnDemand" {
+			found = changes[i+1] == "true (was false)"
+		}
+	}
+	if !found {
+		t.Fatalf("reload diff doesn't report the change: %v", changes)
+	}
+}
+
 func TestReloadLogsChanges(t *testing.T) {
 	a, _, _ := Parse([]byte(`{}`))
 	b, _, _ := Parse([]byte(`{"roomCreateLimit": 3, "spectateLimit": 4}`))

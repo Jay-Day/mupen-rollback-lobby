@@ -2,6 +2,8 @@ package state
 
 import (
 	"strings"
+
+	"github.com/jay-day/rmgk-lobby/internal/usernames"
 	"sync"
 	"time"
 )
@@ -51,10 +53,23 @@ type Room struct {
 	Password          string
 	// QuickMatch rooms are paired by the matchmaker; nobody joins them mid-match.
 	QuickMatch bool
+	// Private rooms were made for a challenge and hold exactly its players.
+	// ROOM_JOIN never gets into them, even into a seat someone left; only an invite
+	// from someone inside can fill that seat.
+	Private bool
 	// SaveData describes the host's pick of starting save for the next match;
 	// nil when the match starts blank. The save itself never passes through
 	// the server.
 	SaveData *SaveDataInfo
+	// GameOptions are the per-game options the host turned on for the next
+	// match, in the host's order; nil when none are. The server never sees
+	// what they do to the game. Replaced whole, never changed in place.
+	GameOptions []GameOption
+	// Join limits, set by the host: the highest ping to the host a joiner may
+	// have (0 takes any), and whether a PC on Wi-Fi may join at all. Players
+	// already seated stay when they change.
+	MaxPing   int
+	WiredOnly bool
 
 	Players    []*RoomSeat
 	Spectators []*User
@@ -89,32 +104,45 @@ func (r *Room) Snapshot() (id, hostID uint64, name string, players, max int, st 
 }
 
 func (r *Room) AddPlayer(u *User) error {
+	return r.AddPlayers([]*User{u})
+}
+
+// AddPlayers seats users together or not at all, so a PC's local players never
+// end up split across a room's last free seat.
+func (r *Room) AddPlayers(users []*User) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.Players) >= r.MaxPlayers {
+	free := r.MaxPlayers - len(r.Players)
+	if free <= 0 {
 		return ErrRoomFull
+	}
+	if len(users) > free {
+		return ErrNotEnoughSeats
 	}
 	// Pick the lowest free slot in [1..MaxPlayers] so leavers' slots get
 	// reused without shifting the surviving players' slot numbers. Slot
 	// stability matters because GekkoNet keys actors by slot at MATCH_BEGIN,
 	// and clients render seat rows by slot.
-	used := make(map[int]bool, len(r.Players))
+	used := make(map[int]bool, len(r.Players)+len(users))
 	for _, seat := range r.Players {
 		used[seat.Slot] = true
 	}
-	slot := 0
-	for s := 1; s <= r.MaxPlayers; s++ {
-		if !used[s] {
-			slot = s
-			break
+	for _, u := range users {
+		slot := 0
+		for s := 1; s <= r.MaxPlayers; s++ {
+			if !used[s] {
+				slot = s
+				break
+			}
 		}
+		used[slot] = true
+		r.Players = append(r.Players, &RoomSeat{
+			User:       u,
+			Slot:       slot,
+			FrameDelay: r.Delay,
+			DelayAuto:  r.DelayAuto,
+		})
 	}
-	r.Players = append(r.Players, &RoomSeat{
-		User:       u,
-		Slot:       slot,
-		FrameDelay: r.Delay,
-		DelayAuto:  r.DelayAuto,
-	})
 	return nil
 }
 
@@ -205,6 +233,27 @@ func (r *Room) SetLateJoinEnabled(enabled bool) bool {
 	return true
 }
 
+// JoinLimits returns the room's maximum ping (0 for any) and whether it's
+// wired only.
+func (r *Room) JoinLimits() (maxPing int, wiredOnly bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.MaxPing, r.WiredOnly
+}
+
+// SetJoinLimits updates who may join and reports whether it changed. The
+// caller is responsible for host checks and for clamping maxPing.
+func (r *Room) SetJoinLimits(maxPing int, wiredOnly bool) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.MaxPing == maxPing && r.WiredOnly == wiredOnly {
+		return false
+	}
+	r.MaxPing = maxPing
+	r.WiredOnly = wiredOnly
+	return true
+}
+
 // SaveDataInfo is what the room is told about the host's starting save.
 type SaveDataInfo struct {
 	Label string
@@ -234,6 +283,49 @@ func saveDataEqual(a, b *SaveDataInfo) bool {
 	}
 	for i := range a.Kinds {
 		if a.Kinds[i] != b.Kinds[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// GameOption is one of the host's game options: an opaque id and the label
+// players are shown.
+type GameOption struct {
+	ID    string
+	Label string
+}
+
+// GameOptionList returns the room's game options (nil when none are on). The
+// slice is never changed in place, so callers may keep it.
+func (r *Room) GameOptionList() []GameOption {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.GameOptions
+}
+
+// SetGameOptions replaces the room's game options (empty turns them all off)
+// and reports whether they changed. The caller is responsible for host/state
+// checks and validation.
+func (r *Room) SetGameOptions(opts []GameOption) bool {
+	if len(opts) == 0 {
+		opts = nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if gameOptionsEqual(r.GameOptions, opts) {
+		return false
+	}
+	r.GameOptions = opts
+	return true
+}
+
+func gameOptionsEqual(a, b []GameOption) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
 			return false
 		}
 	}
@@ -271,6 +363,40 @@ func (r *Room) SwapSlots(slotA, slotB int) bool {
 	return true
 }
 
+// SetMaxPlayers changes the number of seats and reports whether it changed.
+// It refuses fewer seats than players seated; anyone in a seat that goes away
+// moves to the lowest free one. The caller checks host, state and range.
+func (r *Room) SetMaxPlayers(max int) (changed bool, ok bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if max < len(r.Players) {
+		return false, false
+	}
+	if max == r.MaxPlayers {
+		return false, true
+	}
+	used := make(map[int]bool, len(r.Players))
+	for _, seat := range r.Players {
+		if seat.Slot <= max {
+			used[seat.Slot] = true
+		}
+	}
+	for _, seat := range r.Players {
+		if seat.Slot <= max {
+			continue
+		}
+		for s := 1; s <= max; s++ {
+			if !used[s] {
+				seat.Slot = s
+				used[s] = true
+				break
+			}
+		}
+	}
+	r.MaxPlayers = max
+	return true, true
+}
+
 // MarkKicked bars a user from rejoining this room. The set belongs to the Room,
 // so it disappears automatically only when the room itself is destroyed.
 func (r *Room) MarkKicked(userID uint64, username string) {
@@ -283,7 +409,7 @@ func (r *Room) MarkKicked(userID uint64, username string) {
 		r.kickedUsernames = make(map[string]struct{})
 	}
 	r.kickedUserIDs[userID] = struct{}{}
-	r.kickedUsernames[strings.ToLower(strings.TrimSpace(username))] = struct{}{}
+	r.kickedUsernames[usernames.Key(strings.TrimSpace(username))] = struct{}{}
 }
 
 // WasKicked reports whether a user is barred from this room. Username matching
@@ -295,7 +421,7 @@ func (r *Room) WasKicked(userID uint64, username string) bool {
 	if _, kicked := r.kickedUserIDs[userID]; kicked {
 		return true
 	}
-	_, kicked := r.kickedUsernames[strings.ToLower(strings.TrimSpace(username))]
+	_, kicked := r.kickedUsernames[usernames.Key(strings.TrimSpace(username))]
 	return kicked
 }
 
