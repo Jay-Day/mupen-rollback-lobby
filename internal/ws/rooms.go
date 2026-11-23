@@ -46,8 +46,11 @@ func onWiFi(u *state.User) bool {
 
 // joinLimitsRefusal says why u's PC may not join room, or "" when it may.
 // pingMs is the joiner's own report (0 when unknown, which passes): the
-// server can't measure the path between two players.
-func joinLimitsRefusal(u *state.User, room *state.Room, pingMs int) string {
+// server can't measure the path between two players. From a client with ping
+// checks, only a measured ping is held to the limit: an estimate alone never
+// turns anyone away, and the in-room measurement gates Start anyway. Older
+// clients don't say which theirs is, so theirs is held to it as sent.
+func joinLimitsRefusal(u *state.User, room *state.Room, pingMs int, measured bool) string {
 	maxPing, wiredOnly := room.JoinLimits()
 	if wiredOnly {
 		for _, member := range u.Group() {
@@ -56,8 +59,36 @@ func joinLimitsRefusal(u *state.User, room *state.Room, pingMs int) string {
 			}
 		}
 	}
-	if maxPing > 0 && pingMs > maxPing {
+	if maxPing > 0 && pingMs > maxPing && (measured || !u.Primary().PingCheck) {
 		return protocol.ReasonPingTooHigh
+	}
+	return ""
+}
+
+// joinRefusal says why u's PC may not join room, or "" when it may, as far as
+// who they are goes: the room's limits, password and free seats are checked
+// apart. ROOM_JOIN and PING_CHECK_REQUEST share it, so a ping check reaches
+// only a host the requester could join.
+func joinRefusal(u *state.User, room *state.Room) string {
+	if room.Private {
+		return protocol.ReasonPrivateRoom
+	}
+	// A kick is permanent for this room object. Destroying the room destroys the
+	// ban list, so the same user may join a newly created room normally.
+	for _, member := range u.Group() {
+		if room.WasKicked(member.ID, member.Username) {
+			return protocol.ReasonKickedFromRoom
+		}
+	}
+	if reason := localPlayersRefusal(u, room); reason != "" {
+		return reason
+	}
+	// A running match takes new members only when it can add them later: the
+	// host then decides when they join (MATCH_ADMIT). Until then they sit in a
+	// free seat outside the match.
+	if room.State != state.RoomStateWaiting &&
+		!(roomAcceptsLateJoin(room) && canLateJoin(u)) {
+		return protocol.ReasonAlreadyStarted
 	}
 	return ""
 }
@@ -214,35 +245,12 @@ func (h *Hub) handleRoomJoin(c *Client, env protocol.Envelope) {
 		c.sendRoomJoinFail(env.ID, protocol.ReasonRoomNotFound)
 		return
 	}
-	if room.Private {
-		c.sendRoomJoinFail(env.ID, protocol.ReasonPrivateRoom)
-		return
-	}
-
-	// A kick is permanent for this room object. Destroying the room destroys the
-	// ban list, so the same user may join a newly created room normally.
-	group := c.user.Group()
-	for _, u := range group {
-		if room.WasKicked(u.ID, u.Username) {
-			c.sendRoomJoinFail(env.ID, protocol.ReasonKickedFromRoom)
-			return
-		}
-	}
-	if reason := localPlayersRefusal(c.user, room); reason != "" {
+	if reason := joinRefusal(c.user, room); reason != "" {
 		c.sendRoomJoinFail(env.ID, reason)
 		return
 	}
-
-	// A running match takes new members only when it can add them later: the
-	// host then decides when they join (MATCH_ADMIT). Until then they sit in a
-	// free seat outside the match.
-	if room.State != state.RoomStateWaiting &&
-		!(roomAcceptsLateJoin(room) && canLateJoin(c.user)) {
-		c.sendRoomJoinFail(env.ID, protocol.ReasonAlreadyStarted)
-		return
-	}
 	// Before the password: the limits are public, so there's no point asking.
-	if reason := joinLimitsRefusal(c.user, room, req.PingMs); reason != "" {
+	if reason := joinLimitsRefusal(c.user, room, req.PingMs, req.PingMeasured); reason != "" {
 		c.sendRoomJoinFail(env.ID, reason)
 		return
 	}

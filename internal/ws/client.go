@@ -59,6 +59,9 @@ type Client struct {
 
 	// CHALLENGE_SEND flood window. Same read-loop-only rule.
 	challengeTimes []time.Time
+
+	// PING_CHECK_REQUEST flood window. Same read-loop-only rule.
+	pingCheckTimes []time.Time
 }
 
 const (

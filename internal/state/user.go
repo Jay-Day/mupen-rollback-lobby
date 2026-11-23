@@ -43,6 +43,7 @@ type User struct {
 	SpectatorChat bool   // shares a match's spectator chat with its players
 	SaveData      bool   // can play a match that starts from the host's save data
 	GameOptions   bool   // can play a match with the host's game options on
+	PingCheck     bool   // measures ping over probe ICE agents outside a room (PING_CHECK_*)
 	// The PC doesn't take challenges. Set on the connection's owner only; its
 	// local players follow it (see ChallengesOff).
 	NoChallenges bool

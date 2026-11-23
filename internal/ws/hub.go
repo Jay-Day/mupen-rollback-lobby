@@ -63,6 +63,7 @@ type Hub struct {
 	lobbyChat  *chatHistory
 	matchmaker *matchmaker
 	challenges *challengeManager
+	pingChecks *pingCheckManager
 	broadcasts *broadcastManager
 	mod        *moderation.Manager
 	settings   *config.Store // nil = built-in defaults
@@ -107,6 +108,7 @@ func NewHub(s *state.State, udpPublicAddr string, iceConfig protocol.ICEConfigur
 		lobbyChat:     newChatHistory(),
 		matchmaker:    newMatchmaker(),
 		challenges:    newChallengeManager(),
+		pingChecks:    newPingCheckManager(sendPingCheckEnds),
 		mod:           mod,
 		settings:      settings,
 		roomListKick:  make(chan struct{}, 1),
@@ -182,8 +184,10 @@ func (h *Hub) cleanupClient(c *Client) {
 	// Drop from matchmaker queue if present.
 	h.matchmaker.remove(uid)
 
-	// Challenges to or from this PC are over.
+	// Challenges to or from this PC are over, and with them its ping checks:
+	// at once, not after the grace, so no timer outlives the connection.
 	h.endChallengesFor(c.user, protocol.ChallengeUnavailable)
+	h.endPingChecksFor(c.user)
 	if on, _ := c.moderatorState(); on {
 		h.broadcastModPeers()
 	}
@@ -396,6 +400,7 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		GameOptions:   req.GameOptions,
 		NoChallenges:  req.NoChallenges,
 		NoPrivateMessages: req.NoPrivateMessages,
+		PingCheck:     req.PingCheck,
 		JoinedAt:      time.Now(),
 		LastSeen:      time.Now(),
 		Send:          c.send,
@@ -427,6 +432,7 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		SpectatorChat:     true,
 		ChallengeSettings: true,
 		PMSettings:        true,
+		PingCheck:         true,
 	}
 	c.sendEnvelope(protocol.TypeHelloOK, env.ID, resp)
 
@@ -483,6 +489,8 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 		h.handleRoomSwapSlots(c, env)
 	case protocol.TypePingProbeRequest:
 		h.handlePingProbeRequest(c, env)
+	case protocol.TypePingCheckRequest:
+		h.handlePingCheckRequest(c, env)
 	case protocol.TypeMatchConnected:
 		h.handleMatchConnected(c, env)
 	case protocol.TypeMatchPunchFailed:
@@ -540,10 +548,15 @@ func (h *Hub) dispatch(c *Client, env protocol.Envelope) {
 
 // handleICESignal relays one ICE description/candidate between two users in
 // the same room. Authentication supplies FromUserID; clients cannot spoof it
-// or use this endpoint to signal arbitrary lobby users.
+// or use this endpoint to signal arbitrary lobby users. A ping check's probe
+// signals go between two PCs that hold a grant instead (relayProbeSignal).
 func (h *Hub) handleICESignal(c *Client, env protocol.Envelope) {
 	var req protocol.ICESignalRequest
 	if err := json.Unmarshal(env.Data, &req); err != nil {
+		return
+	}
+	if req.Probe {
+		h.relayProbeSignal(c, env.ID, req)
 		return
 	}
 	room := c.user.CurrentRoom

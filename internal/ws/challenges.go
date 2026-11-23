@@ -123,6 +123,14 @@ func (m *challengeManager) takeWhere(keep func(*challenge) bool) []*challenge {
 	return out
 }
 
+// isPending reports whether challenge id is still waiting for an answer.
+func (m *challengeManager) isPending(id uint64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.pending[id]
+	return ok
+}
+
 func (m *challengeManager) noteDeclined(from, to uint64, now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -307,17 +315,19 @@ func (h *Hub) handleChallengeSend(c *Client, env protocol.Envelope) {
 		return
 	}
 	id := ch.id
+	pingForSender, pingForRecipient := h.openChallengePingCheck(ch)
 
 	slog.Info("challenge sent", "id", id, "from", c.user.Username, "to", target.Username,
-		"rom", ch.rom.Name, "invite", ch.roomID != 0)
+		"rom", ch.rom.Name, "invite", ch.roomID != 0, "ping_check", pingForSender != 0)
 	expires := challengeAnswerTime.Milliseconds()
 	c.sendEnvelope(protocol.TypeChallengeSent, env.ID, protocol.ChallengeSentPayload{
-		ChallengeID: id,
-		ToUserID:    target.ID,
-		ToUsername:  target.Username,
-		Rom:         ch.rom,
-		ExpiresInMs: expires,
-		Invite:      ch.roomID != 0,
+		ChallengeID:    id,
+		ToUserID:       target.ID,
+		ToUsername:     target.Username,
+		Rom:            ch.rom,
+		ExpiresInMs:    expires,
+		Invite:         ch.roomID != 0,
+		PingPeerUserID: pingForSender,
 	})
 	incoming.ChallengeID = id
 	incoming.FromUserID = c.user.ID
@@ -327,6 +337,7 @@ func (h *Hub) handleChallengeSend(c *Client, env protocol.Envelope) {
 	incoming.Rom = ch.rom
 	incoming.Note = note
 	incoming.ExpiresInMs = expires
+	incoming.PingPeerUserID = pingForRecipient
 	sendToUser(target, protocol.TypeChallengeIncoming, incoming)
 }
 
@@ -456,8 +467,10 @@ func (h *Hub) acceptInvite(c *Client, ch *challenge) string {
 	return protocol.ChallengeAccepted
 }
 
-// finishChallenge tells both sides how a challenge ended.
+// finishChallenge tells both sides how a challenge ended. Its ping check
+// outlives it by pingCheckGrace, so a sample on its way can still land.
 func (h *Hub) finishChallenge(ch *challenge, result string) {
+	h.pingChecks.release(ch.id)
 	slog.Info("challenge ended", "id", ch.id, "from", ch.from.user.Username, "to", ch.to.Username, "result", result)
 	payload := protocol.ChallengeResultPayload{ChallengeID: ch.id, ToUserID: ch.to.ID, Result: result}
 	ch.from.sendEnvelope(protocol.TypeChallengeResult, "", payload)
