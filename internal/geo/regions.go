@@ -28,10 +28,11 @@ const (
 	RegionAsiaSE    = "asia-se"
 	RegionOceania   = "oceania"
 
-	// DefaultRegion is returned when the IP is private, malformed, or maps
-	// to a country we haven't mapped. us-east is the most populated bucket
-	// for this game's audience.
-	DefaultRegion = RegionUSEast
+	// RegionUnknown is returned when the IP is private, malformed, or maps to
+	// a country we haven't mapped. Clients show no ping estimate for it: the
+	// old us-east guess told players in Africa or the Middle East that they
+	// were 30 ms from New York.
+	RegionUnknown = ""
 )
 
 // countryToRegion buckets ISO 3166-1 alpha-2 codes into the lobby's regions.
@@ -45,6 +46,23 @@ var countryToRegion = map[string]string{
 	"US": RegionUSCentral,
 	"CA": RegionUSCentral,
 	"MX": RegionUSCentral,
+
+	// Central America and the Caribbean (with Bermuda): their traffic to the
+	// US goes through Miami and the East Coast, so us-east is the honest
+	// guess. Listed so they don't fall through to RegionUnknown.
+	"BZ": RegionUSEast, "GT": RegionUSEast, "SV": RegionUSEast,
+	"HN": RegionUSEast, "NI": RegionUSEast, "CR": RegionUSEast,
+	"PA": RegionUSEast,
+	"CU": RegionUSEast, "JM": RegionUSEast, "HT": RegionUSEast,
+	"DO": RegionUSEast, "PR": RegionUSEast, "BS": RegionUSEast,
+	"BB": RegionUSEast, "TT": RegionUSEast, "AG": RegionUSEast,
+	"DM": RegionUSEast, "GD": RegionUSEast, "KN": RegionUSEast,
+	"LC": RegionUSEast, "VC": RegionUSEast, "AW": RegionUSEast,
+	"CW": RegionUSEast, "SX": RegionUSEast, "BQ": RegionUSEast,
+	"KY": RegionUSEast, "TC": RegionUSEast, "VG": RegionUSEast,
+	"VI": RegionUSEast, "AI": RegionUSEast, "MS": RegionUSEast,
+	"BL": RegionUSEast, "MF": RegionUSEast, "GP": RegionUSEast,
+	"MQ": RegionUSEast, "BM": RegionUSEast,
 
 	// South America
 	"BR": RegionSA, "AR": RegionSA, "CL": RegionSA, "CO": RegionSA,
@@ -94,34 +112,25 @@ var countryToRegion = map[string]string{
 	"KI": RegionOceania, "TV": RegionOceania, "NR": RegionOceania,
 	"PW": RegionOceania, "FM": RegionOceania, "MH": RegionOceania,
 
-	// Africa, Middle East, and anything not above falls through to
-	// DefaultRegion in RegionFromIP — keeping the table small.
+	// Africa, the Middle East, and anything not above is RegionUnknown: no
+	// estimate beats a wrong one.
 }
 
 // RegionFromIP resolves a string IP (as captured from the client's WS
-// connection) to a region code. Empty/invalid/private IPs map to
-// DefaultRegion. The country code is consulted internally but never
-// returned — callers only see the bucketed region.
+// connection) to a region code. Empty/invalid/private IPs, and countries
+// the table doesn't list, map to RegionUnknown. The country code is
+// consulted internally but never returned — callers only see the bucketed
+// region.
 func RegionFromIP(ipStr string) string {
-	if ipStr == "" {
-		return DefaultRegion
-	}
-	ip := net.ParseIP(ipStr)
-	if ip == nil {
-		return DefaultRegion
-	}
-	if !isPublicUnicast(ip) {
-		return DefaultRegion
-	}
-	raw := iploc.Country(ip)
-	if len(raw) != 2 {
-		return DefaultRegion
-	}
-	cc := strings.ToUpper(string(raw))
+	return regionForCountry(CountryFromIP(ipStr))
+}
+
+// regionForCountry buckets an upper-case country code, "" when unknown.
+func regionForCountry(cc string) string {
 	if region, ok := countryToRegion[cc]; ok {
 		return region
 	}
-	return DefaultRegion
+	return RegionUnknown
 }
 
 // RefineNorthAmerica splits the country-level North America bucket into
@@ -158,11 +167,21 @@ func CountryFromIP(ipStr string) string {
 	if ip == nil || !isPublicUnicast(ip) {
 		return ""
 	}
-	raw := iploc.Country(ip)
+	return countryCode(iploc.Country(ip))
+}
+
+// countryCode is the lookup's answer as a country code, "" when it has none.
+// The database answers ZZ for an address it can't place; that's no country,
+// and clients would draw it as one.
+func countryCode(raw string) string {
 	if len(raw) != 2 {
 		return ""
 	}
-	return strings.ToUpper(string(raw))
+	cc := strings.ToUpper(raw)
+	if cc == "ZZ" {
+		return ""
+	}
+	return cc
 }
 
 // isPublicUnicast filters out loopback, link-local, multicast, and RFC1918

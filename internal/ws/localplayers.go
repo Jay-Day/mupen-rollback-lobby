@@ -115,6 +115,7 @@ func (h *Hub) handleLocalPlayerAdd(c *Client, env protocol.Envelope) {
 		SpectatorChat: owner.SpectatorChat,
 		SaveData:      owner.SaveData,
 		GameOptions:   owner.GameOptions,
+		PingCheck:     owner.PingCheck,
 		PingToServer:  owner.PingToServer,
 		JoinedAt:      time.Now(),
 		LastSeen:      time.Now(),
@@ -155,6 +156,7 @@ func (h *Hub) handleLocalPlayerRemove(c *Client, env protocol.Envelope) {
 	}
 	h.state.RemoveUser(local.ID)
 	h.endChallengesTo(local, protocol.ChallengeUnavailable)
+	h.endPingChecksAs(local)
 	slog.Info("local player removed", "owner", c.user.Username, "name", local.Username, "id", local.ID)
 	c.sendEnvelope(protocol.TypeLocalPlayerRemoved, env.ID, protocol.LocalPlayerRemovedPayload{UserID: local.ID})
 	h.broadcastPresenceRemoved(local.ID)

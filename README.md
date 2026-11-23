@@ -28,6 +28,32 @@ deployment.
 The existing UDP anchor options remain available for older clients, but
 ICE-capable rollback-lobby clients do not use that anchor.
 
+### Ping checks
+
+Clients that say `pingCheck` in `HELLO` (the server answers `pingCheck` in
+`HELLO_OK`) measure the real ping between two PCs over ICE before they
+connect, instead of only the region estimate. ICE signals marked `probe`
+travel outside any room, so the server relays them only between the two PCs
+of a grant:
+
+- a challenge or invite: from `CHALLENGE_SEND` until it ends, plus 5 seconds.
+  `CHALLENGE_SENT` and `CHALLENGE_INCOMING` carry `pingPeerUserId`, the id to
+  probe.
+- `PING_CHECK_REQUEST` for a room the requester could join (its password
+  included): the requester and the room's host, for 15 seconds.
+  `PING_CHECK_REPLY` answers it, and the host gets `PING_CHECK_INCOMING`.
+
+`PING_CHECK_END` tells both PCs when a grant is over; a disconnect ends its
+grants at once. Probes are routed by the id each side already knows the other
+by, which may be a local player's, so nobody learns which accounts share a
+PC. A `ROOM_JOIN` from such a client is held to the room's maximum ping only
+when it says `pingMeasured`: an estimate alone never turns anyone away. Older
+clients are held to the `pingMs` they send, as before.
+
+Countries the region table doesn't list (most of Africa and the Middle East)
+and addresses with no country get no region (`""`), so clients show no
+estimate. Central America and the Caribbean count as `us-east`.
+
 
 ## Runtime settings (lobby.json)
 
@@ -113,7 +139,7 @@ second however many players cause changes.
 | Budget | Requests | Default per IP |
 | --- | --- | --- |
 | `roomCreate` | Create Room | 5 per minute |
-| `roomJoin` | Joining a room (every attempt, wrong passwords too), starting a Quick Match search | 15 per minute |
+| `roomJoin` | Joining a room (every attempt, wrong passwords too), a ping check for a room with a password, starting a Quick Match search | 15 per minute |
 | `matchStart` | Start, and adding a player to a running game | 10 per minute |
 | `spectate` | Opening a live replay (each sends the viewer megabytes) | 10 per minute |
 | `roomUpdate` | Delay, prediction, live replay, late join and save data settings, seat swaps (seen only by the room) | 40 per 10 seconds |
@@ -130,6 +156,10 @@ moderators aren't limited, and neither are loopback addresses, so local
 multi-client testing works. A build made with `go build -tags
 ratelimit_loopback` limits loopback addresses too (and bans them): use it
 only on a local test rig.
+
+[Ping checks](#ping-checks) have limits of their own, for everyone: 8
+`PING_CHECK_REQUEST`s per connection every 30 seconds, and 200 probe
+signals from each side of a grant.
 
 ### What a player sees
 

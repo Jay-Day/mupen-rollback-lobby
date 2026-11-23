@@ -83,6 +83,10 @@ const (
 	TypeChallengeSettings = "CHALLENGE_SETTINGS"
 	// Whether this PC takes private messages. Shown in presence like challenges.
 	TypePMSettings = "PM_SETTINGS"
+	// Asks to measure the ping to a room's host before joining it. The server
+	// checks the joiner could join, then lets the two PCs exchange probe
+	// ICE_SIGNALs for a while (see PingCheckRequest).
+	TypePingCheckRequest = "PING_CHECK_REQUEST"
 )
 
 // Server → Client message types
@@ -151,6 +155,13 @@ const (
 	TypeModResult      = "MOD_RESULT"       // a kick/mute/timeout/ban took effect
 	TypeModTargetInfo  = "MOD_TARGET_INFO"  // reply to a moderator's "inspect" action
 	TypeModPeers       = "MOD_PEERS"        // who is a moderator, to moderators
+
+	// Ping checks (server → client). PING_CHECK_REPLY answers PING_CHECK_REQUEST;
+	// PING_CHECK_INCOMING tells the room's host someone is about to probe it;
+	// PING_CHECK_END tells both PCs their probe grant is over.
+	TypePingCheckReply    = "PING_CHECK_REPLY"
+	TypePingCheckIncoming = "PING_CHECK_INCOMING"
+	TypePingCheckEnd      = "PING_CHECK_END"
 )
 
 // Failure reason codes
@@ -194,6 +205,10 @@ const (
 	// Wi-Fi, or the joiner's ping to the host is over the room's maximum.
 	ReasonWiredOnly   = "wired_only"
 	ReasonPingTooHigh = "ping_too_high"
+	// A ping check can't happen: the host's client can't take one, or anything
+	// else that would say how many players share a PC. No more than that, on
+	// purpose, like ChallengeUnavailable.
+	ReasonPingCheckUnavailable = "unavailable"
 )
 
 // How a challenge ended, or why CHALLENGE_SEND was refused (ReasonNeedsUpdate
@@ -259,6 +274,10 @@ type HelloRequest struct {
 	NoChallenges bool `json:"noChallenges,omitempty"`
 	// This PC doesn't take private messages (PM_SETTINGS changes it later).
 	NoPrivateMessages bool `json:"noPrivateMessages,omitempty"`
+	// Advertises support for ping checks: probe ICE agents outside a room,
+	// PING_CHECK_* and ROOM_JOIN's PingMeasured. Without it the server holds
+	// ROOM_JOIN's PingMs to the room's limit as sent.
+	PingCheck bool `json:"pingCheck,omitempty"`
 }
 
 type HeartbeatRequest struct {
@@ -309,6 +328,9 @@ type RoomJoinRequest struct {
 	// estimated from regions. Zero when unknown. Only a room with a maximum
 	// ping reads it; the server has no way to measure it itself.
 	PingMs int `json:"pingMs,omitempty"`
+	// PingMs was measured, not estimated. From a client with ping checks, only
+	// a measured ping can be turned away: an estimate alone never is.
+	PingMeasured bool `json:"pingMeasured,omitempty"`
 }
 
 type RoomKickRequest struct {
@@ -447,6 +469,17 @@ type ICESignalRequest struct {
 	Kind         string `json:"kind"`
 	Value        string `json:"value,omitempty"`
 	Generation   uint32 `json:"generation"`
+	// Probe signals belong to a ping check, outside any room (RoomID 0). They
+	// reach the target only while the two PCs hold a ping check grant.
+	Probe bool `json:"probe,omitempty"`
+}
+
+// PingCheckRequest asks to measure the ping to a room's host. Password is the
+// room's, when it has one: without it the host's address would reach people
+// who can't join.
+type PingCheckRequest struct {
+	RoomID   uint64 `json:"roomId"`
+	Password string `json:"password,omitempty"`
 }
 
 // QuickMatchJoinRequest scopes a quick-match search to a specific ROM. The
@@ -520,6 +553,9 @@ type HelloOKResponse struct {
 	ChallengeSettings bool `json:"challengeSettings,omitempty"`
 	// PMSettings tells the client PM_SETTINGS works here.
 	PMSettings bool `json:"pmSettings,omitempty"`
+	// PingCheck tells the client ping checks (PING_CHECK_*, probe ICE_SIGNALs)
+	// work here.
+	PingCheck bool `json:"pingCheck,omitempty"`
 }
 
 type LocalPlayerAddedPayload struct {
@@ -755,6 +791,10 @@ type ChallengeSentPayload struct {
 	Rom         RomInfo `json:"rom"`
 	ExpiresInMs int64   `json:"expiresInMs"`
 	Invite      bool    `json:"invite,omitempty"`
+	// PingPeerUserID is the probe ICE_SIGNAL target for measuring the ping to
+	// the other PC while the challenge is open (ToUserID). Omitted when the
+	// two PCs can't ping check.
+	PingPeerUserID uint64 `json:"pingPeerUserId,omitempty"`
 }
 
 // ChallengeIncomingPayload reaches the challenged player's connection. ToUserID
@@ -772,6 +812,9 @@ type ChallengeIncomingPayload struct {
 	RoomName     string  `json:"roomName,omitempty"`
 	RoomPlayers  int     `json:"roomPlayers,omitempty"`
 	RoomMax      int     `json:"roomMaxPlayers,omitempty"`
+	// PingPeerUserID: as ChallengeSentPayload's, for the sender's PC
+	// (FromUserID).
+	PingPeerUserID uint64 `json:"pingPeerUserId,omitempty"`
 }
 
 // ChallengeResultPayload ends a challenge, or refuses a CHALLENGE_SEND, in which
@@ -895,6 +938,34 @@ type ICESignalPayload struct {
 	Kind       string `json:"kind"`
 	Value      string `json:"value,omitempty"`
 	Generation uint32 `json:"generation"`
+	// Probe: a ping check's signal (RoomID 0). FromUserID is then the id the
+	// receiver knows the sender's PC by in that ping check.
+	Probe bool `json:"probe,omitempty"`
+}
+
+// PingCheckReplyPayload answers a PING_CHECK_REQUEST. When OK, PeerUserID is
+// the probe ICE_SIGNAL target (the host's PC, as room state names its peer)
+// for ExpiresInMs from now; otherwise Reason says why not (ROOM_JOIN_FAIL's
+// reasons, ReasonTooFast and ReasonPingCheckUnavailable).
+type PingCheckReplyPayload struct {
+	RoomID      uint64 `json:"roomId"`
+	OK          bool   `json:"ok"`
+	PeerUserID  uint64 `json:"peerUserId,omitempty"`
+	ExpiresInMs int64  `json:"expiresInMs,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+}
+
+// PingCheckIncomingPayload tells a room's host that FromUserID's PC will
+// probe it for the next ExpiresInMs.
+type PingCheckIncomingPayload struct {
+	FromUserID  uint64 `json:"fromUserId"`
+	ExpiresInMs int64  `json:"expiresInMs"`
+}
+
+// PingCheckEndPayload: probe signals to and from PeerUserID no longer get
+// through.
+type PingCheckEndPayload struct {
+	PeerUserID uint64 `json:"peerUserId"`
 }
 
 type MatchPeerLeftPayload struct {
