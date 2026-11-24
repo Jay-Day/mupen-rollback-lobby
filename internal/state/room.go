@@ -65,6 +65,10 @@ type Room struct {
 	// match, in the host's order; nil when none are. The server never sees
 	// what they do to the game. Replaced whole, never changed in place.
 	GameOptions []GameOption
+	// GameOptionsPreset names the preset those options make up, when the host
+	// picked one; nil otherwise, and always nil without options. Replaced
+	// with them.
+	GameOptionsPreset *GameOptionPreset
 	// Join limits, set by the host: the highest ping to the host a joiner may
 	// have (0 takes any), and whether a PC on Wi-Fi may join at all. Players
 	// already seated stay when they change.
@@ -296,6 +300,13 @@ type GameOption struct {
 	Label string
 }
 
+// GameOptionPreset is the preset the host's game options make up: an opaque
+// id and the label players are shown.
+type GameOptionPreset struct {
+	ID    string
+	Label string
+}
+
 // GameOptionList returns the room's game options (nil when none are on). The
 // slice is never changed in place, so callers may keep it.
 func (r *Room) GameOptionList() []GameOption {
@@ -304,19 +315,32 @@ func (r *Room) GameOptionList() []GameOption {
 	return r.GameOptions
 }
 
+// GameOptionsPresetInfo returns the preset the room's game options make up,
+// or nil. The value is never changed in place, so callers may keep it.
+func (r *Room) GameOptionsPresetInfo() *GameOptionPreset {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.GameOptionsPreset
+}
+
 // SetGameOptions replaces the room's game options (empty turns them all off)
-// and reports whether they changed. The caller is responsible for host/state
-// checks and validation.
-func (r *Room) SetGameOptions(opts []GameOption) bool {
+// and the preset they make up (nil for none, and always none without
+// options), and reports whether either changed. The caller is responsible for
+// host/state checks and validation.
+func (r *Room) SetGameOptions(opts []GameOption, preset *GameOptionPreset) bool {
 	if len(opts) == 0 {
 		opts = nil
+		preset = nil
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if gameOptionsEqual(r.GameOptions, opts) {
+	samePreset := (r.GameOptionsPreset == nil && preset == nil) ||
+		(r.GameOptionsPreset != nil && preset != nil && *r.GameOptionsPreset == *preset)
+	if gameOptionsEqual(r.GameOptions, opts) && samePreset {
 		return false
 	}
 	r.GameOptions = opts
+	r.GameOptionsPreset = preset
 	return true
 }
 

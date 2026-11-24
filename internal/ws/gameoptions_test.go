@@ -177,12 +177,12 @@ func TestGameOptionsRejectABadList(t *testing.T) {
 	one := func(id, label string) protocol.RoomUpdateGameOptionsRequest {
 		return protocol.RoomUpdateGameOptionsRequest{Options: []protocol.GameOption{{ID: id, Label: label}}}
 	}
-	nine := protocol.RoomUpdateGameOptionsRequest{}
+	tooMany := protocol.RoomUpdateGameOptionsRequest{}
 	for i := 0; i < gameOptionsMax+1; i++ {
-		nine.Options = append(nine.Options, protocol.GameOption{ID: fmt.Sprintf("opt-%d", i), Label: "Option"})
+		tooMany.Options = append(tooMany.Options, protocol.GameOption{ID: fmt.Sprintf("opt-%d", i), Label: "Option"})
 	}
 	bad := map[string]any{
-		"nine options":    nine,
+		"17 options":      tooMany,
 		"empty id":        one("", "Vanilla only"),
 		"upper-case id":   one("Vanilla-only", "Vanilla only"),
 		"underscore id":   one("vanilla_only", "Vanilla only"),
@@ -215,16 +215,16 @@ func TestGameOptionsRejectABadList(t *testing.T) {
 	}
 
 	// At the limits is fine, and the label is trimmed.
-	eight := protocol.RoomUpdateGameOptionsRequest{}
+	atLimits := protocol.RoomUpdateGameOptionsRequest{}
 	for i := 0; i < gameOptionsMax; i++ {
-		eight.Options = append(eight.Options, protocol.GameOption{ID: fmt.Sprintf("opt-%d", i), Label: "Option"})
+		atLimits.Options = append(atLimits.Options, protocol.GameOption{ID: fmt.Sprintf("opt-%d", i), Label: "Option"})
 	}
-	eight.Options[0] = protocol.GameOption{
+	atLimits.Options[0] = protocol.GameOption{
 		ID: strings.Repeat("a", gameOptionIDMax), Label: "  " + strings.Repeat("バ", gameOptionLabelMax) + "\n",
 	}
-	f.setGameOptions("host", eight)
+	f.setGameOptions("host", atLimits)
 	if len(f.room.GameOptions) != gameOptionsMax {
-		t.Fatalf("eight options at the limits were refused: %+v", f.room.GameOptions)
+		t.Fatalf("%d options at the limits were refused: %+v", gameOptionsMax, f.room.GameOptions)
 	}
 	if got := f.room.GameOptions[0].Label; got != strings.Repeat("バ", gameOptionLabelMax) {
 		t.Fatalf("label = %q, want it trimmed", got)
@@ -459,6 +459,253 @@ func TestGameOptionsLastTheRoomsLife(t *testing.T) {
 	})
 	if guest.CurrentRoom == nil || guest.CurrentRoom.GameOptions != nil {
 		t.Fatal("a new room doesn't start with no game options")
+	}
+}
+
+// optionsN is a list of n game options with distinct ids.
+func optionsN(n int) []protocol.GameOption {
+	out := make([]protocol.GameOption, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, protocol.GameOption{ID: fmt.Sprintf("opt-%d", i), Label: fmt.Sprintf("Option %d", i)})
+	}
+	return out
+}
+
+var oneVsOneVanilla = protocol.RoomUpdateGameOptionsRequest{
+	Options: []protocol.GameOption{{ID: "vanilla-css", Label: "Vanilla CSS"}, {ID: "tournament-rules", Label: "Tournament rules"}},
+	Preset:  &protocol.GameOptionPreset{ID: "1v1-vanilla", Label: "1v1 Vanilla"},
+}
+
+func TestHelloTakesHowManyGameOptionsAClientTakes(t *testing.T) {
+	cases := []struct {
+		capable bool
+		max     any // left out of HELLO when nil
+		limit   int
+	}{
+		{true, nil, gameOptionsLegacyMax}, // a client from before presets
+		{true, 16, 16},
+		{true, 12, 12},
+		{true, 4, gameOptionsLegacyMax},
+		{true, -3, gameOptionsLegacyMax},
+		{true, 1000, gameOptionsMax},
+		{false, 16, 0},
+	}
+	for _, tc := range cases {
+		h := NewHub(state.New(), "", protocol.ICEConfiguration{}, nil, nil)
+		c := &Client{hub: h, send: make(chan []byte, 64)}
+		fields := map[string]any{"username": "mira", "clientVersion": "vdev-test", "gameOptions": tc.capable}
+		if tc.max != nil {
+			fields["gameOptionsMax"] = tc.max
+		}
+		raw, _ := json.Marshal(fields)
+		if err := h.handleHello(c, protocol.Envelope{Type: protocol.TypeHello, Data: raw}); err != nil {
+			t.Fatalf("HELLO: %v", err)
+		}
+		if got := gameOptionsLimit(c.user); got != tc.limit {
+			t.Fatalf("HELLO gameOptions %v, gameOptionsMax %v: limit %d, want %d", tc.capable, tc.max, got, tc.limit)
+		}
+	}
+}
+
+func TestGameOptionPresetGoesWithTheOptions(t *testing.T) {
+	f := newLateJoinFixture(t, 2)
+	f.gameOptionsUser("host")
+	f.gameOptionsUser("guest")
+	f.openRoom(2, "host", "guest")
+	for _, name := range []string{"host", "guest"} {
+		f.h.clients[f.users[name].ID] = f.client(name)
+	}
+	if st := roomStatePayload(f.room); st.GameOptionsMax != gameOptionsMax || st.GameOptionsPreset != nil {
+		t.Fatalf("a new room: max %d, preset %+v", st.GameOptionsMax, st.GameOptionsPreset)
+	}
+
+	// The label is trimmed like an option's.
+	req := oneVsOneVanilla
+	req.Preset = &protocol.GameOptionPreset{ID: "1v1-vanilla", Label: "  1v1 Vanilla "}
+	f.drain("guest")
+	f.sendNextRoomListAtOnce()
+	f.setGameOptions("host", req)
+	want := protocol.GameOptionPreset{ID: "1v1-vanilla", Label: "1v1 Vanilla"}
+	if p := f.room.GameOptionsPreset; p == nil || p.ID != want.ID || p.Label != want.Label {
+		t.Fatalf("room preset = %+v", p)
+	}
+	envs := f.drain("guest")
+	if st := roomStateFrom(t, envs); st.GameOptionsPreset == nil || *st.GameOptionsPreset != want || len(st.GameOptions) != 2 {
+		t.Fatalf("guest room state: options %+v, preset %+v", st.GameOptions, st.GameOptionsPreset)
+	}
+	if list := roomListFrom(t, envs); len(list.Rooms) != 1 || list.Rooms[0].GameOptionsPreset == nil ||
+		*list.Rooms[0].GameOptionsPreset != want {
+		t.Fatalf("room list = %+v", list.Rooms)
+	}
+	const wire = `"gameOptionsPreset":{"id":"1v1-vanilla","label":"1v1 Vanilla"}`
+	if raw, _ := json.Marshal(roomStatePayload(f.room)); !strings.Contains(string(raw), wire) {
+		t.Fatalf("room state JSON: %s", raw)
+	}
+	if raw, _ := json.Marshal(f.h.buildRoomListPayload()); !strings.Contains(string(raw), wire) {
+		t.Fatalf("room list JSON: %s", raw)
+	}
+
+	// The same options without a preset are custom ones: the preset goes, and
+	// that's a change everyone hears about.
+	f.sendNextRoomListAtOnce()
+	f.setGameOptions("host", protocol.RoomUpdateGameOptionsRequest{Options: oneVsOneVanilla.Options})
+	if f.room.GameOptionsPreset != nil || len(f.room.GameOptions) != 2 {
+		t.Fatalf("custom options: %+v, preset %+v", f.room.GameOptions, f.room.GameOptionsPreset)
+	}
+	envs = f.drain("guest")
+	if st := roomStateFrom(t, envs); st.GameOptionsPreset != nil || len(st.GameOptions) != 2 {
+		t.Fatalf("guest still sees preset %+v", st.GameOptionsPreset)
+	}
+	if list := roomListFrom(t, envs); list.Rooms[0].GameOptionsPreset != nil {
+		t.Fatalf("room list still shows preset %+v", list.Rooms[0].GameOptionsPreset)
+	}
+	if raw, _ := json.Marshal(roomStatePayload(f.room)); strings.Contains(string(raw), "gameOptionsPreset") {
+		t.Fatalf("room state JSON names a preset: %s", raw)
+	}
+
+	// A new label for the same preset is a change too.
+	f.setGameOptions("host", oneVsOneVanilla)
+	f.drain("guest")
+	relabelled := oneVsOneVanilla
+	relabelled.Preset = &protocol.GameOptionPreset{ID: "1v1-vanilla", Label: "One on one"}
+	f.setGameOptions("host", relabelled)
+	if f.room.GameOptionsPreset == nil || f.room.GameOptionsPreset.Label != "One on one" {
+		t.Fatalf("preset after relabelling = %+v", f.room.GameOptionsPreset)
+	}
+	if _, ok := findEnvelope(f.drain("guest"), protocol.TypeRoomState); !ok {
+		t.Fatal("a preset change wasn't broadcast")
+	}
+	// And the same again isn't.
+	f.setGameOptions("host", relabelled)
+	if _, ok := findEnvelope(f.drain("guest"), protocol.TypeRoomState); ok {
+		t.Fatal("an unchanged preset was rebroadcast")
+	}
+
+	// Turning the options off takes the preset with them.
+	f.setGameOptions("host", protocol.RoomUpdateGameOptionsRequest{Options: []protocol.GameOption{}})
+	if f.room.GameOptions != nil || f.room.GameOptionsPreset != nil {
+		t.Fatalf("after turning off: %+v, preset %+v", f.room.GameOptions, f.room.GameOptionsPreset)
+	}
+}
+
+func TestGameOptionPresetIsCheckedLikeTheOptions(t *testing.T) {
+	f := newLateJoinFixture(t, 2)
+	f.gameOptionsUser("host")
+	f.openRoom(2, "host")
+	f.setGameOptions("host", oneVsOneVanilla)
+
+	with := func(id, label string) protocol.RoomUpdateGameOptionsRequest {
+		return protocol.RoomUpdateGameOptionsRequest{
+			Options: oneVsOneVanilla.Options, Preset: &protocol.GameOptionPreset{ID: id, Label: label},
+		}
+	}
+	bad := map[string]any{
+		"preset without options": protocol.RoomUpdateGameOptionsRequest{
+			Preset: &protocol.GameOptionPreset{ID: "1v1-vanilla", Label: "1v1 Vanilla"},
+		},
+		"empty id":      with("", "1v1 Vanilla"),
+		"upper-case id": with("1V1-vanilla", "1v1 Vanilla"),
+		"33-byte id":    with(strings.Repeat("a", gameOptionIDMax+1), "1v1 Vanilla"),
+		"empty label":   with("1v1-vanilla", ""),
+		"blank label":   with("1v1-vanilla", "   "),
+		"49-rune label": with("1v1-vanilla", strings.Repeat("バ", gameOptionLabelMax+1)),
+		"newline":       with("1v1-vanilla", "1v1\nVanilla"),
+		"bidi override": with("1v1-vanilla", "1v1 ‮allinaV"),
+		"preset not an object": json.RawMessage(
+			`{"options":[{"id":"vanilla-css","label":"Vanilla CSS"}],"preset":"1v1-vanilla"}`),
+	}
+	for name, req := range bad {
+		f.setGameOptions("host", req)
+		// Refused whole: options and preset stay as they were.
+		if optionIDs(f.room.GameOptions) != "vanilla-css,tournament-rules" ||
+			f.room.GameOptionsPreset == nil || f.room.GameOptionsPreset.ID != "1v1-vanilla" {
+			t.Fatalf("%s: options %+v, preset %+v", name, f.room.GameOptions, f.room.GameOptionsPreset)
+		}
+	}
+
+	// Its label goes through the filter too.
+	f.h.mod = moderation.NewManager(moderation.NewFilter([]string{"badword"}), &moderation.AdminStore{}, "")
+	f.setGameOptions("host", with("rude", "badword mode"))
+	if f.room.GameOptionsPreset == nil || f.room.GameOptionsPreset.ID != "1v1-vanilla" {
+		t.Fatalf("a filtered preset label got in: %+v", f.room.GameOptionsPreset)
+	}
+}
+
+func TestMoreThanEightGameOptionsNeedClientsThatTakeThem(t *testing.T) {
+	f := newLateJoinFixture(t, 3)
+	host := f.gameOptionsUser("host")
+	host.GameOptionsMax = gameOptionsMax
+	f.gameOptionsUser("guest").GameOptionsMax = gameOptionsMax
+	legacy := f.gameOptionsUser("legacy") // sent gameOptions without gameOptionsMax
+	f.openRoom(3, "host", "guest", "legacy")
+
+	// Nine can be picked with them seated, as with any game options: the start is
+	// what waits.
+	f.setGameOptions("host", protocol.RoomUpdateGameOptionsRequest{Options: optionsN(9)})
+	if len(f.room.GameOptions) != 9 {
+		t.Fatalf("nine options were refused: %+v", f.room.GameOptions)
+	}
+	for _, seat := range roomStatePayload(f.room).Players {
+		want := gameOptionsMax
+		if seat.UserID == legacy.ID {
+			want = gameOptionsLegacyMax
+		}
+		if !seat.GameOptions || seat.GameOptionsMax != want {
+			t.Fatalf("seat %s: gameOptions %v, gameOptionsMax %d, want %d",
+				seat.Username, seat.GameOptions, seat.GameOptionsMax, want)
+		}
+	}
+	f.send("host", protocol.TypeRoomStart, struct{}{})
+	if host.CurrentMatch != nil {
+		t.Fatal("started nine game options with a client that takes eight")
+	}
+
+	// Eight are fine with everyone.
+	f.setGameOptions("host", protocol.RoomUpdateGameOptionsRequest{Options: optionsN(8)})
+	f.send("host", protocol.TypeRoomStart, struct{}{})
+	if host.CurrentMatch == nil {
+		t.Fatal("could not start eight game options with a client that takes eight")
+	}
+
+	// A late joiner that takes eight can't be added to a match with nine; one
+	// that takes more can.
+	g := newLateJoinFixture(t, 4)
+	gHost := g.gameOptionsUser("host")
+	gHost.GameOptionsMax = gameOptionsMax
+	g.gameOptionsUser("guest").GameOptionsMax = gameOptionsMax
+	late := g.gameOptionsUser("late")
+	newer := g.gameOptionsUser("newer")
+	newer.GameOptionsMax = gameOptionsMax
+	g.openRoom(4, "host", "guest")
+	g.room.LateJoinEnabled = true
+	g.setGameOptions("host", protocol.RoomUpdateGameOptionsRequest{Options: optionsN(9)})
+	g.send("host", protocol.TypeRoomStart, struct{}{})
+	match := gHost.CurrentMatch
+	if match == nil || match.Seats == 0 {
+		t.Fatalf("match = %+v, want one open to late joiners", match)
+	}
+	g.send("late", protocol.TypeRoomJoin, protocol.RoomJoinRequest{RoomID: g.room.ID})
+	if late.CurrentRoom != g.room {
+		t.Fatal("the joiner that takes eight could not enter the room")
+	}
+	g.drain("host")
+	g.send("host", protocol.TypeMatchAdmit, protocol.MatchAdmitRequest{MatchID: match.ID, UserID: late.ID})
+	env, ok := findEnvelope(g.drain("host"), protocol.TypeMatchAdmitFail)
+	if !ok {
+		t.Fatal("added a client that takes eight game options to a match with nine")
+	}
+	var fail protocol.MatchAdmitFailPayload
+	if err := json.Unmarshal(env.Data, &fail); err != nil {
+		t.Fatal(err)
+	}
+	if fail.Reason != protocol.ReasonLateJoinUnsupported {
+		t.Fatalf("reason = %q", fail.Reason)
+	}
+	g.send("newer", protocol.TypeRoomJoin, protocol.RoomJoinRequest{RoomID: g.room.ID})
+	g.drain("host")
+	g.send("host", protocol.TypeMatchAdmit, protocol.MatchAdmitRequest{MatchID: match.ID, UserID: newer.ID})
+	if _, ok := findEnvelope(g.drain("host"), protocol.TypeMatchAdmitBegin); !ok {
+		t.Fatal("a joiner that takes nine game options wasn't admitted")
 	}
 }
 

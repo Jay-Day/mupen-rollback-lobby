@@ -398,6 +398,7 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		RomHashes:     romHashSet(req.RomHashes),
 		SaveData:      req.SaveData,
 		GameOptions:   req.GameOptions,
+		GameOptionsMax: clampGameOptionsMax(req.GameOptionsMax),
 		NoChallenges:  req.NoChallenges,
 		NoPrivateMessages: req.NoPrivateMessages,
 		PingCheck:     req.PingCheck,
