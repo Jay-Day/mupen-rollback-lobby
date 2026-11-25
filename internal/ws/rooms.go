@@ -761,12 +761,39 @@ func roomPlayersTakeSaveData(room *state.Room) bool {
 }
 
 // Game option limits. Ids are the client's own names for what an option
-// changes; labels show in every member's room and in the room list.
+// changes; labels show in every member's room and in the room list. Clients
+// that don't send HELLO gameOptionsMax take gameOptionsLegacyMax: a match
+// with more options would fail their pre-match manifest.
 const (
-	gameOptionsMax     = 8
-	gameOptionIDMax    = 32
-	gameOptionLabelMax = 48
+	gameOptionsMax       = 16
+	gameOptionsLegacyMax = 8
+	gameOptionIDMax      = 32
+	gameOptionLabelMax   = 48
 )
+
+// clampGameOptionsMax holds HELLO gameOptionsMax to what this server takes;
+// 0 (left out) stays 0, meaning the legacy limit.
+func clampGameOptionsMax(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	return min(n, gameOptionsMax)
+}
+
+// gameOptionsLimit is how many game options u's client can play a match with:
+// none without the capability, gameOptionsLegacyMax unless it said more.
+func gameOptionsLimit(u *state.User) int {
+	if !u.GameOptions {
+		return 0
+	}
+	return max(gameOptionsLegacyMax, clampGameOptionsMax(u.GameOptionsMax))
+}
+
+// userTakesGameOptions reports whether u's client can play a match with n
+// game options on.
+func userTakesGameOptions(u *state.User, n int) bool {
+	return n == 0 || n <= gameOptionsLimit(u)
+}
 
 // handleRoomUpdateGameOptions replaces the game options of the room's next
 // match; an empty list turns them all off. Host-only and waiting-only: a
@@ -795,24 +822,40 @@ func (h *Hub) handleRoomUpdateGameOptions(c *Client, env protocol.Envelope) {
 		slog.Debug("ROOM_UPDATE_GAME_OPTIONS rejected: bad options", "room", room.ID)
 		return
 	}
+	preset, ok := parseGameOptionPreset(req.Preset, len(opts))
+	if !ok {
+		slog.Debug("ROOM_UPDATE_GAME_OPTIONS rejected: bad preset", "room", room.ID)
+		return
+	}
 	// The labels show in every member's room and in the room list: filter
 	// them like a room name.
 	if h.mod != nil {
+		labels := make([]string, 0, len(opts)+1)
 		for _, opt := range opts {
-			if term, hit := h.mod.FilterMessage(opt.Label); hit {
+			labels = append(labels, opt.Label)
+		}
+		if preset != nil {
+			labels = append(labels, preset.Label)
+		}
+		for _, label := range labels {
+			if term, hit := h.mod.FilterMessage(label); hit {
 				slog.Info("game option label blocked by filter", "user", c.user.Username, "ip", c.ip, "term", term)
 				return
 			}
 		}
 	}
-	if !room.SetGameOptions(opts) {
+	if !room.SetGameOptions(opts, preset) {
 		return
 	}
 	ids := make([]string, 0, len(opts))
 	for _, opt := range opts {
 		ids = append(ids, opt.ID)
 	}
-	slog.Info("room game options updated", "room", room.ID, "options", ids, "by", c.user.Username)
+	presetID := ""
+	if preset != nil {
+		presetID = preset.ID
+	}
+	slog.Info("room game options updated", "room", room.ID, "options", ids, "preset", presetID, "by", c.user.Username)
 	h.broadcastRoomState(room)
 	h.broadcastRoomList()
 }
@@ -838,6 +881,19 @@ func parseGameOptions(in []protocol.GameOption) ([]state.GameOption, bool) {
 		out = append(out, state.GameOption{ID: opt.ID, Label: label})
 	}
 	return out, true
+}
+
+// parseGameOptionPreset checks the preset the host says its options make up,
+// under the same rules as an option. None is fine; one naming no options isn't.
+func parseGameOptionPreset(in *protocol.GameOptionPreset, options int) (*state.GameOptionPreset, bool) {
+	if in == nil {
+		return nil, true
+	}
+	label := strings.TrimSpace(in.Label)
+	if options == 0 || !validGameOptionID(in.ID) || !validGameOptionLabel(label) {
+		return nil, false
+	}
+	return &state.GameOptionPreset{ID: in.ID, Label: label}, true
 }
 
 // validGameOptionID reports whether id matches ^[a-z0-9-]{1,32}$.
@@ -872,14 +928,13 @@ func validGameOptionLabel(label string) bool {
 }
 
 // roomPlayersTakeGameOptions reports whether every seated player can play the
-// room's next match: with game options on, a client without them would refuse
-// the pre-match manifest and fail the start for everyone.
+// room's next match: with game options on, a client without them, or one that
+// takes fewer than are on, would refuse the pre-match manifest and fail the
+// start for everyone.
 func roomPlayersTakeGameOptions(room *state.Room) bool {
-	if len(room.GameOptionList()) == 0 {
-		return true
-	}
+	n := len(room.GameOptionList())
 	for _, seat := range room.Players {
-		if seat.User != nil && !seat.User.GameOptions {
+		if seat.User != nil && !userTakesGameOptions(seat.User, n) {
 			return false
 		}
 	}
@@ -897,6 +952,14 @@ func gameOptionsPayload(opts []state.GameOption) []protocol.GameOption {
 		out[i] = protocol.GameOption{ID: opt.ID, Label: opt.Label}
 	}
 	return out
+}
+
+// gameOptionsPresetPayload is the wire form of a room's preset; nil for none.
+func gameOptionsPresetPayload(preset *state.GameOptionPreset) *protocol.GameOptionPreset {
+	if preset == nil {
+		return nil
+	}
+	return &protocol.GameOptionPreset{ID: preset.ID, Label: preset.Label}
 }
 
 // clampRunes caps s at n characters without splitting one.
@@ -1419,20 +1482,21 @@ func (h *Hub) buildRoomListPayload() protocol.RoomListPayload {
 				MD5:    r.RomMD5,
 				Region: r.RomRegion,
 			},
-			Players:      players,
-			MaxPlayers:   max,
-			State:        string(st),
-			HasPasswd:    r.Password != "",
-			PlayerNames:  r.PlayerUsernames(),
-			StartedAt:    r.StartedAtUnixMs(),
-			Broadcasting: broadcasting,
-			MatchID:      matchID,
-			ViewerCount:  viewerCount,
-			LateJoin:     players < max && !r.Private && roomAcceptsLateJoin(r),
-			Private:      r.Private,
-			MaxPing:      maxPing,
-			WiredOnly:    wiredOnly,
-			GameOptions:  gameOptionsPayload(r.GameOptionList()),
+			Players:           players,
+			MaxPlayers:        max,
+			State:             string(st),
+			HasPasswd:         r.Password != "",
+			PlayerNames:       r.PlayerUsernames(),
+			StartedAt:         r.StartedAtUnixMs(),
+			Broadcasting:      broadcasting,
+			MatchID:           matchID,
+			ViewerCount:       viewerCount,
+			LateJoin:          players < max && !r.Private && roomAcceptsLateJoin(r),
+			Private:           r.Private,
+			MaxPing:           maxPing,
+			WiredOnly:         wiredOnly,
+			GameOptions:       gameOptionsPayload(r.GameOptionList()),
+			GameOptionsPreset: gameOptionsPresetPayload(r.GameOptionsPresetInfo()),
 		})
 	}
 	return payload
@@ -1481,6 +1545,7 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 		Private:           r.Private,
 		Resizable:         roomResizable(r),
 		GameOptions:       gameOptionsPayload(r.GameOptionList()),
+		GameOptionsPreset: gameOptionsPresetPayload(r.GameOptionsPresetInfo()),
 		Rom: protocol.RomInfo{
 			Name:   r.RomName,
 			MD5:    r.RomMD5,
@@ -1493,6 +1558,7 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 	}
 	if !r.QuickMatch {
 		out.GameOptionsOffered = true
+		out.GameOptionsMax = gameOptionsMax
 		enabled := r.LateJoinEnabled
 		out.LateJoinEnabled = &enabled
 		out.SaveData = &protocol.RoomSaveDataPayload{}
@@ -1528,6 +1594,7 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 			PeerID:           seat.User.Primary().ID,
 			SaveData:         seat.User.SaveData,
 			GameOptions:      seat.User.GameOptions,
+			GameOptionsMax:   gameOptionsLimit(seat.User),
 		})
 	}
 	return out

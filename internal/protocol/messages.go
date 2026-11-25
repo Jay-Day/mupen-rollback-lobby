@@ -269,6 +269,9 @@ type HelloRequest struct {
 	// Advertises support for game options (ROOM_UPDATE_GAME_OPTIONS). A match
 	// with any option on can't start, or take a late joiner, without it.
 	GameOptions bool `json:"gameOptions,omitempty"`
+	// How many game options this client can play one match with. Clients that
+	// send gameOptions without it take 8; the server holds it to 8-16.
+	GameOptionsMax int `json:"gameOptionsMax,omitempty"`
 	// This PC doesn't take challenges (CHALLENGE_SETTINGS changes it later).
 	// Sent here too, so no challenge can slip in before the first update.
 	NoChallenges bool `json:"noChallenges,omitempty"`
@@ -415,12 +418,22 @@ type GameOption struct {
 	Label string `json:"label"`
 }
 
+// GameOptionPreset names the host's pick when the options are one of the
+// pack's presets, such as "1v1 Vanilla", so every member and the room list can
+// show that name without the pack. Same id and label rules as GameOption.
+type GameOptionPreset struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+}
+
 // RoomUpdateGameOptionsRequest replaces the game options of the room's next
 // match: an empty list turns them all off. Host-only and waiting-room-only. The
 // client changes the game for them itself, from the host's pre-match manifest;
-// the server only relays the list in ROOM_STATE and ROOM_LIST.
+// the server only relays the list in ROOM_STATE and ROOM_LIST. Preset is the
+// preset they make up, if any; without one the room has none (custom options).
 type RoomUpdateGameOptionsRequest struct {
-	Options []GameOption `json:"options"`
+	Options []GameOption      `json:"options"`
+	Preset  *GameOptionPreset `json:"preset,omitempty"`
 }
 
 // RoomUpdateJoinLimitsRequest changes who may join the room from now on.
@@ -682,6 +695,9 @@ type RoomSummary struct {
 	// the list can tag a room, or a running match, before anyone joins.
 	// Omitted when none are on.
 	GameOptions []GameOption `json:"gameOptions,omitempty"`
+	// GameOptionsPreset is the preset those options make up, when the host
+	// picked one. Omitted otherwise.
+	GameOptionsPreset *GameOptionPreset `json:"gameOptionsPreset,omitempty"`
 }
 
 type RoomListPayload struct {
@@ -715,6 +731,10 @@ type RoomSeatPayload struct {
 	// GameOptions mirrors the client's capability, so the host can see who
 	// keeps a match with game options from starting.
 	GameOptions bool `json:"gameOptions,omitempty"`
+	// GameOptionsMax is how many game options this seat's client can play a
+	// match with (set with GameOptions), so the host can see who keeps a
+	// match with more than that from starting.
+	GameOptionsMax int `json:"gameOptionsMax,omitempty"`
 }
 
 type RoomStatePayload struct {
@@ -770,6 +790,11 @@ type RoomStatePayload struct {
 	// GameOptions are the host's game options for the next match, or the
 	// running one's (ROOM_UPDATE_GAME_OPTIONS). Omitted when none are on.
 	GameOptions []GameOption `json:"gameOptions,omitempty"`
+	// GameOptionsPreset is the preset they make up, when the host picked one.
+	GameOptionsPreset *GameOptionPreset `json:"gameOptionsPreset,omitempty"`
+	// GameOptionsMax is how many game options ROOM_UPDATE_GAME_OPTIONS takes
+	// here, sent with GameOptionsOffered. Older servers take 8 and omit it.
+	GameOptionsMax int `json:"gameOptionsMax,omitempty"`
 }
 
 type RoomJoinFailPayload struct {
