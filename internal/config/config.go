@@ -316,7 +316,7 @@ func (s *Settings) OutdatedMessage() string {
 	if s.OutdatedClientMessage != "" {
 		return s.OutdatedClientMessage
 	}
-	return fmt.Sprintf("Your RMG-K client is out of date. This lobby requires RMG-K %s or any vdev build.",
+	return fmt.Sprintf("Your RMG-K is out of date. Go to the Help menu and run Check For Updates or download version %s or newer.",
 		s.MinClientVersion)
 }
 
