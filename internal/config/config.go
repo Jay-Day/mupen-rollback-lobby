@@ -25,8 +25,8 @@ type Settings struct {
 	// Oldest RMG-K release allowed to log in, e.g. "0.9.13b". Development
 	// builds (vdev-*) are always allowed.
 	MinClientVersion string `json:"minClientVersion"`
-	// Shown to clients older than MinClientVersion. Empty uses the default
-	// message with update instructions and the minimum version.
+	// Shown to clients older than MinClientVersion. Empty uses a message that
+	// names the required version.
 	OutdatedClientMessage string `json:"outdatedClientMessage"`
 
 	// How often a live replay broadcaster uploads a savestate keyframe. Late
