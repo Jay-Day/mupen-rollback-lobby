@@ -25,8 +25,8 @@ type Settings struct {
 	// Oldest RMG-K release allowed to log in, e.g. "0.9.13b". Development
 	// builds (vdev-*) are always allowed.
 	MinClientVersion string `json:"minClientVersion"`
-	// Shown to clients older than MinClientVersion. Empty uses a message that
-	// names the required version.
+	// Shown to clients older than MinClientVersion. Empty uses the default
+	// message with update instructions and the minimum version.
 	OutdatedClientMessage string `json:"outdatedClientMessage"`
 
 	// How often a live replay broadcaster uploads a savestate keyframe. Late
@@ -316,7 +316,7 @@ func (s *Settings) OutdatedMessage() string {
 	if s.OutdatedClientMessage != "" {
 		return s.OutdatedClientMessage
 	}
-	return fmt.Sprintf("Your RMG-K client is out of date. This lobby requires RMG-K %s or any vdev build.",
+	return fmt.Sprintf("Your RMG-K is out of date. Go to the Help menu and run Check For Updates or download version %s or newer.",
 		s.MinClientVersion)
 }
 

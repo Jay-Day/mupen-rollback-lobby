@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 
@@ -27,8 +26,9 @@ func TestParseKeepsDefaultsForMissingKeys(t *testing.T) {
 	if s.LiveReplayKeyframeSeconds != d.LiveReplayKeyframeSeconds || s.ConnectAttempts != d.ConnectAttempts {
 		t.Fatalf("omitted keys lost their defaults: %+v", s)
 	}
-	if !strings.Contains(s.OutdatedMessage(), "0.9.15") {
-		t.Fatalf("default message doesn't name the version: %q", s.OutdatedMessage())
+	const want = "Your RMG-K is out of date. Go to the Help menu and run Check For Updates or download version 0.9.15 or newer."
+	if got := s.OutdatedMessage(); got != want {
+		t.Fatalf("OutdatedMessage = %q, want %q", got, want)
 	}
 }
 
