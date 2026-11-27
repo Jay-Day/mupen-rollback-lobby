@@ -298,6 +298,13 @@ func saveDataEqual(a, b *SaveDataInfo) bool {
 type GameOption struct {
 	ID    string
 	Label string
+	// Param is the host's choice for an option that takes one (a custom
+	// stage list's share code), or empty.
+	Param string
+	// ParamPresetID and ParamPresetLabel name Param when the host's pick
+	// has a name (a ready-made or saved stage list), else both are empty.
+	ParamPresetID    string
+	ParamPresetLabel string
 }
 
 // GameOptionPreset is the preset the host's game options make up: an opaque
