@@ -416,6 +416,18 @@ type RoomUpdateSaveDataRequest struct {
 type GameOption struct {
 	ID    string `json:"id"`
 	Label string `json:"label"`
+	// Param is what the host picked for an option that takes a choice of its
+	// own, such as a stage list's share code ("STG-220C-..."). The
+	// server only checks its shape (gameOptionParamMax characters of
+	// [0-9A-Z-]) and relays it; clients make the option from it. Omitted for
+	// options without one.
+	Param string `json:"param,omitempty"`
+	// ParamPreset names the host's pick for Param when it has a name: one of
+	// the pack's ready-made stage lists ("Dream Land only"), or one the host
+	// saved (a "user-" id with the host's own name for it). Checked like a
+	// GameOptionPreset, its label filtered like one, and only taken with a
+	// Param. Omitted for none.
+	ParamPreset *GameOptionPreset `json:"paramPreset,omitempty"`
 }
 
 // GameOptionPreset names the host's pick when the options are one of the
@@ -795,6 +807,10 @@ type RoomStatePayload struct {
 	// GameOptionsMax is how many game options ROOM_UPDATE_GAME_OPTIONS takes
 	// here, sent with GameOptionsOffered. Older servers take 8 and omit it.
 	GameOptionsMax int `json:"gameOptionsMax,omitempty"`
+	// GameOptionParams tells clients this server keeps a game option's Param,
+	// sent with GameOptionsOffered. Older servers drop it, so a host's client
+	// doesn't offer options that need one there.
+	GameOptionParams bool `json:"gameOptionParams,omitempty"`
 }
 
 type RoomJoinFailPayload struct {

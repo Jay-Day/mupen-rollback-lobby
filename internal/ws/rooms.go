@@ -769,6 +769,8 @@ const (
 	gameOptionsLegacyMax = 8
 	gameOptionIDMax      = 32
 	gameOptionLabelMax   = 48
+	// A stage list's code is at most 223 characters (85 stages).
+	gameOptionParamMax = 256
 )
 
 // clampGameOptionsMax holds HELLO gameOptionsMax to what this server takes;
@@ -833,6 +835,14 @@ func (h *Hub) handleRoomUpdateGameOptions(c *Client, env protocol.Envelope) {
 		labels := make([]string, 0, len(opts)+1)
 		for _, opt := range opts {
 			labels = append(labels, opt.Label)
+			// Params show in the room too (a stage list's code), and so
+			// does a param's name.
+			if opt.Param != "" {
+				labels = append(labels, opt.Param)
+			}
+			if opt.ParamPresetLabel != "" {
+				labels = append(labels, opt.ParamPresetLabel)
+			}
 		}
 		if preset != nil {
 			labels = append(labels, preset.Label)
@@ -878,9 +888,37 @@ func parseGameOptions(in []protocol.GameOption) ([]state.GameOption, bool) {
 		if !validGameOptionLabel(label) {
 			return nil, false
 		}
-		out = append(out, state.GameOption{ID: opt.ID, Label: label})
+		if opt.Param != "" && !validGameOptionParam(opt.Param) {
+			return nil, false
+		}
+		kept := state.GameOption{ID: opt.ID, Label: label, Param: opt.Param}
+		// A param's name only goes with a param.
+		if opt.ParamPreset != nil {
+			name, ok := parseGameOptionPreset(opt.ParamPreset, len(opt.Param))
+			if !ok {
+				return nil, false
+			}
+			kept.ParamPresetID, kept.ParamPresetLabel = name.ID, name.Label
+		}
+		out = append(out, kept)
 	}
 	return out, true
+}
+
+// validGameOptionParam reports whether param matches ^[0-9A-Z-]{1,256}$: a
+// short code, the shape a stage list's share code has. What it means
+// is the clients' business.
+func validGameOptionParam(param string) bool {
+	if len(param) == 0 || len(param) > gameOptionParamMax {
+		return false
+	}
+	for i := 0; i < len(param); i++ {
+		c := param[i]
+		if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || c == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 // parseGameOptionPreset checks the preset the host says its options make up,
@@ -949,7 +987,10 @@ func gameOptionsPayload(opts []state.GameOption) []protocol.GameOption {
 	}
 	out := make([]protocol.GameOption, len(opts))
 	for i, opt := range opts {
-		out[i] = protocol.GameOption{ID: opt.ID, Label: opt.Label}
+		out[i] = protocol.GameOption{ID: opt.ID, Label: opt.Label, Param: opt.Param}
+		if opt.ParamPresetID != "" {
+			out[i].ParamPreset = &protocol.GameOptionPreset{ID: opt.ParamPresetID, Label: opt.ParamPresetLabel}
+		}
 	}
 	return out
 }
@@ -1559,6 +1600,7 @@ func roomStatePayload(r *state.Room) protocol.RoomStatePayload {
 	if !r.QuickMatch {
 		out.GameOptionsOffered = true
 		out.GameOptionsMax = gameOptionsMax
+		out.GameOptionParams = true
 		enabled := r.LateJoinEnabled
 		out.LateJoinEnabled = &enabled
 		out.SaveData = &protocol.RoomSaveDataPayload{}

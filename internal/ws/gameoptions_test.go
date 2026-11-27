@@ -709,6 +709,286 @@ func TestMoreThanEightGameOptionsNeedClientsThatTakeThem(t *testing.T) {
 	}
 }
 
+const competitiveCode = "STG-220C-6YA8-2T5V-W0"
+
+var stageList = protocol.RoomUpdateGameOptionsRequest{Options: []protocol.GameOption{
+	{ID: "vanilla-css", Label: "Vanilla CSS"},
+	{ID: "stage-list", Label: "Stage list", Param: competitiveCode},
+}}
+
+func TestGameOptionParamsTravelWithTheOptions(t *testing.T) {
+	f := newLateJoinFixture(t, 2)
+	f.gameOptionsUser("host")
+	f.gameOptionsUser("guest")
+	f.openRoom(2, "host", "guest")
+	for _, name := range []string{"host", "guest"} {
+		f.h.clients[f.users[name].ID] = f.client(name)
+	}
+	if st := roomStatePayload(f.room); !st.GameOptionParams {
+		t.Fatal("room state doesn't say the server keeps params")
+	}
+	if raw, _ := json.Marshal(roomStatePayload(f.room)); !strings.Contains(string(raw), `"gameOptionParams":true`) {
+		t.Fatalf("room state JSON: %s", raw)
+	}
+
+	f.drain("guest")
+	f.sendNextRoomListAtOnce()
+	f.setGameOptions("host", stageList)
+	if len(f.room.GameOptions) != 2 || f.room.GameOptions[1].Param != competitiveCode || f.room.GameOptions[0].Param != "" {
+		t.Fatalf("room options = %+v", f.room.GameOptions)
+	}
+	envs := f.drain("guest")
+	if st := roomStateFrom(t, envs); len(st.GameOptions) != 2 || st.GameOptions[1] != stageList.Options[1] {
+		t.Fatalf("guest room state options = %+v", st.GameOptions)
+	}
+	if list := roomListFrom(t, envs); len(list.Rooms) != 1 || len(list.Rooms[0].GameOptions) != 2 ||
+		list.Rooms[0].GameOptions[1].Param != competitiveCode {
+		t.Fatalf("room list = %+v", list.Rooms)
+	}
+	// An option without one has no param on the wire.
+	const wire = `"gameOptions":[{"id":"vanilla-css","label":"Vanilla CSS"},` +
+		`{"id":"stage-list","label":"Stage list","param":"STG-220C-6YA8-2T5V-W0"}]`
+	if raw, _ := json.Marshal(roomStatePayload(f.room)); !strings.Contains(string(raw), wire) {
+		t.Fatalf("room state JSON: %s", raw)
+	}
+	if raw, _ := json.Marshal(f.h.buildRoomListPayload()); !strings.Contains(string(raw), wire) {
+		t.Fatalf("room list JSON: %s", raw)
+	}
+
+	// A new list alone is a change everyone hears about; the same again isn't.
+	other := protocol.RoomUpdateGameOptionsRequest{Options: []protocol.GameOption{
+		stageList.Options[0], {ID: "stage-list", Label: "Stage list", Param: "STG-20GC-HPK0"},
+	}}
+	f.setGameOptions("host", other)
+	if f.room.GameOptions[1].Param != "STG-20GC-HPK0" {
+		t.Fatalf("param after a change = %+v", f.room.GameOptions)
+	}
+	if st := roomStateFrom(t, f.drain("guest")); st.GameOptions[1].Param != "STG-20GC-HPK0" {
+		t.Fatalf("guest param = %+v", st.GameOptions)
+	}
+	f.setGameOptions("host", other)
+	if _, ok := findEnvelope(f.drain("guest"), protocol.TypeRoomState); ok {
+		t.Fatal("an unchanged param was rebroadcast")
+	}
+	// Dropping it is a change too.
+	f.setGameOptions("host", protocol.RoomUpdateGameOptionsRequest{Options: []protocol.GameOption{
+		stageList.Options[0], {ID: "stage-list", Label: "Stage list"},
+	}})
+	if f.room.GameOptions[1].Param != "" {
+		t.Fatalf("param not dropped: %+v", f.room.GameOptions)
+	}
+
+	// Quick match rooms offer no game options, so no params either.
+	q := newLateJoinFixture(t, 2)
+	q.gameOptionsUser("a")
+	q.openRoom(2, "a")
+	q.room.QuickMatch = true
+	if st := roomStatePayload(q.room); st.GameOptionParams {
+		t.Fatal("a quick match room says it keeps params")
+	}
+}
+
+func TestGameOptionParamsAreChecked(t *testing.T) {
+	f := newLateJoinFixture(t, 2)
+	f.gameOptionsUser("host")
+	f.openRoom(2, "host")
+	f.setGameOptions("host", stageList)
+
+	with := func(param string) protocol.RoomUpdateGameOptionsRequest {
+		return protocol.RoomUpdateGameOptionsRequest{Options: []protocol.GameOption{
+			{ID: "stage-list", Label: "Stage list", Param: param},
+		}}
+	}
+	bad := map[string]any{
+		"lower case":       with("stg-220c-6ya8-2t5v-w0"),
+		"space":            with("STG 220C"),
+		"257 characters":   with(strings.Repeat("A", gameOptionParamMax+1)),
+		"punctuation":      with("STG-220C!"),
+		"underscore":       with("STG_220C"),
+		"non-ASCII":        with("STG-ÄÖ"),
+		"newline":          with("STG-220C\n"),
+		"param not a text": json.RawMessage(`{"options":[{"id":"stage-list","label":"Stage list","param":7}]}`),
+	}
+	for name, req := range bad {
+		f.setGameOptions("host", req)
+		// Refused whole: the list the host had stays.
+		if len(f.room.GameOptions) != 2 || f.room.GameOptions[1].Param != competitiveCode {
+			t.Fatalf("%s: options now %+v", name, f.room.GameOptions)
+		}
+	}
+	// At the limit is fine, and none is fine.
+	f.setGameOptions("host", with(strings.Repeat("Z", gameOptionParamMax)))
+	if len(f.room.GameOptions) != 1 || len(f.room.GameOptions[0].Param) != gameOptionParamMax {
+		t.Fatalf("a %d-character param was refused: %+v", gameOptionParamMax, f.room.GameOptions)
+	}
+	f.setGameOptions("host", with(""))
+	if len(f.room.GameOptions) != 1 || f.room.GameOptions[0].Param != "" {
+		t.Fatalf("no param: %+v", f.room.GameOptions)
+	}
+
+	// It shows in the room, so it goes through the filter like a label.
+	f.h.mod = moderation.NewManager(moderation.NewFilter([]string{"badword"}), &moderation.AdminStore{}, "")
+	f.setGameOptions("host", with("STG-BADWORD"))
+	if f.room.GameOptions[0].Param != "" {
+		t.Fatalf("a filtered param got in: %+v", f.room.GameOptions)
+	}
+	f.setGameOptions("host", with(competitiveCode))
+	if f.room.GameOptions[0].Param != competitiveCode {
+		t.Fatalf("a clean param was refused: %+v", f.room.GameOptions)
+	}
+}
+
+// A client that takes game options but not params still plays a match with
+// one: the host's pre-match manifest carries every option's patches, made
+// from the param by the host's client. So nothing more is gated.
+func TestGameOptionParamsDontKeepGameOptionsClientsOut(t *testing.T) {
+	f := newLateJoinFixture(t, 4)
+	host := f.gameOptionsUser("host")
+	host.GameOptionsMax = gameOptionsMax
+	f.gameOptionsUser("legacy") // sent gameOptions without gameOptionsMax
+	late := f.gameOptionsUser("late")
+	f.openRoom(4, "host", "legacy")
+	f.room.LateJoinEnabled = true
+	f.setGameOptions("host", stageList)
+	f.send("host", protocol.TypeRoomStart, struct{}{})
+	match := host.CurrentMatch
+	if match == nil {
+		t.Fatal("a match with a param didn't start with a client that takes game options")
+	}
+	f.send("late", protocol.TypeRoomJoin, protocol.RoomJoinRequest{RoomID: f.room.ID})
+	f.drain("host")
+	f.send("host", protocol.TypeMatchAdmit, protocol.MatchAdmitRequest{MatchID: match.ID, UserID: late.ID})
+	if _, ok := findEnvelope(f.drain("host"), protocol.TypeMatchAdmitBegin); !ok {
+		t.Fatal("a late joiner that takes game options wasn't admitted to a match with a param")
+	}
+	// And the param can't change mid-match.
+	f.setGameOptions("host", protocol.RoomUpdateGameOptionsRequest{Options: []protocol.GameOption{
+		{ID: "stage-list", Label: "Stage list", Param: "STG-20GC-HPK0"},
+	}})
+	if len(f.room.GameOptions) != 2 || f.room.GameOptions[1].Param != competitiveCode {
+		t.Fatalf("game options changed mid-match: %+v", f.room.GameOptions)
+	}
+}
+
+func namedList(param string, preset *protocol.GameOptionPreset) protocol.RoomUpdateGameOptionsRequest {
+	return protocol.RoomUpdateGameOptionsRequest{Options: []protocol.GameOption{
+		{ID: "vanilla-css", Label: "Vanilla CSS"},
+		{ID: "stage-list", Label: "Stage list", Param: param, ParamPreset: preset},
+	}}
+}
+
+func TestGameOptionParamPresetsTravelWithTheParam(t *testing.T) {
+	f := newLateJoinFixture(t, 2)
+	f.gameOptionsUser("host")
+	f.gameOptionsUser("guest")
+	f.openRoom(2, "host", "guest")
+	for _, name := range []string{"host", "guest"} {
+		f.h.clients[f.users[name].ID] = f.client(name)
+	}
+	f.drain("guest")
+	f.sendNextRoomListAtOnce()
+	dreamLand := &protocol.GameOptionPreset{ID: "dream-land", Label: "Dream Land only"}
+	f.setGameOptions("host", namedList("STG-20GC-HPK0", dreamLand))
+	got := f.room.GameOptions
+	if len(got) != 2 || got[1].ParamPresetID != "dream-land" || got[1].ParamPresetLabel != "Dream Land only" ||
+		got[0].ParamPresetID != "" {
+		t.Fatalf("room options = %+v", got)
+	}
+	envs := f.drain("guest")
+	if st := roomStateFrom(t, envs); len(st.GameOptions) != 2 || st.GameOptions[1].ParamPreset == nil ||
+		*st.GameOptions[1].ParamPreset != *dreamLand || st.GameOptions[0].ParamPreset != nil {
+		t.Fatalf("guest room state options = %+v", st.GameOptions)
+	}
+	if list := roomListFrom(t, envs); len(list.Rooms) != 1 || len(list.Rooms[0].GameOptions) != 2 ||
+		list.Rooms[0].GameOptions[1].ParamPreset == nil || list.Rooms[0].GameOptions[1].ParamPreset.Label != "Dream Land only" {
+		t.Fatalf("room list = %+v", list.Rooms)
+	}
+	// Next to the param on the wire; options without one have none.
+	const wire = `"gameOptions":[{"id":"vanilla-css","label":"Vanilla CSS"},` +
+		`{"id":"stage-list","label":"Stage list","param":"STG-20GC-HPK0",` +
+		`"paramPreset":{"id":"dream-land","label":"Dream Land only"}}]`
+	if raw, _ := json.Marshal(roomStatePayload(f.room)); !strings.Contains(string(raw), wire) {
+		t.Fatalf("room state JSON: %s", raw)
+	}
+	if raw, _ := json.Marshal(f.h.buildRoomListPayload()); !strings.Contains(string(raw), wire) {
+		t.Fatalf("room list JSON: %s", raw)
+	}
+
+	// A host's saved list goes by its own id and name; a new name alone is a
+	// change everyone hears about, the same again isn't.
+	saved := &protocol.GameOptionPreset{ID: "user-0a1b2c3d", Label: "Weekly bracket"}
+	f.setGameOptions("host", namedList("STG-20GC-HPK0", saved))
+	if st := roomStateFrom(t, f.drain("guest")); st.GameOptions[1].ParamPreset == nil || *st.GameOptions[1].ParamPreset != *saved {
+		t.Fatalf("guest after a rename = %+v", st.GameOptions)
+	}
+	f.setGameOptions("host", namedList("STG-20GC-HPK0", saved))
+	if _, ok := findEnvelope(f.drain("guest"), protocol.TypeRoomState); ok {
+		t.Fatal("an unchanged name was rebroadcast")
+	}
+	// Dropping the name is a change too; the param stays.
+	f.setGameOptions("host", namedList("STG-20GC-HPK0", nil))
+	if got := f.room.GameOptions[1]; got.ParamPresetID != "" || got.ParamPresetLabel != "" || got.Param != "STG-20GC-HPK0" {
+		t.Fatalf("name not dropped: %+v", got)
+	}
+	if st := roomStateFrom(t, f.drain("guest")); st.GameOptions[1].ParamPreset != nil {
+		t.Fatalf("guest still has a name: %+v", st.GameOptions)
+	}
+	// The label is trimmed like a preset's.
+	f.setGameOptions("host", namedList("STG-20GC-HPK0", &protocol.GameOptionPreset{ID: "user-0a1b2c3d", Label: "  Weekly  "}))
+	if got := f.room.GameOptions[1].ParamPresetLabel; got != "Weekly" {
+		t.Fatalf("label = %q, want it trimmed", got)
+	}
+}
+
+func TestGameOptionParamPresetsAreChecked(t *testing.T) {
+	f := newLateJoinFixture(t, 2)
+	f.gameOptionsUser("host")
+	f.openRoom(2, "host")
+	good := namedList(competitiveCode, &protocol.GameOptionPreset{ID: "competitive", Label: "Competitive stages"})
+	f.setGameOptions("host", good)
+	kept := func(what string) {
+		t.Helper()
+		if len(f.room.GameOptions) != 2 || f.room.GameOptions[1].ParamPresetID != "competitive" ||
+			f.room.GameOptions[1].Param != competitiveCode {
+			t.Fatalf("%s: options now %+v", what, f.room.GameOptions)
+		}
+	}
+	kept("a good name")
+
+	bad := map[string]any{
+		"no param":          namedList("", &protocol.GameOptionPreset{ID: "dream-land", Label: "Dream Land only"}),
+		"no id":             namedList(competitiveCode, &protocol.GameOptionPreset{Label: "Competitive stages"}),
+		"upper-case id":     namedList(competitiveCode, &protocol.GameOptionPreset{ID: "Dream-Land", Label: "Dream Land only"}),
+		"33-character id":   namedList(competitiveCode, &protocol.GameOptionPreset{ID: strings.Repeat("a", gameOptionIDMax+1), Label: "x"}),
+		"no label":          namedList(competitiveCode, &protocol.GameOptionPreset{ID: "dream-land"}),
+		"blank label":       namedList(competitiveCode, &protocol.GameOptionPreset{ID: "dream-land", Label: "   "}),
+		"49-character name": namedList(competitiveCode, &protocol.GameOptionPreset{ID: "user-0a1b2c3d", Label: strings.Repeat("x", gameOptionLabelMax+1)}),
+		"two lines":         namedList(competitiveCode, &protocol.GameOptionPreset{ID: "user-0a1b2c3d", Label: "Weekly\nbracket"}),
+		"not an object": json.RawMessage(`{"options":[{"id":"stage-list","label":"Stage list",` +
+			`"param":"STG-220C-6YA8-2T5V-W0","paramPreset":"competitive"}]}`),
+	}
+	for name, req := range bad {
+		f.setGameOptions("host", req)
+		// Refused whole: the list the host had stays.
+		kept(name)
+	}
+	// At the label limit is fine.
+	f.setGameOptions("host", namedList(competitiveCode, &protocol.GameOptionPreset{ID: "user-0a1b2c3d", Label: strings.Repeat("ス", gameOptionLabelMax)}))
+	if got := f.room.GameOptions[1].ParamPresetLabel; got != strings.Repeat("ス", gameOptionLabelMax) {
+		t.Fatalf("a %d-character name was refused: %q", gameOptionLabelMax, got)
+	}
+
+	// It shows in the room, so it goes through the filter like a label.
+	f.setGameOptions("host", good)
+	f.h.mod = moderation.NewManager(moderation.NewFilter([]string{"badword"}), &moderation.AdminStore{}, "")
+	f.setGameOptions("host", namedList(competitiveCode, &protocol.GameOptionPreset{ID: "user-0a1b2c3d", Label: "badword list"}))
+	kept("a filtered name")
+	f.setGameOptions("host", namedList(competitiveCode, &protocol.GameOptionPreset{ID: "user-0a1b2c3d", Label: "Weekly bracket"}))
+	if got := f.room.GameOptions[1].ParamPresetLabel; got != "Weekly bracket" {
+		t.Fatalf("a clean name was refused: %+v", f.room.GameOptions)
+	}
+}
+
 // sendNextRoomListAtOnce lets the hub's next room list out straight away, as
 // if roomListMinIntervalMs had passed: the fixture's hub doesn't Run, so a
 // held-back list would never go out.
