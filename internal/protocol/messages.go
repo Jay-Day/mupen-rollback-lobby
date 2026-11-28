@@ -127,6 +127,9 @@ const (
 	TypeChallengeIncoming   = "CHALLENGE_INCOMING"
 	TypeChallengeResult     = "CHALLENGE_RESULT"
 	TypeChallengeGamesReply = "CHALLENGE_GAMES_REPLY"
+	// Tells a PC whose HELLO set challengeLog about a challenge it never saw:
+	// one refused as busy because the player it was for was in a match.
+	TypeChallengeMissed = "CHALLENGE_MISSED"
 	// Late join (server → client). MATCH_ADMIT_BEGIN goes to the match's
 	// players and the joiner; MATCH_ADMIT_FAIL answers a refused MATCH_ADMIT.
 	TypeMatchAdmitBegin = "MATCH_ADMIT_BEGIN"
@@ -281,6 +284,9 @@ type HelloRequest struct {
 	// PING_CHECK_* and ROOM_JOIN's PingMeasured. Without it the server holds
 	// ROOM_JOIN's PingMs to the room's limit as sent.
 	PingCheck bool `json:"pingCheck,omitempty"`
+	// Advertises that this client keeps a log of challenges, so it hears through
+	// CHALLENGE_MISSED of the ones refused while its players were in a match.
+	ChallengeLog bool `json:"challengeLog,omitempty"`
 }
 
 type HeartbeatRequest struct {
@@ -569,6 +575,8 @@ type HelloOKResponse struct {
 	// PingCheck tells the client ping checks (PING_CHECK_*, probe ICE_SIGNALs)
 	// work here.
 	PingCheck bool `json:"pingCheck,omitempty"`
+	// ChallengeLog tells the client CHALLENGE_MISSED is sent here.
+	ChallengeLog bool `json:"challengeLog,omitempty"`
 }
 
 type LocalPlayerAddedPayload struct {
@@ -848,6 +856,23 @@ type ChallengeResultPayload struct {
 	ChallengeID uint64 `json:"challengeId,omitempty"`
 	ToUserID    uint64 `json:"toUserId,omitempty"`
 	Result      string `json:"result"`
+}
+
+// ChallengeMissedPayload reaches the connection of the PC a challenge was for,
+// when the challenge was refused because that PC was in a match. ToUserID may
+// be a local player. Rom, Note, Invite and RoomName are what CHALLENGE_INCOMING
+// would have carried; for an invite, Rom is the room's game. Reason is
+// ChallengeBusy. The sender is only ever told busy.
+type ChallengeMissedPayload struct {
+	FromUserID   uint64  `json:"fromUserId"`
+	FromUsername string  `json:"fromUsername"`
+	ToUserID     uint64  `json:"toUserId"`
+	ToUsername   string  `json:"toUsername"`
+	Rom          RomInfo `json:"rom"`
+	Note         string  `json:"note,omitempty"`
+	Invite       bool    `json:"invite,omitempty"`
+	RoomName     string  `json:"roomName,omitempty"`
+	Reason       string  `json:"reason"`
 }
 
 // ChallengeGamesReply lists the sender's games, by MD5, that the player has too.

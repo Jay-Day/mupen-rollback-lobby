@@ -20,6 +20,9 @@ import (
 //
 // A challenge stays between two connections: anything that would reveal how many
 // players share a PC is reported to the sender as ChallengeUnavailable.
+//
+// A challenge to a player in a match is refused as busy. Their PC can still hear
+// of it afterwards through CHALLENGE_MISSED, which tells the sender nothing more.
 
 const (
 	challengeNoteMaxRunes = 80
@@ -30,6 +33,9 @@ const (
 	maxIncomingChallenges = 5
 	// How long before asking again someone who said no.
 	challengeCooldown = 60 * time.Second
+	// How long after one CHALLENGE_MISSED from a connection to a player before
+	// that player hears of another from it.
+	missedNoticeInterval = 60 * time.Second
 
 	challengeBurst  = 6
 	challengeWindow = time.Minute
@@ -57,12 +63,14 @@ type challengeManager struct {
 	nextID   uint64
 	pending  map[uint64]*challenge
 	declined map[[2]uint64]time.Time // sender's connection and the player asked → when
+	missed   map[[2]uint64]time.Time // sender's connection and the player told → last CHALLENGE_MISSED
 }
 
 func newChallengeManager() *challengeManager {
 	return &challengeManager{
 		pending:  make(map[uint64]*challenge),
 		declined: make(map[[2]uint64]time.Time),
+		missed:   make(map[[2]uint64]time.Time),
 	}
 }
 
@@ -147,6 +155,24 @@ func (m *challengeManager) inCooldown(from, to uint64, now time.Time) bool {
 	defer m.mu.Unlock()
 	at, ok := m.declined[[2]uint64{from, to}]
 	return ok && now.Sub(at) < challengeCooldown
+}
+
+// allowMissedNotice reports whether a CHALLENGE_MISSED from one connection may
+// reach one player now, and if so counts it as sent.
+func (m *challengeManager) allowMissedNotice(from, to uint64, now time.Time) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for key, at := range m.missed {
+		if now.Sub(at) >= missedNoticeInterval {
+			delete(m.missed, key)
+		}
+	}
+	key := [2]uint64{from, to}
+	if _, recent := m.missed[key]; recent {
+		return false
+	}
+	m.missed[key] = now
+	return true
 }
 
 // clipRunes cuts s to at most max runes.
@@ -241,7 +267,7 @@ func (h *Hub) handleChallengeSend(c *Client, env protocol.Envelope) {
 		return
 	}
 	if target.Primary().CurrentMatch != nil {
-		refuse(protocol.ChallengeBusy)
+		refuse(h.busyRefusal(c, target, req, now))
 		return
 	}
 	// Per player asked, not per PC: a no from one name mustn't show on another.
@@ -250,16 +276,10 @@ func (h *Hub) handleChallengeSend(c *Client, env protocol.Envelope) {
 		return
 	}
 
-	note := clipRunes(strings.TrimSpace(cleanText(req.Note)), challengeNoteMaxRunes)
-	if note != "" && h.mod != nil {
-		if term, hit := h.mod.FilterMessage(note); hit {
-			refuse(protocol.ChallengeBlocked)
-			slog.Info("challenge note blocked", "user", c.user.Username, "ip", c.ip, "term", term)
-			return
-		}
-		if _, muted := h.mod.IsMuted(c.ip); muted && !h.activeModerator(c) {
-			note = ""
-		}
+	note, ok := h.challengeNote(c, req.Note)
+	if !ok {
+		refuse(protocol.ChallengeBlocked)
+		return
 	}
 
 	ch := &challenge{from: c, to: target, note: note, liveReplay: req.LiveReplay}
@@ -277,21 +297,10 @@ func (h *Hub) handleChallengeSend(c *Client, env protocol.Envelope) {
 		incoming.RoomPlayers = players
 		incoming.RoomMax = maxPlayers
 	} else {
-		rom := protocol.RomInfo{
-			Name:   clipRunes(strings.TrimSpace(req.Rom.Name), romNameMaxRunes),
-			MD5:    clipRunes(strings.TrimSpace(req.Rom.MD5), romFieldMaxRunes),
-			Region: clipRunes(strings.TrimSpace(req.Rom.Region), romFieldMaxRunes),
-		}
-		if rom.Name == "" || rom.MD5 == "" {
+		rom, ok := h.challengeRom(c, req.Rom)
+		if !ok {
 			refuse(protocol.ChallengeUnavailable)
 			return
-		}
-		if h.mod != nil {
-			if term, hit := h.mod.FilterMessage(rom.Name); hit {
-				refuse(protocol.ChallengeUnavailable)
-				slog.Info("challenge game name blocked", "user", c.user.Username, "ip", c.ip, "term", term)
-				return
-			}
 		}
 		if len(c.user.Group())+len(target.Group()) > maxRoomPlayers {
 			refuse(protocol.ChallengeUnavailable)
@@ -339,6 +348,85 @@ func (h *Hub) handleChallengeSend(c *Client, env protocol.Envelope) {
 	incoming.ExpiresInMs = expires
 	incoming.PingPeerUserID = pingForRecipient
 	sendToUser(target, protocol.TypeChallengeIncoming, incoming)
+}
+
+// challengeNote cleans a challenge's note for its recipient. It reports false
+// when the note hits the chat filter. A muted sender's note is dropped.
+func (h *Hub) challengeNote(c *Client, raw string) (string, bool) {
+	note := clipRunes(strings.TrimSpace(cleanText(raw)), challengeNoteMaxRunes)
+	if note != "" && h.mod != nil {
+		if term, hit := h.mod.FilterMessage(note); hit {
+			slog.Info("challenge note blocked", "user", c.user.Username, "ip", c.ip, "term", term)
+			return "", false
+		}
+		if _, muted := h.mod.IsMuted(c.ip); muted && !h.activeModerator(c) {
+			note = ""
+		}
+	}
+	return note, true
+}
+
+// challengeRom is the game a challenge from outside a room proposes. It reports
+// false when the request names none or its name hits the chat filter.
+func (h *Hub) challengeRom(c *Client, req protocol.RomInfo) (protocol.RomInfo, bool) {
+	rom := protocol.RomInfo{
+		Name:   clipRunes(strings.TrimSpace(req.Name), romNameMaxRunes),
+		MD5:    clipRunes(strings.TrimSpace(req.MD5), romFieldMaxRunes),
+		Region: clipRunes(strings.TrimSpace(req.Region), romFieldMaxRunes),
+	}
+	if rom.Name == "" || rom.MD5 == "" {
+		return rom, false
+	}
+	if h.mod != nil {
+		if term, hit := h.mod.FilterMessage(rom.Name); hit {
+			slog.Info("challenge game name blocked", "user", c.user.Username, "ip", c.ip, "term", term)
+			return rom, false
+		}
+	}
+	return rom, true
+}
+
+// busyRefusal answers a challenge to a player in a match, returning the sender's
+// result: busy, or ChallengeBlocked for a filtered note, as for any challenge.
+// When the challenge passes the checks a real one would, and the target's PC
+// advertised challengeLog, that PC hears of it through CHALLENGE_MISSED, at most
+// once per missedNoticeInterval from each connection for each player. Nothing
+// in the sender's result depends on whether it did.
+func (h *Hub) busyRefusal(c *Client, target *state.User, req protocol.ChallengeSendRequest, now time.Time) string {
+	if h.challenges.inCooldown(c.user.ID, target.ID, now) {
+		return protocol.ChallengeBusy
+	}
+	note, ok := h.challengeNote(c, req.Note)
+	if !ok {
+		return protocol.ChallengeBlocked
+	}
+	missed := protocol.ChallengeMissedPayload{
+		FromUserID:   c.user.ID,
+		FromUsername: c.user.Username,
+		ToUserID:     target.ID,
+		ToUsername:   target.Username,
+		Note:         note,
+		Reason:       protocol.ChallengeBusy,
+	}
+	if room := c.user.CurrentRoom; room != nil {
+		_, _, name, _, _, _ := room.Snapshot()
+		missed.Rom = protocol.RomInfo{Name: room.RomName, MD5: room.RomMD5, Region: room.RomRegion}
+		missed.Invite = true
+		missed.RoomName = name
+	} else {
+		rom, ok := h.challengeRom(c, req.Rom)
+		if !ok {
+			return protocol.ChallengeBusy
+		}
+		missed.Rom = rom
+	}
+	if !target.Primary().ChallengeLog || !h.challenges.allowMissedNotice(c.user.ID, target.ID, now) {
+		return protocol.ChallengeBusy
+	}
+	slog.Info("challenge missed", "from", c.user.Username, "to", target.Username,
+		"rom", missed.Rom.Name, "invite", missed.Invite)
+	sendToUser(target, protocol.TypeChallengeMissed, missed)
+	return protocol.ChallengeBusy
 }
 
 func (h *Hub) handleChallengeCancel(c *Client, env protocol.Envelope) {

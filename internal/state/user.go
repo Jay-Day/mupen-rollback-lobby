@@ -47,6 +47,7 @@ type User struct {
 	// gameOptionsMax); 0 from clients that predate it, which take 8.
 	GameOptionsMax int
 	PingCheck      bool // measures ping over probe ICE agents outside a room (PING_CHECK_*)
+	ChallengeLog   bool // hears of challenges refused while in a match (CHALLENGE_MISSED)
 	// The PC doesn't take challenges. Set on the connection's owner only; its
 	// local players follow it (see ChallengesOff).
 	NoChallenges bool
