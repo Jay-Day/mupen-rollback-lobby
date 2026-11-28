@@ -844,7 +844,7 @@ func (h *Hub) handleChatSend(c *Client, env protocol.Envelope) {
 		h.logChat(c, req, payload.Message, modlog.Delivered)
 	case channelSpectate:
 		// A live replay's viewers, and the players of the match it shows.
-		if matchID, roomID, ok := h.broadcasts.spectatorChat(c, payload); ok {
+		if matchID, roomID, ok := h.broadcasts.spectatorChat(c, req.MatchID, payload); ok {
 			h.logChatIn(c, req, payload.Message, modlog.Delivered, roomID, matchID)
 		}
 	case channelPM:
@@ -853,7 +853,7 @@ func (h *Hub) handleChatSend(c *Client, env protocol.Envelope) {
 }
 
 // logChat records a message in the moderators' chat log: where it went (the
-// sender's room, with its running match, or the live replay they watch), and
+// sender's room, with its running match, or the live replay it's for), and
 // blocked when it didn't. Blocked lines are sampled per IP (blockedChatLog),
 // so a sender who's muted, filtered or flooding can't fill the disk.
 //
@@ -873,7 +873,7 @@ func (h *Hub) logChat(c *Client, req protocol.ChatSendRequest, text, blocked str
 			}
 		}
 	case channelSpectate:
-		matchID, roomID, _ = h.broadcasts.watching(c.user.ID)
+		matchID, roomID = h.broadcasts.chatTarget(c, req.MatchID)
 	}
 	h.logChatIn(c, req, text, blocked, roomID, matchID)
 }
