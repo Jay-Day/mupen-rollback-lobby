@@ -498,6 +498,100 @@ func TestKeyframeSpectateStreamHasContiguousLogicalOffsets(t *testing.T) {
 	}
 }
 
+func TestOneViewerWatchesTwoBroadcasts(t *testing.T) {
+	const matchA, matchB uint64 = 31, 32
+	hostA := &Client{user: &state.User{ID: 40, Username: "host-a", State: state.UserStatePlaying}, send: make(chan []byte, 64)}
+	hostB := &Client{user: &state.User{ID: 41, Username: "host-b", State: state.UserStatePlaying}, send: make(chan []byte, 64)}
+	viewer := &Client{user: &state.User{ID: 42, Username: "viewer", State: state.UserStateIdle}, send: make(chan []byte, 64)}
+	h := &Hub{clients: map[uint64]*Client{
+		hostA.user.ID:  hostA,
+		hostB.user.ID:  hostB,
+		viewer.user.ID: viewer,
+	}}
+	m := &broadcastManager{hub: h, dir: t.TempDir(), byMatch: make(map[uint64]*broadcast)}
+	h.broadcasts = m
+	if !m.begin(matchA, 1, hostA.user.ID, []uint64{hostA.user.ID}, "", false) ||
+		!m.begin(matchB, 2, hostB.user.ID, []uint64{hostB.user.ID}, "", false) {
+		t.Fatal("begin broadcasts")
+	}
+	t.Cleanup(func() {
+		m.endByMatch(matchA)
+		m.endByMatch(matchB)
+	})
+	write := func(host *Client, matchID uint64, data string, frame int) {
+		m.data(host.user.ID, matchID, base64.StdEncoding.EncodeToString([]byte(data)), frame)
+	}
+
+	// Each stream arrives whole and in order, with its own offsets.
+	got := map[uint64]string{}
+	began := map[uint64]bool{}
+	read := func(until func() bool) {
+		t.Helper()
+		deadline := time.After(3 * time.Second)
+		for !until() {
+			select {
+			case raw := <-viewer.send:
+				var env protocol.Envelope
+				if err := json.Unmarshal(raw, &env); err != nil {
+					t.Fatalf("decode envelope: %v", err)
+				}
+				switch env.Type {
+				case protocol.TypeSpectateBegin:
+					var p protocol.SpectateBeginPayload
+					json.Unmarshal(env.Data, &p)
+					began[p.MatchID] = true
+				case protocol.TypeSpectateData:
+					var p protocol.SpectateDataPayload
+					if err := json.Unmarshal(env.Data, &p); err != nil {
+						t.Fatal(err)
+					}
+					if !began[p.MatchID] || p.Offset != int64(len(got[p.MatchID])) {
+						t.Fatalf("match %d: data at offset %d after %d bytes (begun %v)",
+							p.MatchID, p.Offset, len(got[p.MatchID]), began[p.MatchID])
+					}
+					chunk, _ := base64.StdEncoding.DecodeString(p.Data)
+					got[p.MatchID] += string(chunk)
+				}
+			case <-deadline:
+				t.Fatalf("timed out; streams so far %v", got)
+			}
+		}
+	}
+
+	write(hostA, matchA, "a1.", 1)
+	write(hostB, matchB, "b1.", 1)
+	m.spectateStart(viewer, matchA)
+	m.spectateStart(viewer, matchB)
+	write(hostA, matchA, "a2.", 2)
+	write(hostB, matchB, "b2.", 2)
+	read(func() bool { return got[matchA] == "a1.a2." && got[matchB] == "b1.b2." })
+	waitUserState(t, viewer.user, state.UserStateSpectating)
+	if _, _, count := m.roomBroadcast(1); count != 1 {
+		t.Fatalf("match A viewers = %d", count)
+	}
+
+	// Closing one leaves the other streaming, and the viewer still spectating.
+	m.spectateStop(viewer.user.ID, matchA)
+	write(hostA, matchA, "a3.", 3)
+	write(hostB, matchB, "b3.", 3)
+	read(func() bool { return got[matchB] == "b1.b2.b3." })
+	time.Sleep(3 * spectateRetryInterval) // A's pump has exited
+	read(func() bool { return len(viewer.send) == 0 })
+	if got[matchA] != "a1.a2." {
+		t.Fatalf("match A kept streaming after stop: %q", got[matchA])
+	}
+	waitUserState(t, viewer.user, state.UserStateSpectating)
+	if _, _, count := m.roomBroadcast(1); count != 0 {
+		t.Fatalf("match A viewers after stop = %d", count)
+	}
+	if _, _, count := m.roomBroadcast(2); count != 1 {
+		t.Fatalf("match B viewers = %d", count)
+	}
+
+	m.spectateStop(viewer.user.ID, matchB)
+	waitUserState(t, viewer.user, state.UserStateIdle)
+}
+
 // queuedChat drains everything queued for c and returns its CHAT_MSG payloads.
 func queuedChat(t *testing.T, c *Client) []protocol.ChatMsgPayload {
 	t.Helper()

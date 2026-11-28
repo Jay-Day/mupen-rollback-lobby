@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jay-day/rmgk-lobby/internal/config"
@@ -84,7 +85,8 @@ type broadcastSpectator struct {
 	keyframeData  []byte
 	keyframeChunk int
 	beginSent     bool
-	stopped       bool // protected by broadcast.mu
+	stopped       bool   // protected by broadcast.mu
+	subscribed    uint64 // broadcastManager.subSeq at SPECTATE_START; orders a user's subscriptions
 
 	// An on-demand join waiting for a keyframe newer than waitSeq. Only
 	// SPECTATE_BEGIN goes out meanwhile, so the cursors above are untouched
@@ -141,6 +143,10 @@ type broadcastManager struct {
 	// presenceMu orders spectating-presence decisions, so one that scanned
 	// subscriptions before a newer change can't land after one that saw it.
 	presenceMu sync.Mutex
+
+	// subSeq numbers subscriptions, so spectator chat from an older client
+	// watching several streams has a stable one to go to.
+	subSeq atomic.Uint64
 }
 
 func newBroadcastManager(hub *Hub) *broadcastManager {
@@ -739,9 +745,10 @@ func (m *broadcastManager) spectateStart(c *Client, matchID uint64) {
 		stopBroadcastSpectator(old)
 	}
 	sc := &broadcastSpectator{
-		client: c,
-		done:   make(chan struct{}),
-		wake:   make(chan struct{}, 1),
+		client:     c,
+		done:       make(chan struct{}),
+		wake:       make(chan struct{}, 1),
+		subscribed: m.subSeq.Add(1),
 	}
 	mode := "full"
 	historyBytes := b.written
@@ -881,12 +888,13 @@ func (m *broadcastManager) spectateStop(userID, matchID uint64) {
 // viewers, the sender included so it echoes like room chat, and the match's
 // players, who can answer. A viewer whose client still says the players can't read
 // this keeps that promise: their lines reach the other viewers only. A sender who's
-// neither watching nor playing a match being broadcast is ignored.
+// neither watching nor playing a match being broadcast is ignored. toMatchID is
+// the match the line is for, zero when the client doesn't say (see chatBroadcastOf).
 //
 // It reports the match and room of the broadcast the line reached (for the
 // moderators' log), ok false when it went nowhere.
-func (m *broadcastManager) spectatorChat(c *Client, payload protocol.ChatMsgPayload) (matchID, roomID uint64, ok bool) {
-	b, fromPlayer := m.chatBroadcastOf(c)
+func (m *broadcastManager) spectatorChat(c *Client, toMatchID uint64, payload protocol.ChatMsgPayload) (matchID, roomID uint64, ok bool) {
+	b, fromPlayer := m.chatBroadcastOf(c, toMatchID)
 	if b == nil {
 		return 0, 0, false
 	}
@@ -906,31 +914,50 @@ func (m *broadcastManager) spectatorChat(c *Client, payload protocol.ChatMsgPayl
 		}
 	}
 	payload.FromPlayer = fromPlayer
+	payload.MatchID = b.matchID // a client watching several files the line under this one
 	for recipient := range recipients {
 		recipient.sendEnvelope(protocol.TypeChatMsg, "", payload)
 	}
 	return b.matchID, b.roomID, true
 }
 
-// chatBroadcastOf finds the broadcast whose chat c is on, and whether c is on it as
-// one of the match's players rather than as a viewer.
-func (m *broadcastManager) chatBroadcastOf(c *Client) (*broadcast, bool) {
+// chatBroadcastOf finds the broadcast whose chat c's line is for, and whether c is
+// on it as one of the match's players rather than as a viewer. A line naming its
+// match (toMatchID) goes there if c plays or watches it, and otherwise nowhere:
+// never to another stream c watches. One that doesn't, from an older client, goes
+// to the match c plays, else to the stream c subscribed to most recently, which
+// is the one an older client shows if it never stopped an earlier one.
+func (m *broadcastManager) chatBroadcastOf(c *Client, toMatchID uint64) (*broadcast, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if match := c.user.CurrentMatch; match != nil && c.user.SpectatorChat {
+	if match := c.user.CurrentMatch; match != nil && c.user.SpectatorChat && (toMatchID == 0 || toMatchID == match.ID) {
 		if b := m.byMatch[match.ID]; b != nil {
 			return b, true
 		}
 	}
-	for _, b := range m.byMatch {
+	if toMatchID != 0 {
+		b := m.byMatch[toMatchID]
+		if b == nil {
+			return nil, false
+		}
 		b.mu.Lock()
 		watching := b.spectators[c.user.ID] != nil
 		b.mu.Unlock()
-		if watching {
-			return b, false
+		if !watching {
+			return nil, false
 		}
+		return b, false
 	}
-	return nil, false
+	var latest *broadcast
+	var latestSub uint64
+	for _, b := range m.byMatch {
+		b.mu.Lock()
+		if sc := b.spectators[c.user.ID]; sc != nil && (latest == nil || sc.subscribed > latestSub) {
+			latest, latestSub = b, sc.subscribed
+		}
+		b.mu.Unlock()
+	}
+	return latest, false
 }
 
 // chatPlayersOf returns the connections playing b's match right now whose clients
@@ -953,27 +980,16 @@ func (m *broadcastManager) chatPlayersOf(b *broadcast) []*Client {
 	return out
 }
 
-// watching names a live broadcast userID is subscribed to, for the
-// moderators' log; ok is false when they watch none.
-func (m *broadcastManager) watching(userID uint64) (matchID, roomID uint64, ok bool) {
+// chatTarget names the broadcast a spectator-chat line from c would reach, for
+// the moderators' log of lines blocked before they were sent; zero for none.
+func (m *broadcastManager) chatTarget(c *Client, toMatchID uint64) (matchID, roomID uint64) {
 	if m == nil {
-		return 0, 0, false
+		return 0, 0
 	}
-	m.mu.Lock()
-	live := make([]*broadcast, 0, len(m.byMatch))
-	for _, b := range m.byMatch {
-		live = append(live, b)
+	if b, _ := m.chatBroadcastOf(c, toMatchID); b != nil {
+		return b.matchID, b.roomID
 	}
-	m.mu.Unlock()
-	for _, b := range live {
-		b.mu.Lock()
-		on := !b.closed && b.spectators[userID] != nil
-		b.mu.Unlock()
-		if on {
-			return b.matchID, b.roomID, true
-		}
-	}
-	return 0, 0, false
+	return 0, 0
 }
 
 // endByMatch ends a broadcast regardless of who triggered it (match is over).

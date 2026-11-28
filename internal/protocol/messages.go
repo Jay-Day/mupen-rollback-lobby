@@ -298,6 +298,9 @@ type ChatSendRequest struct {
 	// talking; zero means the connection's owner.
 	ToUserID uint64 `json:"toUserId,omitempty"`
 	AsUserID uint64 `json:"asUserId,omitempty"`
+	// Spectator chat only: which live replay's chat this is for, for a client
+	// watching several. Zero (older clients) means the one the server picks.
+	MatchID uint64 `json:"matchId,omitempty"`
 }
 
 type ChatHistoryRequest struct {
@@ -617,6 +620,9 @@ type ChatMsgPayload struct {
 	Admin bool `json:"admin,omitempty"`
 	// Spectator chat only: the sender is playing the match being watched.
 	FromPlayer bool `json:"fromPlayer,omitempty"`
+	// Spectator chat only: the match whose live replay the line belongs to,
+	// so a client watching several can file it under the right one.
+	MatchID uint64 `json:"matchId,omitempty"`
 	// Private messages only: who it's for. It may be a local player, whose
 	// owner's connection receives it.
 	ToUserID   uint64 `json:"toUserId,omitempty"`

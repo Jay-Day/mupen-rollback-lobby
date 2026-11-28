@@ -2,9 +2,11 @@ package ws
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/jay-day/rmgk-lobby/internal/moderation"
+	"github.com/jay-day/rmgk-lobby/internal/modlog"
 	"github.com/jay-day/rmgk-lobby/internal/protocol"
 	"github.com/jay-day/rmgk-lobby/internal/state"
 )
@@ -247,6 +249,134 @@ func TestPlayersAnswersObeyMuteAndFilter(t *testing.T) {
 	f.h.mod.MuteNamed("198.51.100.1", "mira", "mod", "", 0)
 	f.h.dispatch(mira, raw("hello"))
 	f.heardNothing("viewer")
+}
+
+func (f *lateJoinFixture) sayOnSpectatorChatIn(name string, matchID uint64, message string) {
+	f.t.Helper()
+	f.send(name, protocol.TypeChatSend, protocol.ChatSendRequest{Channel: channelSpectate, Message: message,
+		MatchID: matchID})
+}
+
+// heardOnlyBy checks everyone: the named heard message once, stamped with
+// matchID and fromPlayer, and nobody else heard anything.
+func (f *lateJoinFixture) heardOnlyBy(message string, matchID uint64, fromPlayer bool, names ...string) {
+	f.t.Helper()
+	want := map[string]bool{}
+	for _, name := range names {
+		want[name] = true
+	}
+	for name := range f.users {
+		if !want[name] {
+			f.heardNothing(name)
+			continue
+		}
+		if got := f.heardOnce(name, message); got.MatchID != matchID || got.FromPlayer != fromPlayer {
+			f.t.Fatalf("%s heard %+v, want match %d fromPlayer %v", name, got, matchID, fromPlayer)
+		}
+	}
+}
+
+// twoLiveReplays broadcasts two matches, mira and kart's (a) and sam and lin's
+// (b), with "both" watching both and onlyA and onlyB one each.
+func twoLiveReplays(t *testing.T) (f *lateJoinFixture, a, b *state.Match) {
+	f = newLateJoinFixture(t, 4)
+	for _, name := range []string{"mira", "kart", "sam", "lin", "both", "onlyA", "onlyB"} {
+		f.sharesSpectatorChat(name)
+	}
+	a = f.startMatch(2, "mira", "kart")
+	b = f.startMatch(2, "sam", "lin")
+	f.broadcasting(a)
+	f.broadcasting(b)
+	f.watch("both", a)
+	f.watch("both", b)
+	f.watch("onlyA", a)
+	f.watch("onlyB", b)
+	for name := range f.users {
+		f.drain(name)
+	}
+	return f, a, b
+}
+
+func TestSpectatorChatGoesToTheReplayItNames(t *testing.T) {
+	f, a, b := twoLiveReplays(t)
+
+	f.sayOnSpectatorChatIn("both", a.ID, "left screen")
+	f.heardOnlyBy("left screen", a.ID, false, "both", "onlyA", "mira", "kart")
+
+	f.sayOnSpectatorChatIn("both", b.ID, "right screen")
+	f.heardOnlyBy("right screen", b.ID, false, "both", "onlyB", "sam", "lin")
+
+	// Players answer on their own match's chat, which is stamped too.
+	f.sayOnSpectatorChatIn("sam", b.ID, "ty")
+	f.heardOnlyBy("ty", b.ID, true, "both", "onlyB", "sam", "lin")
+}
+
+func TestSpectatorChatForAReplayNotWatchedGoesNowhere(t *testing.T) {
+	f, a, b := twoLiveReplays(t)
+
+	// Never to the stream they do watch instead.
+	f.sayOnSpectatorChatIn("onlyA", b.ID, "wrong stream")
+	f.heardOnlyBy("wrong stream", 0, false)
+	// A player can't post into another match's replay by naming it.
+	f.sayOnSpectatorChatIn("mira", b.ID, "not my match")
+	f.heardOnlyBy("not my match", 0, false)
+	// Nor into a match that isn't being broadcast.
+	f.sayOnSpectatorChatIn("both", b.ID+100, "nowhere")
+	f.heardOnlyBy("nowhere", 0, false)
+
+	// Closing one leaves its chat, and only its chat.
+	f.h.broadcasts.spectateStop(f.users["both"].ID, a.ID)
+	f.sayOnSpectatorChatIn("both", a.ID, "closed it")
+	f.heardOnlyBy("closed it", 0, false)
+	f.sayOnSpectatorChatIn("both", b.ID, "still open")
+	f.heardOnlyBy("still open", b.ID, false, "both", "onlyB", "sam", "lin")
+}
+
+func TestSpectatorChatNamingNoReplayGoesToTheNewest(t *testing.T) {
+	f, a, b := twoLiveReplays(t)
+
+	// Older clients don't say. b was opened last, so it's the one they show.
+	f.sayOnSpectatorChat("both", "no id")
+	f.heardOnlyBy("no id", b.ID, false, "both", "onlyB", "sam", "lin")
+
+	// Opening a again makes it the newest.
+	f.watch("both", a)
+	f.sayOnSpectatorChat("both", "again")
+	f.heardOnlyBy("again", a.ID, false, "both", "onlyA", "mira", "kart")
+
+	// A player still talks to their own match's viewers, whatever they watch.
+	f.watch("mira", b)
+	f.sayOnSpectatorChat("mira", "from the match")
+	f.heardOnlyBy("from the match", a.ID, true, "both", "onlyA", "mira", "kart")
+
+	// The only viewer of one replay is unaffected.
+	f.sayOnSpectatorChat("onlyB", "one stream")
+	f.heardOnlyBy("one stream", b.ID, false, "both", "onlyB", "mira", "sam", "lin")
+}
+
+func TestModLogFilesSpectatorChatUnderTheReplayItNames(t *testing.T) {
+	f, a, b := twoLiveReplays(t)
+	logs := captureLogs(t)
+	log, _ := modlog.Open("")
+	f.h.SetModLog(log)
+	f.h.mod = moderation.NewManager(moderation.NewFilter([]string{"badword"}), &moderation.AdminStore{}, "")
+
+	f.sayOnSpectatorChatIn("both", b.ID, "nice")
+	f.sayOnSpectatorChatIn("both", a.ID, "a badword")
+	f.sayOnSpectatorChatIn("both", b.ID, "a badword")
+
+	chat := logs.lines("chat")
+	on := func(m *state.Match) []string {
+		return []string{"channel=spectate", fmt.Sprintf("room=%d ", m.RoomID), fmt.Sprintf("match=%d", m.ID)}
+	}
+	if !hasLine(chat, append(on(b), "text=nice")...) {
+		t.Fatalf("delivered line isn't filed under its replay: %q", chat)
+	}
+	for _, m := range []*state.Match{a, b} {
+		if !hasLine(chat, append(on(m), "blocked=filter")...) {
+			t.Fatalf("blocked line for match %d isn't filed under it: %q", m.ID, chat)
+		}
+	}
 }
 
 func TestLocalPlayersAddedLaterShareTheFlag(t *testing.T) {
