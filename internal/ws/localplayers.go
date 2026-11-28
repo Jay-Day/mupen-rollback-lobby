@@ -117,6 +117,7 @@ func (h *Hub) handleLocalPlayerAdd(c *Client, env protocol.Envelope) {
 		GameOptions:    owner.GameOptions,
 		GameOptionsMax: owner.GameOptionsMax,
 		PingCheck:      owner.PingCheck,
+		ChallengeLog:   owner.ChallengeLog,
 		PingToServer:   owner.PingToServer,
 		JoinedAt:       time.Now(),
 		LastSeen:       time.Now(),

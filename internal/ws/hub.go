@@ -402,6 +402,7 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		NoChallenges:  req.NoChallenges,
 		NoPrivateMessages: req.NoPrivateMessages,
 		PingCheck:     req.PingCheck,
+		ChallengeLog:  req.ChallengeLog,
 		JoinedAt:      time.Now(),
 		LastSeen:      time.Now(),
 		Send:          c.send,
@@ -434,6 +435,7 @@ func (h *Hub) handleHello(c *Client, env protocol.Envelope) error {
 		ChallengeSettings: true,
 		PMSettings:        true,
 		PingCheck:         true,
+		ChallengeLog:      true,
 	}
 	c.sendEnvelope(protocol.TypeHelloOK, env.ID, resp)
 
